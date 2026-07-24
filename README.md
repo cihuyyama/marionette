@@ -12,14 +12,65 @@ Named after *Lord of the Mysteries* marionettes: one controller, many puppet acc
 ## Status
 
 - [x] Project folder + handoff docs + design brief
-- [ ] Phase 1 — Cargo/Axum scaffold
-- [ ] Phase 2 — Grok CLI E2E (chat, refresh, 429 cooldown, import)
-- [ ] Phase 3 — Admin JSON API
-- [ ] Phase 4 — React+Vite dashboard (Impeccable, LoTM soft, dark-only)
-- [ ] Phase 5 — Qoder auth + chat
+- [x] Phase 1 — Cargo/Axum scaffold
+- [x] Phase 2 — Grok CLI (code complete; live smoke needs tokens)
+- [x] Phase 3 — Admin JSON API
+- [x] Phase 4 — React+Vite dashboard (`web/`)
+- [ ] Phase 5 — Qoder auth + chat (stub only; port from etteeum)
 - [ ] Phase 6 — Deploy polish
 
 **Order is intentional:** Grok complete → admin API → dashboard → **then** Qoder.
+
+## How to run
+
+### Backend
+
+```bash
+# From repo root
+cp .env.example .env   # then set real keys (never commit .env)
+cargo run
+```
+
+Env keys (see `.env.example`):
+
+| Variable | Role |
+|----------|------|
+| `MARIONETTE_HOST` / `MARIONETTE_PORT` | Bind (default `0.0.0.0:1940`) |
+| `MARIONETTE_DB` | SQLite path (default `./data/marionette.sqlite`) |
+| `MARIONETTE_API_KEY` | Pool chat key (`Authorization: Bearer …` on `/v1/*`) |
+| `MARIONETTE_ADMIN_KEY` | Admin API key (separate from pool key) |
+| `MARIONETTE_CORS_ORIGIN` | Vite origin (default `http://localhost:5173`) |
+| `RUST_LOG` | Tracing filter |
+
+```bash
+# Health / models
+curl http://127.0.0.1:1940/health
+curl -H "Authorization: Bearer $MARIONETTE_API_KEY" http://127.0.0.1:1940/v1/models
+```
+
+### Import accounts
+
+```bash
+cargo run --bin marionette-import -- --file path/to/tokens.json --provider grok-cli
+cargo run --bin marionette-import -- --from-9router path/to/9router/data.sqlite
+```
+
+### Dashboard
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Vite proxies to Axum on `:1940`. Set admin key in Settings (stored in browser only; never commit tokens).
+
+### Tests
+
+```bash
+cargo test
+cargo build --release
+```
 
 ## Quick context for agents
 

@@ -208,45 +208,45 @@ Grok full → Admin API → React+Vite dashboard (Impeccable + LoTM soft) → **
 - [x] Folder + handoff docs
 - [x] Plan: dashboard before Qoder; design brief `docs/DESIGN.md`
 
-### Phase 1 — skeleton (Rust)
-- [ ] `cargo init`
-- [ ] Axum server
-- [ ] `/health`, `/v1/models` (hardcoded `gcli/*`; `qd/*` placeholders OK, chat may 501)
-- [ ] Config from env
-- [ ] SQLite migrations for `accounts`, `api_keys`
-- [ ] Provider trait + `grok_cli` stub
-- [ ] Compile on Windows
+### Phase 1 — skeleton (Rust) — done
+- [x] `cargo init`
+- [x] Axum server
+- [x] `/health`, `/v1/models` (hardcoded `gcli/*`; `qd/*` placeholders OK, chat may 501)
+- [x] Config from env
+- [x] SQLite migrations for `accounts`, `api_keys`
+- [x] Provider trait + `grok_cli` stub
+- [x] Compile on Windows
 
-### Phase 2 — Grok CLI E2E (complete before UI)
-- [ ] Import script from 9Router SQLite or farm JSON
-- [ ] Non-stream chat completion
-- [ ] Stream SSE OpenAI-compatible
-- [ ] Token refresh (`auth.x.ai`) + persist rotated refresh
-- [ ] 429 cooldown ~25h; 401 refresh; 402/403 disable
-- [ ] Pool pick: active + not cooling
-- [ ] Smoke test with ≥1 real account (non-stream + stream)
+### Phase 2 — Grok CLI E2E — code complete (live smoke needs tokens)
+- [x] Import script from 9Router SQLite or farm JSON (`marionette-import`)
+- [x] Non-stream chat completion
+- [x] Stream SSE OpenAI-compatible
+- [x] Token refresh (`auth.x.ai`) + persist rotated refresh
+- [x] 429 cooldown ~25h; 401 refresh; 402/403 disable
+- [x] Pool pick: active + not cooling
+- [ ] Smoke test with ≥1 real account (non-stream + stream) — needs live tokens
 
-**Exit gate:** curl with pool key + `gcli/grok-4.5` works end-to-end.
+**Exit gate:** curl with pool key + `gcli/grok-4.5` works end-to-end (code path ready; run when tokens available).
 
-### Phase 3 — Admin JSON API (required for dashboard)
-- [ ] `GET /admin/accounts` (filter provider/status; **mask tokens**)
-- [ ] `GET /admin/accounts/:id`
-- [ ] `PATCH /admin/accounts/:id` (active, priority, clear cooldown)
-- [ ] `POST /admin/accounts/:id/refresh`
-- [ ] `DELETE` or soft-disable account
-- [ ] `GET /admin/stats`
-- [ ] Import: CLI primary; optional `POST /admin/accounts/import` for UI
-- [ ] Admin key auth + CORS for Vite dev origin
-- [ ] Never return full OAuth secrets in JSON
+### Phase 3 — Admin JSON API — done
+- [x] `GET /admin/accounts` (filter provider/status; **mask tokens**)
+- [x] `GET /admin/accounts/:id`
+- [x] `PATCH /admin/accounts/:id` (active, priority, clear cooldown)
+- [x] `POST /admin/accounts/:id/refresh`
+- [x] `DELETE` or soft-disable account
+- [x] `GET /admin/stats`
+- [x] Import: CLI primary; optional `POST /admin/accounts/import` for UI
+- [x] Admin key auth + CORS for Vite dev origin
+- [x] Never return full OAuth secrets in JSON
 
-### Phase 4 — Dashboard (React + Vite)
+### Phase 4 — Dashboard (React + Vite) — done (`web/`)
 Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 
-- [ ] **4a** Impeccable init/shape → `web/PRODUCT.md`, pin `docs/DESIGN.md` / `web/DESIGN.md`
-- [ ] **4b** Vite + React + TS scaffold; design tokens (dark-only LoTM soft)
-- [ ] **4c** App shell (sidebar English ops labels)
-- [ ] **4d** Screens: Overview, Accounts, Import, Smoke test, Settings
-- [ ] **4e** Polish / a11y / visual-qa
+- [x] **4a** Impeccable init/shape → `web/PRODUCT.md`, pin `docs/DESIGN.md` / `web/DESIGN.md`
+- [x] **4b** Vite + React + TS scaffold; design tokens (dark-only LoTM soft)
+- [x] **4c** App shell (sidebar English ops labels)
+- [x] **4d** Screens: Overview, Accounts, Import, Smoke test, Settings
+- [ ] **4e** Polish / a11y / visual-qa (optional follow-up)
 
 **Nav labels (English ops only):**  
 `Overview` · `Accounts` · `Import` · `Smoke test` · `Settings`
@@ -256,17 +256,19 @@ Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 - Dark only  
 - Operate mode (dense admin tool first)
 
-### Phase 5 — Qoder
+### Phase 5 — Qoder (stub only; not ported)
 - [ ] Port auth from etteeum `qoder.ts` (do not invent)
 - [ ] Non-stream then stream
 - [ ] Import accounts
 - [ ] Model aliases (`qd/lite`, etc.)
 - [ ] Dashboard: provider filter + smoke models for qoder
 
+`src/providers/qoder.rs` returns Phase 5 not-implemented errors until full port.
+
 ### Phase 6 — Deploy polish
 - [ ] Serve `web/dist` from Axum (or nginx)
 - [ ] systemd unit for VPS
-- [ ] README run / import / UI
+- [ ] README run / import / UI (partial: README how-to-run added)
 
 ---
 
@@ -377,4 +379,4 @@ After Phase 2–3, dashboard work must use Impeccable + `docs/DESIGN.md`.
 
 ---
 
-**End of handoff.** Update this file when Phase 1+ completes.
+**End of handoff.** Phases 1–4 code-complete as of 2026-07-25; next is live Grok smoke (tokens) then Phase 5 Qoder.
