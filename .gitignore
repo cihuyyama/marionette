@@ -1,0 +1,36 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Secrets & data
+.env
+.env.*
+!.env.example
+data/*.sqlite
+data/*.sqlite-*
+data/*.db
+**/*token*
+**/*secret*
+**/accounts*.json
+!docs/**
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Dashboard
+web/node_modules/
+web/dist/
+web/.vite/
+
+
+# Added by cargo
+
+/target

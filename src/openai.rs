@@ -1,0 +1,94 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(default)]
+    pub content: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+impl ChatCompletionRequest {
+    pub fn stream_enabled(&self) -> bool {
+        self.stream.unwrap_or(false)
+    }
+
+    pub fn upstream_model(&self) -> &str {
+        // gcli/grok-4.5 -> grok-4.5 ; qd/lite -> lite
+        if let Some((_, rest)) = self.model.split_once('/') {
+            rest
+        } else {
+            &self.model
+        }
+    }
+
+    pub fn provider_id(&self) -> Option<&'static str> {
+        if self.model.starts_with("gcli/") || self.model.starts_with("grok") {
+            Some("grok-cli")
+        } else if self.model.starts_with("qd/") || self.model.starts_with("qoder") {
+            Some("qoder")
+        } else if self.model.contains("grok") {
+            Some("grok-cli")
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelObject {
+    pub id: String,
+    pub object: &'static str,
+    pub owned_by: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelsResponse {
+    pub object: &'static str,
+    pub data: Vec<ModelObject>,
+}
+
+pub fn default_models() -> ModelsResponse {
+    let ids = [
+        ("gcli/grok-4.5", "grok-cli"),
+        ("gcli/grok-4.5-high", "grok-cli"),
+        ("gcli/grok-4.5-medium", "grok-cli"),
+        ("gcli/grok-4.5-low", "grok-cli"),
+        ("gcli/grok-4", "grok-cli"),
+        ("gcli/grok-4-fast-reasoning", "grok-cli"),
+        ("gcli/grok-code-fast-1", "grok-cli"),
+        ("gcli/grok-3", "grok-cli"),
+        ("qd/lite", "qoder"),
+        ("qd/Lite", "qoder"),
+        ("qd/qmodel_latest", "qoder"),
+    ];
+    ModelsResponse {
+        object: "list",
+        data: ids
+            .into_iter()
+            .map(|(id, owner)| ModelObject {
+                id: id.into(),
+                object: "model",
+                owned_by: owner,
+            })
+            .collect(),
+    }
+}
