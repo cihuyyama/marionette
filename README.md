@@ -23,37 +23,40 @@ Named after *Lord of the Mysteries* marionettes: one controller, many puppet acc
 
 ## How to run
 
-### Quick start (npm scripts)
+Requires [just](https://github.com/casey/just) (`cargo install just` or `winget install Casey.Just`).
 
-```powershell
+### Quick start
+
+```bash
 # 1. Copy env and set real keys (never commit .env)
 cp .env.example .env
 
-# 2. Install web deps (first time only)
-npm run setup
+# 2. First-time setup: build backend + install web deps
+just setup
 
-# 3. Dev mode: backend + frontend concurrent (Ctrl+C to stop both)
-npm run dev
+# 3. Dev mode: backend + frontend concurrent (Ctrl+C stops both)
+just dev
 ```
 
-This runs `cargo run` (Axum on `:1940`) + `cd web && npm run dev` (Vite on `:5173`) concurrently.
+`just dev` runs `cargo run` (Axum on `:1940`) + `cd web && npm run dev` (Vite on `:5173`) concurrently.
 Vite proxies API calls to Axum automatically.
 
-### All scripts
+### All commands
 
 | Command | What it does |
 |---------|-------------|
-| `npm run dev` | Run backend + frontend concurrently (dev mode) |
-| `npm run dev:api` | Backend only (`cargo run`) |
-| `npm run dev:web` | Frontend only (`cd web && npm run dev`) |
-| `npm run build` | Build everything: `cargo build --release` + `cd web && npm run build` |
-| `npm run build:api` | `cargo build --release` |
-| `npm run build:web` | `cd web && npm run build` |
-| `npm test` | `cargo test` |
-| `npm run import` | Import accounts: `cargo run --bin marionette-import` |
-| `npm run setup` | Install web deps: `cd web && npm install` |
-| `npm run serve` | Production: `cargo run --release` (serves `web/dist` if `MARIONETTE_STATIC_DIR` set) |
-| `npm run clean` | Clean build artifacts (`cargo clean` + `cd web && rm -rf dist`) |
+| `just dev` | Run backend + frontend concurrently (dev mode) |
+| `just dev-backend` | Backend only (`cargo run`) |
+| `just dev-frontend` | Frontend only (`cd web && npm run dev`) |
+| `just build` | Build everything: `cargo build --release` + `cd web && npm run build` |
+| `just test` | `cargo test` |
+| `just preflight` | Build + test (run before deploy) |
+| `just setup` | First-time: build backend + `cd web && npm install` + copy `.env` |
+| `just clean` | Remove `target/` + `web/dist` + `web/node_modules` |
+| `just health` | Curl `/health` against running server |
+| `just models` | List models (requires pool key in `.env`) |
+| `just import-json <file>` | Import accounts from JSON |
+| `just import-9router <db>` | Import from 9Router SQLite |
 
 ### Env keys (see `.env.example`)
 
@@ -71,13 +74,10 @@ Vite proxies API calls to Axum automatically.
 
 ```bash
 # From JSON file
-npm run import -- --file path/to/tokens.json --provider grok-cli
+just import-json path/to/tokens.json
 
 # From 9Router SQLite
-npm run import -- --from-9router path/to/9router/data.sqlite
-
-# Or directly
-cargo run --bin marionette-import -- --file path/to/tokens.json --provider grok-cli
+just import-9router path/to/9router/data.sqlite
 ```
 
 ### Manual curl
