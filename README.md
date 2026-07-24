@@ -16,8 +16,8 @@ Named after *Lord of the Mysteries* marionettes: one controller, many puppet acc
 - [x] Phase 2 — Grok CLI (code complete; live smoke needs tokens)
 - [x] Phase 3 — Admin JSON API
 - [x] Phase 4 — React+Vite dashboard (`web/`)
-- [ ] Phase 5 — Qoder auth + chat (stub only; port from etteeum)
-- [ ] Phase 6 — Deploy polish
+- [x] Phase 5 — Qoder auth + chat (ported from etteeum; live smoke needs tokens)
+- [x] Phase 6 — Deploy polish (runbook, static serve, tests)
 
 **Order is intentional:** Grok complete → admin API → dashboard → **then** Qoder.
 

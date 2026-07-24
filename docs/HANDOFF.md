@@ -256,14 +256,15 @@ Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 - Dark only  
 - Operate mode (dense admin tool first)
 
-### Phase 5 — Qoder (stub only; not ported)
-- [ ] Port auth from etteeum `qoder.ts` (do not invent)
-- [ ] Non-stream then stream
-- [ ] Import accounts
-- [ ] Model aliases (`qd/lite`, etc.)
-- [ ] Dashboard: provider filter + smoke models for qoder
+### Phase 5 — Qoder — code complete (live smoke needs tokens)
+- [x] Port auth from etteeum `qoder.ts` (jobToken exchange + COSY bearer)
+- [x] Non-stream + stream chat
+- [x] AES-128-CBC + RSA-1024 crypto (faithful port)
+- [x] Model aliases (`qd/lite`, `qd/auto`, `qd/ultimate`, etc.)
+- [ ] Import accounts (CLI stub ready; needs real Qoder PATs)
+- [ ] Live smoke test with real Qoder PAT
 
-`src/providers/qoder.rs` returns Phase 5 not-implemented errors until full port.
+`src/providers/qoder.rs` implements full COSY auth + chat flow.
 
 ### Phase 6 — Deploy polish
 - [ ] Serve `web/dist` from Axum (or nginx)
