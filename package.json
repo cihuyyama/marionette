@@ -1,0 +1,21 @@
+{
+  "name": "marionette",
+  "version": "0.1.0",
+  "description": "Rust OpenAI-compatible proxy pool (grok-cli + qoder) with LoTM dashboard",
+  "private": true,
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:backend": "cargo run",
+    "dev:frontend": "cd web && npm run dev",
+    "build": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "build:backend": "cargo build --release",
+    "build:frontend": "cd web && npm run build",
+    "test": "cargo test",
+    "import": "cargo run --bin marionette-import --",
+    "import:9router": "cargo run --bin marionette-import -- --from-9router",
+    "import:json": "cargo run --bin marionette-import -- --file",
+    "setup": "powershell -ExecutionPolicy Bypass -File scripts/setup.ps1",
+    "clean": "powershell -ExecutionPolicy Bypass -File scripts/clean.ps1",
+    "preflight": "cargo build && cd web && npm run build"
+  }
+}

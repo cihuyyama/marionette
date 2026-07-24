@@ -23,15 +23,39 @@ Named after *Lord of the Mysteries* marionettes: one controller, many puppet acc
 
 ## How to run
 
-### Backend
+### Quick start (npm scripts)
 
-```bash
-# From repo root
-cp .env.example .env   # then set real keys (never commit .env)
-cargo run
+```powershell
+# 1. Copy env and set real keys (never commit .env)
+cp .env.example .env
+
+# 2. Install web deps (first time only)
+npm run setup
+
+# 3. Dev mode: backend + frontend concurrent (Ctrl+C to stop both)
+npm run dev
 ```
 
-Env keys (see `.env.example`):
+This runs `cargo run` (Axum on `:1940`) + `cd web && npm run dev` (Vite on `:5173`) concurrently.
+Vite proxies API calls to Axum automatically.
+
+### All scripts
+
+| Command | What it does |
+|---------|-------------|
+| `npm run dev` | Run backend + frontend concurrently (dev mode) |
+| `npm run dev:api` | Backend only (`cargo run`) |
+| `npm run dev:web` | Frontend only (`cd web && npm run dev`) |
+| `npm run build` | Build everything: `cargo build --release` + `cd web && npm run build` |
+| `npm run build:api` | `cargo build --release` |
+| `npm run build:web` | `cd web && npm run build` |
+| `npm test` | `cargo test` |
+| `npm run import` | Import accounts: `cargo run --bin marionette-import` |
+| `npm run setup` | Install web deps: `cd web && npm install` |
+| `npm run serve` | Production: `cargo run --release` (serves `web/dist` if `MARIONETTE_STATIC_DIR` set) |
+| `npm run clean` | Clean build artifacts (`cargo clean` + `cd web && rm -rf dist`) |
+
+### Env keys (see `.env.example`)
 
 | Variable | Role |
 |----------|------|
@@ -40,37 +64,31 @@ Env keys (see `.env.example`):
 | `MARIONETTE_API_KEY` | Pool chat key (`Authorization: Bearer …` on `/v1/*`) |
 | `MARIONETTE_ADMIN_KEY` | Admin API key (separate from pool key) |
 | `MARIONETTE_CORS_ORIGIN` | Vite origin (default `http://localhost:5173`) |
+| `MARIONETTE_STATIC_DIR` | Serve `web/dist` from Axum (prod, optional) |
 | `RUST_LOG` | Tracing filter |
-
-```bash
-# Health / models
-curl http://127.0.0.1:1940/health
-curl -H "Authorization: Bearer $MARIONETTE_API_KEY" http://127.0.0.1:1940/v1/models
-```
 
 ### Import accounts
 
 ```bash
+# From JSON file
+npm run import -- --file path/to/tokens.json --provider grok-cli
+
+# From 9Router SQLite
+npm run import -- --from-9router path/to/9router/data.sqlite
+
+# Or directly
 cargo run --bin marionette-import -- --file path/to/tokens.json --provider grok-cli
-cargo run --bin marionette-import -- --from-9router path/to/9router/data.sqlite
 ```
 
-### Dashboard
+### Manual curl
 
 ```bash
-cd web
-npm install
-npm run dev
+curl http://127.0.0.1:1940/health
+curl -H "Authorization: Bearer $MARIONETTE_API_KEY" http://127.0.0.1:1940/v1/models
+curl -H "Authorization: Bearer $MARIONETTE_ADMIN_KEY" http://127.0.0.1:1940/admin/stats
 ```
 
-Vite proxies to Axum on `:1940`. Set admin key in Settings (stored in browser only; never commit tokens).
-
-### Tests
-
-```bash
-cargo test
-cargo build --release
-```
+Set admin key in dashboard Settings (stored in browser only; never commit tokens).
 
 ## Quick context for agents
 
