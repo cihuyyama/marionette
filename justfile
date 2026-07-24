@@ -67,6 +67,16 @@ clean:
     cd web && rm -rf dist node_modules
     @echo "Cleaned target/ + web/dist + web/node_modules"
 
+# ── Production ──────────────────────────────────────
+
+# Run production server (binary + static dist if built)
+prod:
+    MARIONETTE_STATIC_DIR=./web/dist ./target/release/marionette
+
+# Build then run production
+deploy: build
+    MARIONETTE_STATIC_DIR=./web/dist ./target/release/marionette
+
 # ── Quick smoke ──────────────────────────────────────
 
 # Quick health check against running server
