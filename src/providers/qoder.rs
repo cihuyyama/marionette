@@ -87,32 +87,15 @@ fn rsa_encrypt_key(temp_key: &[u8]) -> Result<Vec<u8>, ProviderError> {
 }
 
 fn aes_128_cbc_encrypt(plain: &[u8], key: &[u8]) -> Result<Vec<u8>, ProviderError> {
-    use aes::cipher::{BlockEncrypt, KeyInit};
     use aes::Aes128;
+    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    type Aes128CbcEnc = cbc::Encryptor<Aes128>;
     if key.len() != 16 {
         return Err(ProviderError::Other("AES key must be 16 bytes".into()));
     }
-    let mut padded = plain.to_vec();
-    let pad_len = 16 - (padded.len() % 16);
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-    let cipher = Aes128::new_from_slice(key)
+    let encryptor = Aes128CbcEnc::new_from_slices(key, key)
         .map_err(|e| ProviderError::Other(format!("AES init: {e}")))?;
-    let mut result = Vec::with_capacity(padded.len());
-    // qodercli: IV == key (not zero IV)
-    let mut prev = [0u8; 16];
-    prev.copy_from_slice(key);
-    for chunk in padded.chunks(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        for i in 0..16 {
-            block[i] ^= prev[i];
-        }
-        let mut gblock = aes::cipher::generic_array::GenericArray::from_mut_slice(&mut block);
-        cipher.encrypt_block(&mut gblock);
-        result.extend_from_slice(&block);
-        prev = block;
-    }
-    Ok(result)
+    Ok(encryptor.encrypt_padded_vec_mut::<Pkcs7>(plain))
 }
 
 struct ModelCfg {
@@ -224,9 +207,10 @@ struct QoderTokens {
     machine_id: String,
     machine_token: String,
     machine_type: String,
+    machine_backfilled: bool,
 }
 
-    impl QoderTokens {
+impl QoderTokens {
     fn effective_data(data: &Value) -> Value {
         let mut out = serde_json::Map::new();
         if let Some(obj) = data.as_object() {
@@ -291,6 +275,12 @@ struct QoderTokens {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| mid.clone());
+        let had_machine = data
+            .get("machineId")
+            .or_else(|| data.get("machine_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
         Ok(Self {
             personal_token: pt,
             security_oauth_token: data
@@ -331,6 +321,7 @@ struct QoderTokens {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "5".into()),
+            machine_backfilled: !had_machine,
         })
     }
     fn to_data(&self) -> Value {
@@ -509,6 +500,7 @@ impl Provider for QoderProvider {
     async fn ensure_fresh_auth(&self, account: &mut Account) -> Result<(), ProviderError> {
         let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
         let mut tokens = QoderTokens::from_data(&data)?;
+        let mut dirty = tokens.machine_backfilled;
 
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         let expired = tokens
@@ -539,6 +531,12 @@ impl Provider for QoderProvider {
             if let Some(ut) = job.user_type {
                 tokens.user_type = Some(ut);
             }
+            if let Some(exp) = job.expire_time {
+                tokens.expire_time = Some(exp);
+            }
+            dirty = true;
+        }
+        if dirty {
             account.data = tokens.to_data().to_string();
         }
         Ok(())
@@ -852,17 +850,28 @@ impl Provider for QoderProvider {
             let mut upstream_stream = resp.bytes_stream();
             let mut stream_eof_partial = false;
 
-            while let Some(chunk_res) = upstream_stream.next().await {
-                let chunk = match chunk_res {
-                    Ok(c) => c,
-                    Err(e) => {
+            const IDLE_SECS: u64 = 45;
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(IDLE_SECS),
+                    upstream_stream.next(),
+                )
+                .await
+                {
+                    Ok(Some(Ok(chunk))) => {
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                    Ok(Some(Err(e))) => {
                         let chain = Self::format_reqwest_err(&e);
-                        if Self::is_chunked_eof(&e) && !buffer.is_empty() {
+                        if (Self::is_chunked_eof(&e)
+                            || chain.contains("unexpected internal error"))
+                            && !buffer.is_empty()
+                        {
                             tracing::warn!(
                                 error = %chain,
                                 ctx = %decode_ctx,
                                 buffer_len = buffer.len(),
-                                "qoder non-stream chunked EOF; using partial SSE body"
+                                "qoder non-stream body error; using partial SSE body"
                             );
                             stream_eof_partial = true;
                             break;
@@ -871,8 +880,22 @@ impl Provider for QoderProvider {
                             "qoder sse body decode: {chain} ({decode_ctx})"
                         )));
                     }
-                };
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    Ok(None) => break,
+                    Err(_) => {
+                        if buffer.is_empty() {
+                            return Err(ProviderError::Transport(format!(
+                                "qoder sse idle timeout {IDLE_SECS}s with empty body ({decode_ctx}) — upstream accepted request but never streamed tokens"
+                            )));
+                        }
+                        tracing::warn!(
+                            ctx = %decode_ctx,
+                            buffer_len = buffer.len(),
+                            "qoder non-stream idle timeout; using partial SSE body"
+                        );
+                        stream_eof_partial = true;
+                        break;
+                    }
+                }
             }
 
             for line in buffer.lines() {
@@ -1085,8 +1108,24 @@ fn estimate_tokens(text: &str) -> i64 {
     n.max(1)
 }
 
+fn load_chat_template() -> Option<Value> {
+    const RAW: &str = include_str!("qoder-baseprompt.json");
+    let mut s = RAW.to_string();
+    for _ in 0..5 {
+        s = s.replacen("{UUID1}", &Uuid::new_v4().to_string(), 1);
+        s = s.replacen("{UUID2}", &Uuid::new_v4().to_string(), 1);
+        s = s.replacen("{UUID3}", &Uuid::new_v4().to_string(), 1);
+        s = s.replacen("{UUID4}", &Uuid::new_v4().to_string(), 1);
+        s = s.replacen("{UUID5}", &Uuid::new_v4().to_string(), 1);
+    }
+    s = s.replace("{TIME1}", &format!("{}", chrono::Utc::now().timestamp_millis()));
+    serde_json::from_str(&s).ok()
+}
+
 fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
     let prompt = extract_user_text(req);
+    let mut body = load_chat_template().unwrap_or_else(|| json!({}));
+
     let mut messages: Vec<Value> = Vec::new();
     let has_system = req.messages.iter().any(|m| m.role == "system");
     if !has_system {
@@ -1112,65 +1151,72 @@ fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
         .unwrap_or("")
         .to_string();
     let max_tokens = req.max_tokens.unwrap_or(32_768);
-    let req_id = Uuid::new_v4().to_string();
-    let chat_record_id = Uuid::new_v4().to_string();
     let session_id = derive_session_id(&req.messages);
-    json!({
-        "request_id": req_id,
-        "request_set_id": Uuid::new_v4().to_string(),
-        "chat_record_id": chat_record_id,
-        "session_id": session_id,
-        "stream": true,
-        "chat_task": "FREE_INPUT",
-        "is_reply": true,
-        "is_retry": false,
-        "source": 1,
-        "version": "3",
-        "session_type": "qodercli",
-        "agent_id": "agent_common",
-        "task_id": "common",
-        "code_language": "",
-        "chat_prompt": "",
-        "image_urls": null,
-        "aliyun_user_type": "",
-        "system": system_text,
-        "messages": messages,
-        "tools": [],
-        "parameters": { "max_tokens": max_tokens },
-        "chat_context": {
-            "chatPrompt": "",
-            "imageUrls": null,
-            "extra": {
-                "context": [],
-                "modelConfig": {
-                    "key": cfg.key,
-                    "is_reasoning": cfg.is_reasoning
-                },
-                "originalContent": { "type": "text", "text": prompt }
-            },
-            "features": [],
-            "text": { "type": "text", "text": prompt }
-        },
-        "model_config": {
-            "key": cfg.key,
-            "display_name": cfg.display_name,
-            "model": "",
-            "format": "openai",
-            "is_vl": cfg.is_vl,
-            "is_reasoning": cfg.is_reasoning,
-            "api_key": "",
-            "url": "",
-            "source": "system",
-            "max_input_tokens": cfg.max_input_tokens
-        },
-        "business": {
-            "product": "cli",
-            "version": COSY_VERSION,
-            "type": "agent",
-            "id": Uuid::new_v4().to_string(),
-            "name": prompt.chars().take(30).collect::<String>(),
-            "begin_at": chrono::Utc::now().timestamp_millis(),
-            "stage": "start"
-        }
-    })
+
+    body["request_id"] = json!(Uuid::new_v4().to_string());
+    body["request_set_id"] = json!(Uuid::new_v4().to_string());
+    body["chat_record_id"] = json!(Uuid::new_v4().to_string());
+    body["session_id"] = json!(session_id);
+    body["stream"] = json!(true);
+    body["chat_task"] = json!("FREE_INPUT");
+    body["is_reply"] = json!(true);
+    body["is_retry"] = json!(false);
+    body["source"] = json!(1);
+    body["version"] = json!("3");
+    body["session_type"] = json!("qodercli");
+    body["agent_id"] = json!("agent_common");
+    body["task_id"] = json!("common");
+    body["code_language"] = json!("");
+    body["chat_prompt"] = json!("");
+    body["image_urls"] = Value::Null;
+    body["aliyun_user_type"] = json!("");
+    body["system"] = json!(system_text);
+    body["messages"] = json!(messages);
+    body["tools"] = json!([]);
+    body["parameters"] = json!({ "max_tokens": max_tokens });
+
+    if !body.get("chat_context").map(|v| v.is_object()).unwrap_or(false) {
+        body["chat_context"] = json!({});
+    }
+    body["chat_context"]["chatPrompt"] = json!("");
+    body["chat_context"]["imageUrls"] = Value::Null;
+    body["chat_context"]["features"] = json!([]);
+    body["chat_context"]["text"] = json!({ "type": "text", "text": prompt });
+    if !body["chat_context"]
+        .get("extra")
+        .map(|v| v.is_object())
+        .unwrap_or(false)
+    {
+        body["chat_context"]["extra"] = json!({});
+    }
+    body["chat_context"]["extra"]["context"] = json!([]);
+    body["chat_context"]["extra"]["originalContent"] =
+        json!({ "type": "text", "text": prompt });
+    body["chat_context"]["extra"]["modelConfig"] = json!({
+        "key": cfg.key,
+        "is_reasoning": cfg.is_reasoning
+    });
+
+    body["model_config"] = json!({
+        "key": cfg.key,
+        "display_name": cfg.display_name,
+        "model": "",
+        "format": "openai",
+        "is_vl": cfg.is_vl,
+        "is_reasoning": cfg.is_reasoning,
+        "api_key": "",
+        "url": "",
+        "source": "system",
+        "max_input_tokens": cfg.max_input_tokens
+    });
+    body["business"] = json!({
+        "product": "cli",
+        "version": COSY_VERSION,
+        "type": "agent",
+        "id": Uuid::new_v4().to_string(),
+        "name": prompt.chars().take(30).collect::<String>(),
+        "begin_at": chrono::Utc::now().timestamp_millis(),
+        "stage": "start"
+    });
+    body
 }
