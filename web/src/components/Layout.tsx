@@ -1,11 +1,14 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { getHealth } from "../lib/api";
-import { loadSettings } from "../lib/settings";
+import { loadSettings, clearAdminKey } from "../lib/settings";
 
 const NAV = [
   { to: "/", label: "Overview", end: true },
   { to: "/accounts", label: "Accounts" },
+  { to: "/models", label: "Models" },
+  { to: "/activity", label: "Activity" },
+  { to: "/setup", label: "Setup" },
   { to: "/import", label: "Import" },
   { to: "/smoke", label: "Smoke test" },
   { to: "/settings", label: "Settings" },
@@ -39,6 +42,19 @@ export function Layout() {
         <div className="sidebar-brand">
           <h1>Marionette</h1>
           <p>Proxy pool</p>
+          <div className="conn" style={{ marginTop: "var(--space-2)" }}>
+            <span
+              className={`dot ${conn === "ok" ? "ok" : conn === "err" ? "err" : ""}`}
+              aria-hidden
+            />
+            <span>
+              {conn === "ok"
+                ? "API reachable"
+                : conn === "err"
+                  ? "API offline"
+                  : "Checking…"}
+            </span>
+          </div>
         </div>
         <nav className="nav" aria-label="Primary">
           {NAV.map((item) => (
@@ -54,19 +70,17 @@ export function Layout() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <div className="conn">
-            <span
-              className={`dot ${conn === "ok" ? "ok" : conn === "err" ? "err" : ""}`}
-              aria-hidden
-            />
-            <span>
-              {conn === "ok"
-                ? "API reachable"
-                : conn === "err"
-                  ? "API offline"
-                  : "Checking…"}
-            </span>
-          </div>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => {
+              clearAdminKey();
+              window.dispatchEvent(new Event("marionette-unauthorized"));
+            }}
+            style={{ width: "100%" }}
+          >
+            Logout
+          </button>
         </div>
       </aside>
       <main className="main">

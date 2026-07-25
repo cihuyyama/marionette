@@ -1,0 +1,840 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import {
+  ApiError,
+  deleteAccount,
+  listAccounts,
+  patchAccount,
+  refreshAccount,
+  type Account,
+} from "../lib/api";
+import { StatusChip } from "../components/StatusChip";
+import { isProviderId, labelProvider } from "../lib/providers";
+import { statusTooltip } from "../lib/status";
+
+type StatusFilter = "all" | "bound" | "sealed" | "cut" | "fallen" | "inactive";
+type SortKey = "email" | "status" | "cooldown" | "last_used" | "active";
+type SortDir = "asc" | "desc";
+
+const STATUS_PILLS: { id: StatusFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "bound", label: "Bound" },
+  { id: "sealed", label: "Sealed" },
+  { id: "cut", label: "Cut" },
+  { id: "fallen", label: "Fallen" },
+  { id: "inactive", label: "Inactive" },
+];
+
+const PER_PAGE = 25;
+
+export function AccountList() {
+  const { provider: rawProvider } = useParams<{ provider: string }>();
+  const navigate = useNavigate();
+  const provider = isProviderId(rawProvider) ? rawProvider : null;
+
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [detail, setDetail] = useState<Account | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("email");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [page, setPage] = useState(1);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const load = useCallback(async () => {
+    if (!provider) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await listAccounts({ provider });
+      setAccounts(res.accounts);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Failed to load accounts",
+      );
+      setAccounts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [provider]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds(new Set());
+    setDetail(null);
+    setSearch("");
+    setStatusFilter("all");
+  }, [provider]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter]);
+
+  useEffect(() => {
+    if (!message) return;
+    const t = window.setTimeout(() => setMessage(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [message]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(accounts.map((a) => a.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [accounts]);
+
+  async function withBusy(id: string, fn: () => Promise<void>, okMsg?: string) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await fn();
+      await load();
+      if (okMsg) setMessage(okMsg);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Action failed",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  }
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let rows = accounts.filter((a) => {
+      if (statusFilter === "inactive") return !a.is_active;
+      if (statusFilter !== "all") {
+        return (a.status || "").toLowerCase() === statusFilter;
+      }
+      return true;
+    });
+    if (q) {
+      rows = rows.filter((a) => {
+        const email = (a.email ?? "").toLowerCase();
+        const name = (a.name ?? "").toLowerCase();
+        const id = a.id.toLowerCase();
+        const err = (a.last_error ?? "").toLowerCase();
+        return (
+          email.includes(q) ||
+          name.includes(q) ||
+          id.includes(q) ||
+          err.includes(q)
+        );
+      });
+    }
+    rows = [...rows].sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "email":
+          cmp = (a.email ?? a.name ?? a.id).localeCompare(
+            b.email ?? b.name ?? b.id,
+          );
+          break;
+        case "status":
+          cmp = (a.status || "").localeCompare(b.status || "");
+          break;
+        case "cooldown": {
+          const ta = a.cooldown_until
+            ? new Date(a.cooldown_until).getTime()
+            : 0;
+          const tb = b.cooldown_until
+            ? new Date(b.cooldown_until).getTime()
+            : 0;
+          cmp = ta - tb;
+          break;
+        }
+        case "last_used": {
+          const ta = a.last_used_at ? new Date(a.last_used_at).getTime() : 0;
+          const tb = b.last_used_at ? new Date(b.last_used_at).getTime() : 0;
+          cmp = ta - tb;
+          break;
+        }
+        case "active":
+          cmp = Number(a.is_active) - Number(b.is_active);
+          break;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [accounts, search, statusFilter, sortKey, sortDir]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  const pageSafe = Math.min(page, pageCount);
+  const pageRows = filtered.slice(
+    (pageSafe - 1) * PER_PAGE,
+    pageSafe * PER_PAGE,
+  );
+
+  const filteredIds = useMemo(() => filtered.map((a) => a.id), [filtered]);
+  const selectedVisible = filteredIds.filter((id) => selectedIds.has(id)).length;
+  const allVisibleSelected =
+    filteredIds.length > 0 && selectedVisible === filteredIds.length;
+  const someVisibleSelected =
+    selectedVisible > 0 && !allVisibleSelected;
+
+  const activeCount = accounts.filter((a) => a.is_active).length;
+  const inactiveCount = accounts.length - activeCount;
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        for (const id of filteredIds) next.delete(id);
+      } else {
+        for (const id of filteredIds) next.add(id);
+      }
+      return next;
+    });
+  }
+
+  if (!provider) {
+    return <Navigate to="/accounts" replace />;
+  }
+
+  const providerId = provider;
+
+  async function handleBulkDelete() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${ids.length} ${labelProvider(providerId)} account(s)? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    setError(null);
+    try {
+      let deleted = 0;
+      for (const id of ids) {
+        await deleteAccount(id);
+        deleted += 1;
+        if (detail?.id === id) setDetail(null);
+      }
+      setSelectedIds(new Set());
+      setMessage(`Deleted ${deleted} account(s)`);
+      await load();
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Bulk delete failed",
+      );
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleToggleAll(enable: boolean) {
+    const targets = accounts.filter((a) => a.is_active !== enable);
+    if (targets.length === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      for (const a of targets) {
+        await patchAccount(a.id, { is_active: enable });
+      }
+      setMessage(
+        enable
+          ? `Enabled ${targets.length} account(s)`
+          : `Disabled ${targets.length} account(s)`,
+      );
+      await load();
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Bulk toggle failed",
+      );
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <header className="page-header">
+        <div className="page-header-row">
+          <div className="page-header-title">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => navigate("/accounts")}
+              aria-label="Back to Accounts"
+            >
+              ←
+            </button>
+            <div>
+              <h1>{labelProvider(providerId)}</h1>
+              <p className="subtitle">
+                {accounts.length} accounts · {activeCount} active
+              </p>
+            </div>
+          </div>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void load()}
+              disabled={loading || bulkBusy}
+            >
+              {loading ? <span className="spinner inline-spinner" /> : null}
+              Refresh
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={bulkBusy || inactiveCount === 0}
+              onClick={() => void handleToggleAll(true)}
+            >
+              Enable all ({inactiveCount})
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={bulkBusy || activeCount === 0}
+              onClick={() => void handleToggleAll(false)}
+            >
+              Disable all ({activeCount})
+            </button>
+            <Link to="/import" className="btn btn-sm btn-primary">
+              Import
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      {error && (
+        <div className="alert alert-error" role="alert">
+          {error}
+        </div>
+      )}
+      {message && (
+        <div className="alert alert-ok" role="status">
+          {message}
+        </div>
+      )}
+
+      <div className="toolbar list-toolbar">
+        <div className="search-field">
+          <input
+            type="search"
+            className="input"
+            placeholder="Search email, id, error…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search accounts"
+          />
+        </div>
+        <div className="status-pills" role="tablist" aria-label="Status filter">
+          {STATUS_PILLS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="tab"
+              aria-selected={statusFilter === p.id}
+              className={`status-pill${statusFilter === p.id ? " active" : ""}`}
+              onClick={() => setStatusFilter(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {selectedIds.size > 0 && (
+        <div className="bulk-bar">
+          <span>
+            {selectedIds.size} selected
+          </span>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIds(new Set())}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              disabled={bulkBusy}
+              onClick={() => void handleBulkDelete()}
+            >
+              {bulkBusy ? "Deleting…" : `Delete (${selectedIds.size})`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!loading && filtered.length === 0 ? (
+        <div className="panel empty">
+          <p className="flavor">No threads in this filter.</p>
+          <p>
+            {accounts.length === 0
+              ? "Import accounts for this provider."
+              : "Try another status or search."}
+          </p>
+          {accounts.length === 0 && (
+            <Link to="/import" className="btn btn-primary">
+              Open Import
+            </Link>
+          )}
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th className="col-check">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible"
+                    checked={allVisibleSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someVisibleSelected;
+                    }}
+                    onChange={toggleSelectAllVisible}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Email"
+                    active={sortKey === "email"}
+                    dir={sortDir}
+                    onClick={() => handleSort("email")}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Status"
+                    active={sortKey === "status"}
+                    dir={sortDir}
+                    onClick={() => handleSort("status")}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Active"
+                    active={sortKey === "active"}
+                    dir={sortDir}
+                    onClick={() => handleSort("active")}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Cooldown"
+                    active={sortKey === "cooldown"}
+                    dir={sortDir}
+                    onClick={() => handleSort("cooldown")}
+                  />
+                </th>
+                <th>
+                  <SortHeader
+                    label="Last used"
+                    active={sortKey === "last_used"}
+                    dir={sortDir}
+                    onClick={() => handleSort("last_used")}
+                  />
+                </th>
+                <th>Error</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pageRows.map((a) => {
+                const busy = busyId === a.id || bulkBusy;
+                const selected = selectedIds.has(a.id);
+                return (
+                  <tr
+                    key={a.id}
+                    className={`${selected ? "row-selected" : ""}${
+                      a.is_active ? "" : " row-inactive"
+                    }`}
+                  >
+                    <td className="col-check">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${a.email ?? a.id}`}
+                        checked={selected}
+                        onChange={() => toggleSelect(a.id)}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm email-link"
+                        onClick={() => setDetail(a)}
+                        title={a.id}
+                      >
+                        {a.email ?? a.name ?? (
+                          <span className="mono muted">
+                            {a.id.slice(0, 8)}…
+                          </span>
+                        )}
+                      </button>
+                      {a.last_error && (
+                        <div
+                          className="row-error-hint"
+                          title={a.last_error}
+                        >
+                          {a.last_error}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <StatusChip
+                        status={a.status}
+                        channeling={busyId === a.id}
+                        title={statusTooltip(a)}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={a.is_active}
+                        className={`toggle${a.is_active ? " on" : ""}`}
+                        disabled={busy}
+                        title={
+                          a.is_active
+                            ? "Click to disable"
+                            : "Click to enable"
+                        }
+                        onClick={() =>
+                          void withBusy(
+                            a.id,
+                            async () => {
+                              await patchAccount(a.id, {
+                                is_active: !a.is_active,
+                              });
+                            },
+                            a.is_active ? "Disabled" : "Enabled",
+                          )
+                        }
+                      >
+                        <span className="toggle-knob" />
+                      </button>
+                    </td>
+                    <td className="mono muted nowrap">
+                      {a.cooldown_until
+                        ? formatShort(a.cooldown_until)
+                        : "—"}
+                    </td>
+                    <td className="mono muted nowrap">
+                      {a.last_used_at ? formatShort(a.last_used_at) : "—"}
+                    </td>
+                    <td
+                      className="truncate muted"
+                      title={a.last_error ?? undefined}
+                    >
+                      {a.last_error ?? "—"}
+                    </td>
+                    <td>
+                      <div className="actions-cell">
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          disabled={busy}
+                          title="Refresh auth"
+                          onClick={() =>
+                            void withBusy(
+                              a.id,
+                              async () => {
+                                await refreshAccount(a.id);
+                              },
+                              "Auth refreshed",
+                            )
+                          }
+                        >
+                          Auth
+                        </button>
+                        {a.cooldown_until && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Clear cooldown"
+                            onClick={() =>
+                              void withBusy(
+                                a.id,
+                                async () => {
+                                  await patchAccount(a.id, {
+                                    clear_cooldown: true,
+                                  });
+                                },
+                                "Cooldown cleared",
+                              )
+                            }
+                          >
+                            CD
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-danger"
+                          disabled={busy}
+                          title="Delete"
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Delete account ${a.email ?? a.id}? This cannot be undone.`,
+                              )
+                            ) {
+                              return;
+                            }
+                            void withBusy(
+                              a.id,
+                              async () => {
+                                await deleteAccount(a.id);
+                                if (detail?.id === a.id) setDetail(null);
+                                setSelectedIds((prev) => {
+                                  if (!prev.has(a.id)) return prev;
+                                  const next = new Set(prev);
+                                  next.delete(a.id);
+                                  return next;
+                                });
+                              },
+                              "Deleted",
+                            );
+                          }}
+                        >
+                          Del
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filtered.length > PER_PAGE && (
+            <div className="pagination">
+              <span className="muted">
+                {(pageSafe - 1) * PER_PAGE + 1}–
+                {Math.min(pageSafe * PER_PAGE, filtered.length)} of{" "}
+                {filtered.length}
+              </span>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={pageSafe <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  Prev
+                </button>
+                <span className="muted">
+                  {pageSafe}/{pageCount}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={pageSafe >= pageCount}
+                  onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {detail && (
+        <>
+          <div
+            className="drawer-backdrop"
+            onClick={() => setDetail(null)}
+          />
+          <aside className="drawer" role="dialog" aria-label="Account detail">
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <div>
+                <h2>{detail.email ?? detail.name ?? "Account"}</h2>
+                <p className="meta mono">{detail.id}</p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setDetail(null)}
+              >
+                Close
+              </button>
+            </div>
+            <StatusChip status={detail.status} title={statusTooltip(detail)} />
+            <dl className="kv" style={{ marginTop: 16 }}>
+              <dt>Provider</dt>
+              <dd className="mono">{detail.provider}</dd>
+              <dt>Active</dt>
+              <dd>{detail.is_active ? "true" : "false"}</dd>
+              <dt>Priority</dt>
+              <dd>{detail.priority}</dd>
+              <dt>Cooldown</dt>
+              <dd className="mono">{detail.cooldown_until ?? "—"}</dd>
+              <dt>Last used</dt>
+              <dd className="mono">{detail.last_used_at ?? "—"}</dd>
+              <dt>Last error</dt>
+              <dd>{detail.last_error ?? "—"}</dd>
+              <dt>Created</dt>
+              <dd className="mono">{detail.created_at}</dd>
+              <dt>Updated</dt>
+              <dd className="mono">{detail.updated_at}</dd>
+            </dl>
+            <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              Token fields (masked by API)
+            </p>
+            <pre className="response">
+              {JSON.stringify(detail.data, null, 2)}
+            </pre>
+            <div className="btn-row" style={{ marginTop: 16 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() =>
+                  void withBusy(
+                    detail.id,
+                    async () => {
+                      const updated = await patchAccount(detail.id, {
+                        is_active: !detail.is_active,
+                      });
+                      setDetail(updated);
+                    },
+                    detail.is_active ? "Disabled" : "Enabled",
+                  )
+                }
+              >
+                {detail.is_active ? "Disable" : "Enable"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() =>
+                  void withBusy(
+                    detail.id,
+                    async () => {
+                      const updated = await refreshAccount(detail.id);
+                      setDetail(updated);
+                    },
+                    "Auth refreshed",
+                  )
+                }
+              >
+                Refresh auth
+              </button>
+              {detail.cooldown_until && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() =>
+                    void withBusy(
+                      detail.id,
+                      async () => {
+                        const updated = await patchAccount(detail.id, {
+                          clear_cooldown: true,
+                        });
+                        setDetail(updated);
+                      },
+                      "Cooldown cleared",
+                    )
+                  }
+                >
+                  Clear cooldown
+                </button>
+              )}
+            </div>
+          </aside>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SortHeader({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className="th-sort" onClick={onClick}>
+      {label}
+      <span className="th-sort-icon" aria-hidden>
+        {active ? (dir === "asc" ? "↑" : "↓") : "↕"}
+      </span>
+    </button>
+  );
+}
+
+function formatShort(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}

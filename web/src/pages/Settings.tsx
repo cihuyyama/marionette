@@ -1,14 +1,52 @@
-import { useState, type FormEvent } from "react";
-import { ApiError, getHealth, getStats } from "../lib/api";
-import { loadSettings, saveSettings, type Settings } from "../lib/settings";
+import { useEffect, useState, type FormEvent } from "react";
+import { ApiError, getConnection, getHealth, getStats } from "../lib/api";
+import {
+  applyPoolKeyFromServer,
+  loadSettings,
+  saveSettings,
+  type Settings,
+} from "../lib/settings";
 
 export function SettingsPage() {
   const [form, setForm] = useState<Settings>(() => loadSettings());
   const [saved, setSaved] = useState(false);
+  const [synced, setSynced] = useState(false);
   const [healthOut, setHealthOut] = useState<string | null>(null);
   const [statsOut, setStatsOut] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [testing, setTesting] = useState<"health" | "stats" | null>(null);
+  const [testing, setTesting] = useState<"health" | "stats" | "sync" | null>(
+    null,
+  );
+
+  useEffect(() => {
+    void syncFromServer(false);
+  }, []);
+
+  async function syncFromServer(showBanner: boolean) {
+    setTesting("sync");
+    setError(null);
+    try {
+      const conn = await getConnection(form);
+      const next = applyPoolKeyFromServer(conn.pool_key);
+      setForm(next);
+      if (showBanner) {
+        setSynced(true);
+        window.setTimeout(() => setSynced(false), 2500);
+      }
+    } catch (e) {
+      if (showBanner) {
+        setError(
+          e instanceof ApiError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : "Could not sync pool key from server",
+        );
+      }
+    } finally {
+      setTesting(null);
+    }
+  }
 
   function onSave(e: FormEvent) {
     e.preventDefault();
@@ -77,6 +115,11 @@ export function SettingsPage() {
           Saved to localStorage.
         </div>
       )}
+      {synced && (
+        <div className="alert alert-ok" role="status">
+          Pool key synced from server .env (MARIONETTE_API_KEY).
+        </div>
+      )}
 
       <form className="panel" onSubmit={onSave}>
         <div className="field">
@@ -90,7 +133,8 @@ export function SettingsPage() {
             autoComplete="off"
           />
           <span className="hint">
-            Default targets the Vite proxy in dev. Use a full URL for remote Marionette.
+            Default targets the Vite proxy in dev. Use a full URL for remote
+            Marionette.
           </span>
         </div>
         <div className="field">
@@ -100,24 +144,45 @@ export function SettingsPage() {
             className="input mono"
             type="password"
             value={form.adminKey}
-            onChange={(e) => setForm((f) => ({ ...f, adminKey: e.target.value }))}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, adminKey: e.target.value }))
+            }
             placeholder="MARIONETTE_ADMIN_KEY"
             autoComplete="off"
           />
-          <span className="hint">Bearer for /admin/* — never commit this value.</span>
+          <span className="hint">
+            Bearer for /admin/* — never commit this value.
+          </span>
         </div>
         <div className="field">
-          <label htmlFor="pool-key">Pool key</label>
-          <input
-            id="pool-key"
-            className="input mono"
-            type="password"
-            value={form.poolKey}
-            onChange={(e) => setForm((f) => ({ ...f, poolKey: e.target.value }))}
-            placeholder="MARIONETTE_API_KEY"
-            autoComplete="off"
-          />
-          <span className="hint">Bearer for /v1/* smoke tests.</span>
+          <label htmlFor="pool-key">Pool key (from .env)</label>
+          <div className="btn-row" style={{ alignItems: "stretch" }}>
+            <input
+              id="pool-key"
+              className="input mono"
+              type="password"
+              value={form.poolKey}
+              readOnly
+              placeholder="synced from MARIONETTE_API_KEY"
+              autoComplete="off"
+              style={{ flex: 1 }}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={testing !== null}
+              onClick={() => void syncFromServer(true)}
+            >
+              {testing === "sync" ? (
+                <span className="spinner inline-spinner" />
+              ) : null}
+              Sync from server
+            </button>
+          </div>
+          <span className="hint">
+            Auto-loaded from MARIONETTE_API_KEY after admin login. Used for
+            /v1/* (smoke, Setup snippets).
+          </span>
         </div>
         <div className="btn-row">
           <button type="submit" className="btn btn-primary">
@@ -129,7 +194,9 @@ export function SettingsPage() {
             disabled={testing !== null}
             onClick={() => void testHealth()}
           >
-            {testing === "health" ? <span className="spinner inline-spinner" /> : null}
+            {testing === "health" ? (
+              <span className="spinner inline-spinner" />
+            ) : null}
             Test health
           </button>
           <button
@@ -138,7 +205,9 @@ export function SettingsPage() {
             disabled={testing !== null}
             onClick={() => void testStats()}
           >
-            {testing === "stats" ? <span className="spinner inline-spinner" /> : null}
+            {testing === "stats" ? (
+              <span className="spinner inline-spinner" />
+            ) : null}
             Test stats
           </button>
         </div>

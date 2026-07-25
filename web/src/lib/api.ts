@@ -98,6 +98,9 @@ async function request<T>(
   const res = await fetch(apiUrl(path, s.baseUrl), { ...rest, headers });
   const body = await parseBody(res);
   if (!res.ok) {
+    if (res.status === 401 && auth === "admin" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("marionette-unauthorized"));
+    }
     throw new ApiError(
       errMessage(body, `${res.status} ${res.statusText}`),
       res.status,
@@ -117,6 +120,18 @@ export function getHealth(settings?: Settings) {
 
 export function getStats(settings?: Settings) {
   return request<PoolStats>("/admin/stats", { auth: "admin" }, settings);
+}
+
+export type ConnectionInfo = {
+  host: string;
+  port: number;
+  base_url: string;
+  pool_key: string;
+  cors_origin: string;
+};
+
+export function getConnection(settings?: Settings) {
+  return request<ConnectionInfo>("/admin/connection", { auth: "admin" }, settings);
 }
 
 export function listAccounts(
@@ -194,6 +209,111 @@ export function listModels(settings?: Settings) {
   return request<{ object: string; data: ModelObject[] }>(
     "/v1/models",
     { auth: "pool" },
+    settings,
+  );
+}
+
+export function listAdminModels(settings?: Settings) {
+  return request<{ object: string; data: ModelObject[] }>(
+    "/admin/models",
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export type RequestLog = {
+  id: string;
+  created_at: string;
+  provider: string;
+  model: string | null;
+  status: string;
+  stream: boolean;
+  duration_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  account_id: string | null;
+  account_email: string | null;
+  error_message: string | null;
+};
+
+export type UsageSummary = {
+  requests: number;
+  success: number;
+  errors: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  by_model: {
+    model: string;
+    provider: string;
+    requests: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  }[];
+};
+
+export function listRequests(
+  params?: { provider?: string; limit?: number },
+  settings?: Settings,
+) {
+  const q = new URLSearchParams();
+  if (params?.provider) q.set("provider", params.provider);
+  if (params?.limit != null) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return request<{ requests: RequestLog[] }>(
+    `/admin/requests${qs ? `?${qs}` : ""}`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function getUsage(settings?: Settings) {
+  return request<UsageSummary>("/admin/usage", { auth: "admin" }, settings);
+}
+
+export type LoadBalanceStrategy =
+  | "round_robin"
+  | "sequential"
+  | "least_used"
+  | "priority"
+  | "random";
+
+export type ProviderSetting = {
+  provider: string;
+  load_balance: LoadBalanceStrategy | string;
+  load_balance_label: string;
+  sticky_account_id: string | null;
+  rr_cursor: string | null;
+  updated_at: string;
+};
+
+export type LoadBalanceOption = {
+  id: LoadBalanceStrategy | string;
+  label: string;
+  hint: string;
+};
+
+export function listProviderSettings(settings?: Settings) {
+  return request<{
+    providers: ProviderSetting[];
+    strategies: LoadBalanceOption[];
+  }>("/admin/providers", { auth: "admin" }, settings);
+}
+
+export function patchProviderLoadBalance(
+  provider: string,
+  load_balance: string,
+  settings?: Settings,
+) {
+  return request<ProviderSetting>(
+    `/admin/providers/${encodeURIComponent(provider)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ load_balance }),
+      auth: "admin",
+    },
     settings,
   );
 }
