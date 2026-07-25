@@ -24,6 +24,9 @@ pub struct PatchBody {
     pub clear_cooldown: Option<bool>,
     pub name: Option<String>,
     pub email: Option<String>,
+    pub quota_limit: Option<i64>,
+    pub quota_remaining: Option<i64>,
+    pub reset_quota: Option<bool>,
 }
 
 pub async fn stats(State(state): State<AppState>, _auth: AdminAuth) -> AppResult<Json<Value>> {
@@ -139,6 +142,9 @@ pub async fn list_requests(
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
                 "total_tokens": r.total_tokens,
+                "credits_used": r.credits_used,
+                "account_quota_before": r.account_quota_before,
+                "account_quota_after": r.account_quota_after,
                 "account_id": r.account_id,
                 "account_email": r.account_email,
                 "error_message": r.error_message,
@@ -197,6 +203,21 @@ pub async fn patch_account(
     }
     if let Some(e) = body.email {
         acc.email = Some(e);
+    }
+    if body.reset_quota.unwrap_or(false) {
+        let (lim, rem) = db::default_quota_for_provider(&acc.provider);
+        acc.quota_limit = lim;
+        acc.quota_remaining = rem;
+    } else {
+        if let Some(lim) = body.quota_limit {
+            acc.quota_limit = lim.max(0);
+        }
+        if let Some(rem) = body.quota_remaining {
+            acc.quota_remaining = rem.max(0);
+            if acc.quota_limit > 0 {
+                acc.quota_remaining = acc.quota_remaining.min(acc.quota_limit);
+            }
+        }
     }
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
@@ -335,6 +356,7 @@ async fn upsert_import_item(state: &AppState, item: &Value) -> AppResult<bool> {
         db::update_account(&state.pool, &acc).await?;
         Ok(false)
     } else {
+        let (q_lim, q_rem) = db::default_quota_for_provider(&provider);
         let acc = Account {
             id: Uuid::new_v4().to_string(),
             provider,
@@ -348,6 +370,8 @@ async fn upsert_import_item(state: &AppState, item: &Value) -> AppResult<bool> {
             last_used_at: None,
             created_at: now.clone(),
             updated_at: now,
+            quota_limit: q_lim,
+            quota_remaining: q_rem,
         };
         db::upsert_account(&state.pool, &acc).await?;
         Ok(true)

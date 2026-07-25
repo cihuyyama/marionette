@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(list) => {
                 for (id, email, name, is_active, data) in list {
                     let now = db::now_rfc3339();
+                    let (q_lim, q_rem) = db::default_quota_for_provider(&provider);
                     let acc = Account {
                         id,
                         provider: provider.clone(),
@@ -107,6 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_used_at: None,
                         created_at: now.clone(),
                         updated_at: now,
+                        quota_limit: q_lim,
+                        quota_remaining: q_rem,
                     };
                     let exists = db::get_account(&pool, &acc.id).await.is_ok();
                     db::upsert_account(&pool, &acc).await?;
@@ -191,6 +194,7 @@ async fn import_one(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let (q_lim, q_rem) = db::default_quota_for_provider(provider);
         let acc = Account {
             id,
             provider: provider.to_string(),
@@ -204,6 +208,8 @@ async fn import_one(
             last_used_at: None,
             created_at: now.clone(),
             updated_at: now,
+            quota_limit: q_lim,
+            quota_remaining: q_rem,
         };
         db::upsert_account(pool, &acc).await?;
         Ok(true)

@@ -48,6 +48,9 @@ pub async fn handle_chat(
                             None,
                             None,
                             None,
+                            None,
+                            None,
+                            None,
                             Some(e.to_string()),
                         )
                         .await;
@@ -86,6 +89,26 @@ pub async fn handle_chat(
                     }
                     ChatOutcome::Stream(_) => (true, None, None, None),
                 };
+                let credits = if account.has_quota_budget() {
+                    total.or_else(|| match (prompt, completion) {
+                        (Some(p), Some(c)) => Some(p + c),
+                        (Some(p), None) => Some(p),
+                        (None, Some(c)) => Some(c),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0) {
+                    db::decrement_quota(&state.pool, &account.id, c)
+                        .await
+                        .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
+                } else {
+                    (account.quota_remaining, account.quota_remaining, 0)
+                };
+                if used > 0 {
+                    account.quota_remaining = q_after;
+                }
                 let _ = log_request(
                     &state.pool,
                     provider_id,
@@ -96,6 +119,17 @@ pub async fn handle_chat(
                     prompt,
                     completion,
                     total,
+                    if used > 0 { Some(used) } else { None },
+                    if account.has_quota_budget() {
+                        Some(q_before)
+                    } else {
+                        None
+                    },
+                    if account.has_quota_budget() {
+                        Some(q_after)
+                    } else {
+                        None
+                    },
                     Some(&account),
                     None,
                 )
@@ -126,6 +160,9 @@ pub async fn handle_chat(
         "error",
         false,
         started.elapsed().as_millis() as i64,
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -165,6 +202,9 @@ async fn log_request(
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
+    credits_used: Option<i64>,
+    account_quota_before: Option<i64>,
+    account_quota_after: Option<i64>,
     account: Option<&Account>,
     error_message: Option<String>,
 ) -> AppResult<()> {
@@ -179,6 +219,9 @@ async fn log_request(
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            credits_used,
+            account_quota_before,
+            account_quota_after,
             account_id: account.map(|a| a.id.clone()),
             account_email: account.and_then(|a| a.email.clone()),
             error_message: error_message.map(|e| e.chars().take(500).collect()),

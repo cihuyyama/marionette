@@ -6,6 +6,8 @@ use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use std::path::Path;
 use uuid::Uuid;
 
+pub const GROK_TOKEN_QUOTA: i64 = 1_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Account {
     pub id: String,
@@ -20,6 +22,8 @@ pub struct Account {
     pub last_used_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub quota_limit: i64,
+    pub quota_remaining: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +41,9 @@ pub struct AccountPublic {
     pub created_at: String,
     pub updated_at: String,
     pub status: String,
+    pub quota_limit: i64,
+    pub quota_remaining: i64,
+    pub quota_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -98,6 +105,9 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           prompt_tokens INTEGER,
           completion_tokens INTEGER,
           total_tokens INTEGER,
+          credits_used INTEGER,
+          account_quota_before INTEGER,
+          account_quota_after INTEGER,
           account_id TEXT,
           account_email TEXT,
           error_message TEXT
@@ -117,7 +127,52 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     )
     .execute(pool)
     .await?;
+    migrate_quota_columns(pool).await?;
     Ok(())
+}
+
+async fn migrate_quota_columns(pool: &SqlitePool) -> AppResult<()> {
+    let alters = [
+        "ALTER TABLE accounts ADD COLUMN quota_limit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE accounts ADD COLUMN quota_remaining INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE request_logs ADD COLUMN credits_used INTEGER",
+        "ALTER TABLE request_logs ADD COLUMN account_quota_before INTEGER",
+        "ALTER TABLE request_logs ADD COLUMN account_quota_after INTEGER",
+    ];
+    for sql in alters {
+        if let Err(e) = sqlx::query(sql).execute(pool).await {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+    sqlx::query(
+        r#"
+        UPDATE accounts
+        SET quota_limit = ?, quota_remaining = ?
+        WHERE provider = 'grok-cli' AND quota_limit = 0 AND quota_remaining = 0
+        "#,
+    )
+    .bind(GROK_TOKEN_QUOTA)
+    .bind(GROK_TOKEN_QUOTA)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
+    match provider {
+        "grok-cli" => (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA),
+        _ => (0, 0),
+    }
+}
+
+pub fn quota_kind_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "grok-cli" => "tokens",
+        _ => "none",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +369,9 @@ pub struct RequestLog {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+    pub credits_used: Option<i64>,
+    pub account_quota_before: Option<i64>,
+    pub account_quota_after: Option<i64>,
     pub account_id: Option<String>,
     pub account_email: Option<String>,
     pub error_message: Option<String>,
@@ -329,6 +387,9 @@ pub struct NewRequestLog {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+    pub credits_used: Option<i64>,
+    pub account_quota_before: Option<i64>,
+    pub account_quota_after: Option<i64>,
     pub account_id: Option<String>,
     pub account_email: Option<String>,
     pub error_message: Option<String>,
@@ -342,8 +403,9 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
         INSERT INTO request_logs (
           id, created_at, provider, model, status, stream, duration_ms,
           prompt_tokens, completion_tokens, total_tokens,
+          credits_used, account_quota_before, account_quota_after,
           account_id, account_email, error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -356,6 +418,9 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
     .bind(log.prompt_tokens)
     .bind(log.completion_tokens)
     .bind(log.total_tokens)
+    .bind(log.credits_used)
+    .bind(log.account_quota_before)
+    .bind(log.account_quota_after)
     .bind(&log.account_id)
     .bind(&log.account_email)
     .bind(&log.error_message)
@@ -491,6 +556,9 @@ impl Account {
         if self.is_cooling() {
             return "sealed";
         }
+        if self.is_quota_exhausted() {
+            return "sealed";
+        }
         if self
             .last_error
             .as_deref()
@@ -523,7 +591,18 @@ impl Account {
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
             status: self.status_label().into(),
+            quota_limit: self.quota_limit,
+            quota_remaining: self.quota_remaining,
+            quota_kind: quota_kind_for_provider(&self.provider).into(),
         }
+    }
+
+    pub fn has_quota_budget(&self) -> bool {
+        self.quota_limit > 0
+    }
+
+    pub fn is_quota_exhausted(&self) -> bool {
+        self.has_quota_budget() && self.quota_remaining <= 0
     }
 }
 
@@ -596,8 +675,9 @@ pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
         r#"
         INSERT INTO accounts (
           id, provider, email, name, is_active, priority, data,
-          cooldown_until, last_error, last_used_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cooldown_until, last_error, last_used_at, created_at, updated_at,
+          quota_limit, quota_remaining
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           provider=excluded.provider,
           email=excluded.email,
@@ -608,7 +688,9 @@ pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
           cooldown_until=excluded.cooldown_until,
           last_error=excluded.last_error,
           last_used_at=excluded.last_used_at,
-          updated_at=excluded.updated_at
+          updated_at=excluded.updated_at,
+          quota_limit=excluded.quota_limit,
+          quota_remaining=excluded.quota_remaining
         "#,
     )
     .bind(&acc.id)
@@ -623,6 +705,8 @@ pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
     .bind(&acc.last_used_at)
     .bind(&acc.created_at)
     .bind(&acc.updated_at)
+    .bind(acc.quota_limit)
+    .bind(acc.quota_remaining)
     .execute(pool)
     .await?;
     Ok(())
@@ -633,7 +717,8 @@ pub async fn update_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
         r#"
         UPDATE accounts SET
           provider=?, email=?, name=?, is_active=?, priority=?, data=?,
-          cooldown_until=?, last_error=?, last_used_at=?, updated_at=?
+          cooldown_until=?, last_error=?, last_used_at=?, updated_at=?,
+          quota_limit=?, quota_remaining=?
         WHERE id=?
         "#,
     )
@@ -647,10 +732,29 @@ pub async fn update_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
     .bind(&acc.last_error)
     .bind(&acc.last_used_at)
     .bind(&acc.updated_at)
+    .bind(acc.quota_limit)
+    .bind(acc.quota_remaining)
     .bind(&acc.id)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn decrement_quota(
+    pool: &SqlitePool,
+    account_id: &str,
+    credits_used: i64,
+) -> AppResult<(i64, i64, i64)> {
+    let mut acc = get_account(pool, account_id).await?;
+    let before = acc.quota_remaining;
+    if !acc.has_quota_budget() || credits_used <= 0 {
+        return Ok((before, before, 0));
+    }
+    let used = credits_used.max(0);
+    acc.quota_remaining = (acc.quota_remaining - used).max(0);
+    acc.updated_at = now_rfc3339();
+    update_account(pool, &acc).await?;
+    Ok((before, acc.quota_remaining, used))
 }
 
 pub async fn delete_account(pool: &SqlitePool, id: &str) -> AppResult<()> {
@@ -675,6 +779,7 @@ pub async fn list_eligible_accounts(
         WHERE provider = ?
           AND is_active = 1
           AND (cooldown_until IS NULL OR cooldown_until < ?)
+          AND (quota_limit <= 0 OR quota_remaining > 0)
         ORDER BY priority ASC, last_used_at IS NOT NULL, last_used_at ASC, created_at ASC
         "#,
     )
