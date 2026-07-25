@@ -7,10 +7,40 @@ use crate::openai::ChatCompletionRequest;
 use async_trait::async_trait;
 use axum::response::Response;
 use serde_json::Value;
+use tokio::sync::oneshot;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StreamUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+impl StreamUsage {
+    pub fn is_empty(self) -> bool {
+        self.prompt_tokens == 0 && self.completion_tokens == 0 && self.total_tokens == 0
+    }
+
+    pub fn normalized(self) -> Self {
+        let total = if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.prompt_tokens + self.completion_tokens
+        };
+        Self {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: total,
+        }
+    }
+}
 
 pub enum ChatOutcome {
     Json(Value),
-    Stream(Response),
+    Stream {
+        response: Response,
+        usage_rx: oneshot::Receiver<Option<StreamUsage>>,
+    },
 }
 
 #[async_trait]

@@ -1,4 +1,4 @@
-use super::{ChatOutcome, Provider, classify_http_status};
+use super::{ChatOutcome, Provider, StreamUsage, classify_http_status};
 use crate::config::Config;
 use crate::db::{Account, parse_rfc3339};
 use crate::error::ProviderError;
@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
@@ -270,18 +271,29 @@ impl Provider for GrokCliProvider {
 
         if req.stream_enabled() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+            let (usage_tx, usage_rx) = oneshot::channel::<Option<StreamUsage>>();
             let mut upstream_stream = resp.bytes_stream();
 
             tokio::spawn(async move {
                 let mut buffer = String::new();
                 let mut resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
                 let mut first_chunk_sent = false;
+                let mut prompt_tokens: i64 = 0;
+                let mut completion_tokens: i64 = 0;
+                let mut total_tokens: i64 = 0;
+                let mut accumulated_text = String::new();
+                let mut usage_tx = Some(usage_tx);
 
                 while let Some(chunk_res) = upstream_stream.next().await {
                     let chunk = match chunk_res {
                         Ok(c) => c,
                         Err(e) => {
-                            let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e))).await;
+                            let _ = tx
+                                .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                                .await;
+                            if let Some(txu) = usage_tx.take() {
+                                let _ = txu.send(None);
+                            }
                             return;
                         }
                     };
@@ -300,16 +312,29 @@ impl Provider for GrokCliProvider {
                         if let Some(data_str) = trimmed.strip_prefix("data:") {
                             let data_str = data_str.trim();
                             if data_str == "[DONE]" {
-                                let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                                emit_stream_end(
+                                    &tx,
+                                    &resp_id,
+                                    &req_model,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens,
+                                    &accumulated_text,
+                                    &mut usage_tx,
+                                )
+                                .await;
                                 return;
                             }
 
                             if let Ok(v) = serde_json::from_str::<Value>(data_str) {
-                                let event_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+                                let event_type =
+                                    v.get("type").and_then(|s| s.as_str()).unwrap_or("");
 
                                 match event_type {
                                     "response.created" | "response.in_progress" => {
-                                        if let Some(id) = v.pointer("/response/id").and_then(|s| s.as_str()) {
+                                        if let Some(id) =
+                                            v.pointer("/response/id").and_then(|s| s.as_str())
+                                        {
                                             resp_id = format!("chatcmpl-{id}");
                                         }
                                         if !first_chunk_sent {
@@ -325,15 +350,24 @@ impl Provider for GrokCliProvider {
                                                     "finish_reason": null
                                                 }]
                                             });
-                                            let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
+                                            let msg = format!(
+                                                "data: {}\n\n",
+                                                serde_json::to_string(&chunk_json).unwrap()
+                                            );
                                             if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                if let Some(txu) = usage_tx.take() {
+                                                    let _ = txu.send(None);
+                                                }
                                                 return;
                                             }
                                         }
                                     }
                                     "response.output_text.delta" => {
-                                        if let Some(delta) = v.get("delta").and_then(|s| s.as_str()) {
+                                        if let Some(delta) =
+                                            v.get("delta").and_then(|s| s.as_str())
+                                        {
                                             if !delta.is_empty() {
+                                                accumulated_text.push_str(delta);
                                                 let chunk_json = json!({
                                                     "id": resp_id,
                                                     "object": "chat.completion.chunk",
@@ -345,15 +379,28 @@ impl Provider for GrokCliProvider {
                                                         "finish_reason": null
                                                     }]
                                                 });
-                                                let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
-                                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                let msg = format!(
+                                                    "data: {}\n\n",
+                                                    serde_json::to_string(&chunk_json).unwrap()
+                                                );
+                                                if tx
+                                                    .send(Ok(bytes::Bytes::from(msg)))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    if let Some(txu) = usage_tx.take() {
+                                                        let _ = txu.send(None);
+                                                    }
                                                     return;
                                                 }
                                             }
                                         }
                                     }
-                                    "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                                        if let Some(delta) = v.get("delta").and_then(|s| s.as_str()) {
+                                    "response.reasoning_summary_text.delta"
+                                    | "response.reasoning_text.delta" => {
+                                        if let Some(delta) =
+                                            v.get("delta").and_then(|s| s.as_str())
+                                        {
                                             if !delta.is_empty() {
                                                 let chunk_json = json!({
                                                     "id": resp_id,
@@ -366,27 +413,53 @@ impl Provider for GrokCliProvider {
                                                         "finish_reason": null
                                                     }]
                                                 });
-                                                let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
-                                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                let msg = format!(
+                                                    "data: {}\n\n",
+                                                    serde_json::to_string(&chunk_json).unwrap()
+                                                );
+                                                if tx
+                                                    .send(Ok(bytes::Bytes::from(msg)))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    if let Some(txu) = usage_tx.take() {
+                                                        let _ = txu.send(None);
+                                                    }
                                                     return;
                                                 }
                                             }
                                         }
                                     }
                                     "response.completed" => {
-                                        let chunk_json = json!({
-                                            "id": resp_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": Utc::now().timestamp(),
-                                            "model": req_model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {},
-                                                "finish_reason": "stop"
-                                            }]
-                                        });
-                                        let msg = format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&chunk_json).unwrap());
-                                        let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                                        if let Some(u) = v
+                                            .pointer("/response/usage")
+                                            .or_else(|| v.get("usage"))
+                                        {
+                                            prompt_tokens = usage_i64(u, "input_tokens")
+                                                .or_else(|| usage_i64(u, "prompt_tokens"))
+                                                .unwrap_or(prompt_tokens);
+                                            completion_tokens = usage_i64(u, "output_tokens")
+                                                .or_else(|| usage_i64(u, "completion_tokens"))
+                                                .unwrap_or(completion_tokens);
+                                            total_tokens = usage_i64(u, "total_tokens").unwrap_or(
+                                                if prompt_tokens > 0 || completion_tokens > 0 {
+                                                    prompt_tokens + completion_tokens
+                                                } else {
+                                                    total_tokens
+                                                },
+                                            );
+                                        }
+                                        emit_stream_end(
+                                            &tx,
+                                            &resp_id,
+                                            &req_model,
+                                            prompt_tokens,
+                                            completion_tokens,
+                                            total_tokens,
+                                            &accumulated_text,
+                                            &mut usage_tx,
+                                        )
+                                        .await;
                                         return;
                                     }
                                     _ => {}
@@ -396,20 +469,17 @@ impl Provider for GrokCliProvider {
                     }
                 }
 
-                // If stream ended without response.completed or [DONE]
-                let chunk_json = json!({
-                    "id": resp_id,
-                    "object": "chat.completion.chunk",
-                    "created": Utc::now().timestamp(),
-                    "model": req_model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
-                });
-                let msg = format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&chunk_json).unwrap());
-                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                emit_stream_end(
+                    &tx,
+                    &resp_id,
+                    &req_model,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    &accumulated_text,
+                    &mut usage_tx,
+                )
+                .await;
             });
 
             let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -423,7 +493,10 @@ impl Provider for GrokCliProvider {
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             let (mut parts, body) = response.into_parts();
             parts.headers = headers;
-            Ok(ChatOutcome::Stream(Response::from_parts(parts, body)))
+            Ok(ChatOutcome::Stream {
+                response: Response::from_parts(parts, body),
+                usage_rx,
+            })
         } else {
             let mut buffer = String::new();
             let mut resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
@@ -542,4 +615,83 @@ fn usage_i64(usage: &Value, key: &str) -> Option<i64> {
 fn estimate_tokens(text: &str) -> i64 {
     let n = (text.chars().count() as f64 / 4.0).ceil() as i64;
     n.max(1)
+}
+
+async fn emit_stream_end(
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    resp_id: &str,
+    req_model: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    accumulated_text: &str,
+    usage_tx: &mut Option<oneshot::Sender<Option<StreamUsage>>>,
+) {
+    let p = prompt_tokens;
+    let mut c = completion_tokens;
+    let mut t = total_tokens;
+    if t == 0 && c == 0 && !accumulated_text.is_empty() {
+        c = estimate_tokens(accumulated_text);
+        t = p + c;
+    } else if t == 0 && (p > 0 || c > 0) {
+        t = p + c;
+    }
+    let usage = StreamUsage {
+        prompt_tokens: p,
+        completion_tokens: c,
+        total_tokens: t,
+    }
+    .normalized();
+
+    let finish_json = json!({
+        "id": resp_id,
+        "object": "chat.completion.chunk",
+        "created": Utc::now().timestamp(),
+        "model": req_model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }]
+    });
+    let _ = tx
+        .send(Ok(bytes::Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::to_string(&finish_json).unwrap()
+        ))))
+        .await;
+
+    if !usage.is_empty() {
+        let usage_json = json!({
+            "id": resp_id,
+            "object": "chat.completion.chunk",
+            "created": Utc::now().timestamp(),
+            "model": req_model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": null
+            }],
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens
+            }
+        });
+        let _ = tx
+            .send(Ok(bytes::Bytes::from(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&usage_json).unwrap()
+            ))))
+            .await;
+    }
+
+    let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+    if let Some(txu) = usage_tx.take() {
+        let _ = txu.send(if usage.is_empty() {
+            None
+        } else {
+            Some(usage)
+        });
+    }
 }

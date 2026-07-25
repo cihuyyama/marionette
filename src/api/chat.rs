@@ -18,6 +18,6 @@ pub async fn chat_completions(
     }
     match pool::handle_chat(&state, req).await? {
         ChatOutcome::Json(v) => Ok(Json(v).into_response()),
-        ChatOutcome::Stream(r) => Ok(r),
+        ChatOutcome::Stream { response, .. } => Ok(response),
     }
 }

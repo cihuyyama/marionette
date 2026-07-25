@@ -82,65 +82,161 @@ pub async fn handle_chat(
         match provider.chat(&account, &req).await {
             Ok(outcome) => {
                 let duration_ms = started.elapsed().as_millis() as i64;
-                let (stream, prompt, completion, total) = match &outcome {
+                match outcome {
                     ChatOutcome::Json(v) => {
-                        let (p, c, t) = extract_usage(v);
-                        (false, p, c, t)
+                        let (prompt, completion, total) = extract_usage(&v);
+                        let credits = if account.has_quota_budget() {
+                            total.or_else(|| match (prompt, completion) {
+                                (Some(p), Some(c)) => Some(p + c),
+                                (Some(p), None) => Some(p),
+                                (None, Some(c)) => Some(c),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        };
+                        let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0)
+                        {
+                            db::decrement_quota(&state.pool, &account.id, c)
+                                .await
+                                .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
+                        } else {
+                            (account.quota_remaining, account.quota_remaining, 0)
+                        };
+                        if used > 0 {
+                            account.quota_remaining = q_after;
+                        }
+                        let _ = log_request(
+                            &state.pool,
+                            provider_id,
+                            &model,
+                            "success",
+                            false,
+                            duration_ms,
+                            prompt,
+                            completion,
+                            total,
+                            if used > 0 { Some(used) } else { None },
+                            if account.has_quota_budget() {
+                                Some(q_before)
+                            } else {
+                                None
+                            },
+                            if account.has_quota_budget() {
+                                Some(q_after)
+                            } else {
+                                None
+                            },
+                            Some(&account),
+                            None,
+                        )
+                        .await;
+                        let _ = db::note_pick_success(
+                            &state.pool,
+                            provider_id,
+                            strategy,
+                            &account.id,
+                        )
+                        .await;
+                        account.last_used_at = Some(db::now_rfc3339());
+                        account.last_error = None;
+                        account.updated_at = db::now_rfc3339();
+                        db::update_account(&state.pool, &account).await?;
+                        return Ok(ChatOutcome::Json(v));
                     }
-                    ChatOutcome::Stream(_) => (true, None, None, None),
-                };
-                let credits = if account.has_quota_budget() {
-                    total.or_else(|| match (prompt, completion) {
-                        (Some(p), Some(c)) => Some(p + c),
-                        (Some(p), None) => Some(p),
-                        (None, Some(c)) => Some(c),
-                        _ => None,
-                    })
-                } else {
-                    None
-                };
-                let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0) {
-                    db::decrement_quota(&state.pool, &account.id, c)
+                    ChatOutcome::Stream {
+                        response,
+                        usage_rx,
+                    } => {
+                        let log_id = match log_request_returning_id(
+                            &state.pool,
+                            provider_id,
+                            &model,
+                            "success",
+                            true,
+                            duration_ms,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(&account),
+                            None,
+                        )
                         .await
-                        .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
-                } else {
-                    (account.quota_remaining, account.quota_remaining, 0)
-                };
-                if used > 0 {
-                    account.quota_remaining = q_after;
+                        {
+                            Ok(id) => id,
+                            Err(e) => {
+                                warn!(error = %e, "stream request log insert failed");
+                                String::new()
+                            }
+                        };
+                        let _ = db::note_pick_success(
+                            &state.pool,
+                            provider_id,
+                            strategy,
+                            &account.id,
+                        )
+                        .await;
+                        account.last_used_at = Some(db::now_rfc3339());
+                        account.last_error = None;
+                        account.updated_at = db::now_rfc3339();
+                        db::update_account(&state.pool, &account).await?;
+
+                        let pool = state.pool.clone();
+                        let account_id = account.id.clone();
+                        let has_quota = account.has_quota_budget();
+                        let started_at = started;
+                        tokio::spawn(async move {
+                            let usage = match usage_rx.await {
+                                Ok(Some(u)) => u.normalized(),
+                                Ok(None) | Err(_) => return,
+                            };
+                            if usage.is_empty() || log_id.is_empty() {
+                                return;
+                            }
+                            let total = if usage.total_tokens > 0 {
+                                usage.total_tokens
+                            } else {
+                                usage.prompt_tokens + usage.completion_tokens
+                            };
+                            let mut credits_used = None;
+                            let mut q_before = None;
+                            let mut q_after = None;
+                            if has_quota && total > 0 {
+                                if let Ok((before, after, used)) =
+                                    db::decrement_quota(&pool, &account_id, total).await
+                                {
+                                    if used > 0 {
+                                        credits_used = Some(used);
+                                        q_before = Some(before);
+                                        q_after = Some(after);
+                                    }
+                                }
+                            }
+                            let full_ms = started_at.elapsed().as_millis() as i64;
+                            let _ = db::update_request_log_usage(
+                                &pool,
+                                &log_id,
+                                usage.prompt_tokens,
+                                usage.completion_tokens,
+                                total,
+                                credits_used,
+                                q_before,
+                                q_after,
+                                Some(full_ms),
+                            )
+                            .await;
+                        });
+
+                        let (_tx, dummy_rx) = tokio::sync::oneshot::channel();
+                        return Ok(ChatOutcome::Stream {
+                            response,
+                            usage_rx: dummy_rx,
+                        });
+                    }
                 }
-                let _ = log_request(
-                    &state.pool,
-                    provider_id,
-                    &model,
-                    "success",
-                    stream,
-                    duration_ms,
-                    prompt,
-                    completion,
-                    total,
-                    if used > 0 { Some(used) } else { None },
-                    if account.has_quota_budget() {
-                        Some(q_before)
-                    } else {
-                        None
-                    },
-                    if account.has_quota_budget() {
-                        Some(q_after)
-                    } else {
-                        None
-                    },
-                    Some(&account),
-                    None,
-                )
-                .await;
-                let _ =
-                    db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
-                account.last_used_at = Some(db::now_rfc3339());
-                account.last_error = None;
-                account.updated_at = db::now_rfc3339();
-                db::update_account(&state.pool, &account).await?;
-                return Ok(outcome);
             }
             Err(e) => {
                 warn!(account = %account.id, error = %e, "upstream chat failed");
@@ -208,6 +304,42 @@ async fn log_request(
     account: Option<&Account>,
     error_message: Option<String>,
 ) -> AppResult<()> {
+    let _ = log_request_returning_id(
+        pool,
+        provider,
+        model,
+        status,
+        stream,
+        duration_ms,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        credits_used,
+        account_quota_before,
+        account_quota_after,
+        account,
+        error_message,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn log_request_returning_id(
+    pool: &SqlitePool,
+    provider: &str,
+    model: &str,
+    status: &str,
+    stream: bool,
+    duration_ms: i64,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    credits_used: Option<i64>,
+    account_quota_before: Option<i64>,
+    account_quota_after: Option<i64>,
+    account: Option<&Account>,
+    error_message: Option<String>,
+) -> AppResult<String> {
     db::insert_request_log(
         pool,
         NewRequestLog {
@@ -227,8 +359,7 @@ async fn log_request(
             error_message: error_message.map(|e| e.chars().take(500).collect()),
         },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn apply_provider_error(
@@ -237,6 +368,7 @@ async fn apply_provider_error(
     account: &mut Account,
     err: &ProviderError,
 ) -> AppResult<()> {
+    let prev_error = account.last_error.clone();
     account.updated_at = db::now_rfc3339();
     account.last_error = Some(err.to_string().chars().take(500).collect());
 
@@ -253,10 +385,16 @@ async fn apply_provider_error(
             info!(account = %account.id, until = ?account.cooldown_until, "sealed (429 cooldown)");
         }
         ProviderError::AuthExpired => {
-            // short cooldown; next pick may refresh
-            let until = Utc::now() + Duration::minutes(5);
-            account.cooldown_until =
-                Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            let prev = prev_error.as_deref().unwrap_or("").to_lowercase();
+            let repeated = prev.contains("auth expired") || prev.contains("auth invalid");
+            if repeated {
+                account.is_active = 0;
+                info!(account = %account.id, "cut (repeated auth expired)");
+            } else {
+                let until = Utc::now() + Duration::minutes(5);
+                account.cooldown_until =
+                    Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            }
         }
         ProviderError::AuthInvalid(_) | ProviderError::PaymentRequired | ProviderError::AccessDenied => {
             account.is_active = 0;

@@ -429,6 +429,43 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
     Ok(id)
 }
 
+pub async fn update_request_log_usage(
+    pool: &SqlitePool,
+    id: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    credits_used: Option<i64>,
+    account_quota_before: Option<i64>,
+    account_quota_after: Option<i64>,
+    duration_ms: Option<i64>,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE request_logs SET
+          prompt_tokens = ?,
+          completion_tokens = ?,
+          total_tokens = ?,
+          credits_used = COALESCE(?, credits_used),
+          account_quota_before = COALESCE(?, account_quota_before),
+          account_quota_after = COALESCE(?, account_quota_after),
+          duration_ms = COALESCE(?, duration_ms)
+        WHERE id = ?
+        "#,
+    )
+    .bind(prompt_tokens)
+    .bind(completion_tokens)
+    .bind(total_tokens)
+    .bind(credits_used)
+    .bind(account_quota_before)
+    .bind(account_quota_after)
+    .bind(duration_ms)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_request_logs(
     pool: &SqlitePool,
     provider: Option<&str>,

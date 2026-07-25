@@ -1,7 +1,7 @@
 //! Qoder provider — full port from etteeum qoder.ts
 //! Auth: PAT -> jobToken -> COSY bearer. Chat: SSE -> OpenAI chunks.
 
-use super::{ChatOutcome, Provider, classify_http_status};
+use super::{ChatOutcome, Provider, StreamUsage, classify_http_status};
 use crate::db::Account;
 use crate::error::ProviderError;
 use crate::openai::ChatCompletionRequest;
@@ -12,6 +12,7 @@ use md5::{Md5, Digest as Md5Digest};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 use sha2::Sha256;
 
@@ -576,6 +577,7 @@ impl Provider for QoderProvider {
 
         let req_model = req.model.clone();
         let stream_mode = req.stream_enabled();
+        let estimated_prompt = estimate_prompt_tokens(req);
         let mut last_err: Option<ProviderError> = None;
 
         for (attempt, client) in self.chat_clients().into_iter().enumerate() {
@@ -749,8 +751,10 @@ impl Provider for QoderProvider {
 
                 let (tx, rx) =
                     tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+                let (usage_tx, usage_rx) = oneshot::channel::<Option<StreamUsage>>();
                 let decode_ctx_stream = decode_ctx.clone();
                 let req_model_stream = req_model.clone();
+                let estimated_prompt_stream = estimated_prompt;
 
                 tokio::spawn(async move {
                     let mut buffer = String::new();
@@ -760,6 +764,11 @@ impl Provider for QoderProvider {
                     let resp_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
                     let mut first_chunk_sent = false;
                     let mut any_content = false;
+                    let mut prompt_tokens: i64 = 0;
+                    let mut completion_tokens: i64 = 0;
+                    let mut total_tokens: i64 = 0;
+                    let mut accumulated_text = String::new();
+                    let mut usage_tx = Some(usage_tx);
 
                     loop {
                         while let Some(pos) = buffer.find('\n') {
@@ -777,9 +786,30 @@ impl Provider for QoderProvider {
                                         svc_err,
                                     )))
                                     .await;
+                                if let Some(txu) = usage_tx.take() {
+                                    let _ = txu.send(None);
+                                }
                                 return;
                             }
                             if let Some(inner) = parse_sse_line(trimmed) {
+                                if let Some(u) = inner.get("usage") {
+                                    if let Some(p) = usage_i64(u, "prompt_tokens")
+                                        .or_else(|| usage_i64(u, "input_tokens"))
+                                    {
+                                        prompt_tokens = p;
+                                    }
+                                    if let Some(c) = usage_i64(u, "completion_tokens")
+                                        .or_else(|| usage_i64(u, "output_tokens"))
+                                    {
+                                        completion_tokens = c;
+                                    }
+                                    if let Some(t) = usage_i64(u, "total_tokens") {
+                                        total_tokens = t;
+                                    } else if prompt_tokens > 0 || completion_tokens > 0 {
+                                        total_tokens = prompt_tokens + completion_tokens;
+                                    }
+                                }
+
                                 if !first_chunk_sent {
                                     first_chunk_sent = true;
                                     let chunk_json = serde_json::json!({
@@ -798,6 +828,9 @@ impl Provider for QoderProvider {
                                         serde_json::to_string(&chunk_json).unwrap()
                                     );
                                     if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                        if let Some(txu) = usage_tx.take() {
+                                            let _ = txu.send(None);
+                                        }
                                         return;
                                     }
                                 }
@@ -808,6 +841,9 @@ impl Provider for QoderProvider {
                                     .and_then(|a| a.first());
                                 let delta = choice.and_then(|c| c.get("delta"));
                                 let finish_reason = choice.and_then(|c| c.get("finish_reason"));
+                                let is_finish = finish_reason
+                                    .map(|v| !v.is_null())
+                                    .unwrap_or(false);
 
                                 let mut delta_out = serde_json::json!({});
                                 let mut has_delta = false;
@@ -817,30 +853,36 @@ impl Provider for QoderProvider {
                                     .and_then(|v| v.as_str())
                                 {
                                     if !content.is_empty() {
-                                        delta_out["content"] = serde_json::json!(content);
-                                        has_delta = true;
-                                        any_content = true;
+                                        let skip_echo = is_finish
+                                            && any_content
+                                            && !accumulated_text.is_empty()
+                                            && (content == accumulated_text
+                                                || content.starts_with(accumulated_text.as_str())
+                                                || accumulated_text.starts_with(content));
+                                        if !skip_echo {
+                                            delta_out["content"] = serde_json::json!(content);
+                                            has_delta = true;
+                                            any_content = true;
+                                            accumulated_text.push_str(content);
+                                        }
                                     }
                                 }
                                 if let Some(reasoning) = delta
                                     .and_then(|d| d.get("reasoning_content"))
                                     .and_then(|v| v.as_str())
                                 {
-                                    if !reasoning.is_empty() {
-                                        delta_out["reasoning_content"] = serde_json::json!(reasoning);
+                                    if !reasoning.is_empty() && !(is_finish && any_content) {
+                                        delta_out["reasoning_content"] =
+                                            serde_json::json!(reasoning);
                                         has_delta = true;
                                         any_content = true;
+                                        if accumulated_text.is_empty() {
+                                            accumulated_text.push_str(reasoning);
+                                        }
                                     }
                                 }
 
-                                let mut finish_reason_val = finish_reason.cloned();
-                                if finish_reason.is_some() && !any_content {
-                                    // Silent reject detected during stream (context limit).
-                                    tracing::warn!("Qoder silent reject mid-stream (no content generated). Marking finish_reason as 'length'.");
-                                    finish_reason_val = Some(serde_json::json!("length"));
-                                }
-
-                                if has_delta || finish_reason_val.is_some() {
+                                if has_delta {
                                     let chunk_json = serde_json::json!({
                                         "id": resp_id,
                                         "object": "chat.completion.chunk",
@@ -849,7 +891,7 @@ impl Provider for QoderProvider {
                                         "choices": [{
                                             "index": 0,
                                             "delta": delta_out,
-                                            "finish_reason": finish_reason_val
+                                            "finish_reason": serde_json::Value::Null
                                         }]
                                     });
                                     let msg = format!(
@@ -857,12 +899,30 @@ impl Provider for QoderProvider {
                                         serde_json::to_string(&chunk_json).unwrap()
                                     );
                                     if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                        if let Some(txu) = usage_tx.take() {
+                                            let _ = txu.send(None);
+                                        }
                                         return;
                                     }
                                 }
 
-                                if finish_reason.is_some() {
-                                    let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                                if is_finish {
+                                    if !any_content {
+                                        tracing::warn!("Qoder silent reject mid-stream (no content generated). Marking finish_reason as 'length'.");
+                                    }
+                                    qoder_emit_stream_end(
+                                        &tx,
+                                        &resp_id,
+                                        &req_model_stream,
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        total_tokens,
+                                        estimated_prompt_stream,
+                                        &accumulated_text,
+                                        if any_content { "stop" } else { "length" },
+                                        &mut usage_tx,
+                                    )
+                                    .await;
                                     return;
                                 }
                             }
@@ -882,28 +942,23 @@ impl Provider for QoderProvider {
                                     "qoder stream body decode failed"
                                 );
                                 if first_chunk_sent || any_content {
-                                    let mut eof_finish = "stop";
+                                    let eof_finish = if any_content { "stop" } else { "length" };
                                     if !any_content {
                                         tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
-                                        eof_finish = "length";
                                     }
-
-                                    let chunk_json = serde_json::json!({
-                                        "id": resp_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": chrono::Utc::now().timestamp(),
-                                        "model": req_model_stream,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": serde_json::json!({}),
-                                            "finish_reason": eof_finish
-                                        }]
-                                    });
-                                    let msg = format!(
-                                        "data: {}\n\ndata: [DONE]\n\n",
-                                        serde_json::to_string(&chunk_json).unwrap_or_default()
-                                    );
-                                    let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                                    qoder_emit_stream_end(
+                                        &tx,
+                                        &resp_id,
+                                        &req_model_stream,
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        total_tokens,
+                                        estimated_prompt_stream,
+                                        &accumulated_text,
+                                        eof_finish,
+                                        &mut usage_tx,
+                                    )
+                                    .await;
                                 } else {
                                     let _ = tx
                                         .send(Err(std::io::Error::new(
@@ -913,6 +968,9 @@ impl Provider for QoderProvider {
                                             ),
                                         )))
                                         .await;
+                                    if let Some(txu) = usage_tx.take() {
+                                        let _ = txu.send(None);
+                                    }
                                 }
                                 return;
                             }
@@ -920,28 +978,23 @@ impl Provider for QoderProvider {
                         }
                     }
 
-                    let mut eof_finish = "stop";
+                    let eof_finish = if any_content { "stop" } else { "length" };
                     if !any_content {
                         tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
-                        eof_finish = "length";
                     }
-
-                    let chunk_json = serde_json::json!({
-                        "id": resp_id,
-                        "object": "chat.completion.chunk",
-                        "created": chrono::Utc::now().timestamp(),
-                        "model": req_model_stream,
-                        "choices": [{
-                            "index": 0,
-                            "delta": serde_json::json!({}),
-                            "finish_reason": eof_finish
-                        }]
-                    });
-                    let msg = format!(
-                        "data: {}\n\ndata: [DONE]\n\n",
-                        serde_json::to_string(&chunk_json).unwrap()
-                    );
-                    let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                    qoder_emit_stream_end(
+                        &tx,
+                        &resp_id,
+                        &req_model_stream,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        estimated_prompt_stream,
+                        &accumulated_text,
+                        eof_finish,
+                        &mut usage_tx,
+                    )
+                    .await;
                 });
 
                 let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -955,7 +1008,10 @@ impl Provider for QoderProvider {
                     .map_err(|e| ProviderError::Other(e.to_string()))?;
                 let (mut parts, body) = response.into_parts();
                 parts.headers = out_headers;
-                return Ok(ChatOutcome::Stream(axum::response::Response::from_parts(parts, body)));
+                return Ok(ChatOutcome::Stream {
+                    response: axum::response::Response::from_parts(parts, body),
+                    usage_rx,
+                });
             }
 
             // Non-stream
@@ -1104,10 +1160,13 @@ impl Provider for QoderProvider {
                 accumulated_reasoning
             };
 
-            if total_tokens == 0 && completion_tokens == 0 && !final_text.is_empty() {
-                completion_tokens = estimate_tokens(&final_text);
-                total_tokens = prompt_tokens + completion_tokens;
-            }
+            let (prompt_tokens, completion_tokens, total_tokens) = fill_missing_usage(
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                estimated_prompt,
+                &final_text,
+            );
 
             let mut finish_reason_str = "stop";
             if final_text.is_empty() {
@@ -1283,8 +1342,118 @@ fn usage_i64(usage: &Value, key: &str) -> Option<i64> {
 }
 
 fn estimate_tokens(text: &str) -> i64 {
+    if text.is_empty() {
+        return 0;
+    }
     let n = (text.chars().count() as f64 / 4.0).ceil() as i64;
     n.max(1)
+}
+
+fn estimate_prompt_tokens(req: &ChatCompletionRequest) -> i64 {
+    req.messages.iter().fold(0i64, |acc, m| {
+        acc + estimate_tokens(&content_to_text(&m.content)) + 4
+    })
+}
+
+fn fill_missing_usage(
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    estimated_prompt: i64,
+    completion_text: &str,
+) -> (i64, i64, i64) {
+    let mut p = prompt_tokens;
+    let mut c = completion_tokens;
+    let mut t = total_tokens;
+    if p <= 0 && estimated_prompt > 0 {
+        p = estimated_prompt;
+    }
+    if c <= 0 && !completion_text.is_empty() {
+        c = estimate_tokens(completion_text);
+    }
+    if t <= 0 {
+        t = p.saturating_add(c);
+    }
+    (p, c, t)
+}
+
+async fn qoder_emit_stream_end(
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    resp_id: &str,
+    req_model: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    estimated_prompt: i64,
+    accumulated_text: &str,
+    finish_reason: &str,
+    usage_tx: &mut Option<oneshot::Sender<Option<StreamUsage>>>,
+) {
+    let (p, c, t) = fill_missing_usage(
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        estimated_prompt,
+        accumulated_text,
+    );
+    let usage = StreamUsage {
+        prompt_tokens: p,
+        completion_tokens: c,
+        total_tokens: t,
+    }
+    .normalized();
+
+    let finish_json = serde_json::json!({
+        "id": resp_id,
+        "object": "chat.completion.chunk",
+        "created": chrono::Utc::now().timestamp(),
+        "model": req_model,
+        "choices": [{
+            "index": 0,
+            "delta": serde_json::json!({}),
+            "finish_reason": finish_reason
+        }]
+    });
+    let _ = tx
+        .send(Ok(bytes::Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::to_string(&finish_json).unwrap_or_default()
+        ))))
+        .await;
+
+    if !usage.is_empty() {
+        let usage_json = serde_json::json!({
+            "id": resp_id,
+            "object": "chat.completion.chunk",
+            "created": chrono::Utc::now().timestamp(),
+            "model": req_model,
+            "choices": [{
+                "index": 0,
+                "delta": serde_json::json!({}),
+                "finish_reason": serde_json::Value::Null
+            }],
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens
+            }
+        });
+        let _ = tx
+            .send(Ok(bytes::Bytes::from(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&usage_json).unwrap_or_default()
+            ))))
+            .await;
+    }
+
+    let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+    if let Some(txu) = usage_tx.take() {
+        let _ = txu.send(if usage.is_empty() {
+            None
+        } else {
+            Some(usage)
+        });
+    }
 }
 
 fn load_chat_template() -> Option<Value> {
