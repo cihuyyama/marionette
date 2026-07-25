@@ -115,21 +115,100 @@ fn aes_128_cbc_encrypt(plain: &[u8], key: &[u8]) -> Result<Vec<u8>, ProviderErro
     Ok(result)
 }
 
-fn map_model(name: &str) -> &str {
+struct ModelCfg {
+    key: &'static str,
+    display_name: &'static str,
+    max_input_tokens: u64,
+    is_vl: bool,
+    is_reasoning: bool,
+}
+
+fn model_cfg(name: &str) -> ModelCfg {
     match name.to_lowercase().as_str() {
-        "lite" => "lite",
-        "auto" => "auto",
-        "ultimate" => "ultimate",
-        "performance" => "performance",
-        "efficient" => "efficient",
-        "qmodel_latest" | "qwen3.7-max" => "qmodel_latest",
-        "qmodel" | "qwen3.6-plus" => "qmodel",
-        "dmodel" | "deepseek-v4-pro" => "dmodel",
-        "dfmodel" | "deepseek-v4-flash" => "dfmodel",
-        "gm51model" | "glm-5.1" => "gm51model",
-        "kmodel" | "kimi-k2.6" => "kmodel",
-        "mmodel" | "minimax-m2.7" => "mmodel",
-        _ => "lite",
+        "auto" => ModelCfg {
+            key: "auto",
+            display_name: "Auto",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "ultimate" => ModelCfg {
+            key: "ultimate",
+            display_name: "Ultimate",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
+        "performance" => ModelCfg {
+            key: "performance",
+            display_name: "Performance",
+            max_input_tokens: 272_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "efficient" => ModelCfg {
+            key: "efficient",
+            display_name: "Efficient",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "qmodel_latest" | "qwen3.7-max" => ModelCfg {
+            key: "qmodel_latest",
+            display_name: "Qwen3.7-Max",
+            max_input_tokens: 1_000_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "qmodel" | "qwen3.6-plus" => ModelCfg {
+            key: "qmodel",
+            display_name: "Qwen3.6-Plus",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "dmodel" | "deepseek-v4-pro" => ModelCfg {
+            key: "dmodel",
+            display_name: "DeepSeek-V4-Pro",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
+        "dfmodel" | "deepseek-v4-flash" => ModelCfg {
+            key: "dfmodel",
+            display_name: "DeepSeek-V4-Flash",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
+        "gm51model" | "glm-5.1" => ModelCfg {
+            key: "gm51model",
+            display_name: "GLM-5.1",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
+        "kmodel" | "kimi-k2.6" => ModelCfg {
+            key: "kmodel",
+            display_name: "Kimi-K2.6",
+            max_input_tokens: 256_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "mmodel" | "minimax-m2.7" => ModelCfg {
+            key: "mmodel",
+            display_name: "MiniMax-M2.7",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        _ => ModelCfg {
+            key: "lite",
+            display_name: "Lite",
+            max_input_tokens: 180_000,
+            is_vl: false,
+            is_reasoning: false,
+        },
     }
 }
 
@@ -480,8 +559,9 @@ impl Provider for QoderProvider {
         let session = build_cosy_session(&tokens)?;
         let payload_b64 = build_payload_b64(&session.info);
         let cosy_date = format!("{}", chrono::Utc::now().timestamp());
-        let model = map_model(req.upstream_model()).to_string();
-        let body = build_chat_body(req, &model);
+        let cfg = model_cfg(req.upstream_model());
+        let model = cfg.key.to_string();
+        let body = build_chat_body(req, &cfg);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         let body_encoded = encode_qoder_payload(body_str.as_bytes());
         let path_sig = path_sig_from_url(CHAT_URL);
@@ -1005,20 +1085,16 @@ fn estimate_tokens(text: &str) -> i64 {
     n.max(1)
 }
 
-fn build_chat_body(req: &ChatCompletionRequest, model: &str) -> Value {
+fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
     let prompt = extract_user_text(req);
     let mut messages: Vec<Value> = Vec::new();
     let has_system = req.messages.iter().any(|m| m.role == "system");
     if !has_system {
+        let sys = "You are a helpful AI assistant. Answer the user's questions clearly and concisely. Maintain context from earlier turns in the conversation.";
         messages.push(json!({
             "role": "system",
-            "content": "You are a helpful AI assistant. Answer the user's questions clearly and concisely.",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
-                }
-            ]
+            "content": sys,
+            "contents": [{ "type": "text", "text": sys }]
         }));
     }
     for m in &req.messages {
@@ -1026,12 +1102,7 @@ fn build_chat_body(req: &ChatCompletionRequest, model: &str) -> Value {
         messages.push(json!({
             "role": m.role,
             "content": content_str,
-            "contents": [
-                {
-                    "type": "text",
-                    "text": content_str
-                }
-            ]
+            "contents": [{ "type": "text", "text": content_str }]
         }));
     }
     let system_text = messages
@@ -1040,10 +1111,6 @@ fn build_chat_body(req: &ChatCompletionRequest, model: &str) -> Value {
         .and_then(|m| m.get("content").and_then(|c| c.as_str()))
         .unwrap_or("")
         .to_string();
-    let is_reasoning = matches!(
-        model,
-        "ultimate" | "dmodel" | "dfmodel" | "gm51model"
-    );
     let max_tokens = req.max_tokens.unwrap_or(32_768);
     let req_id = Uuid::new_v4().to_string();
     let chat_record_id = Uuid::new_v4().to_string();
@@ -1075,29 +1142,35 @@ fn build_chat_body(req: &ChatCompletionRequest, model: &str) -> Value {
             "imageUrls": null,
             "extra": {
                 "context": [],
-                "modelConfig": { "key": model, "is_reasoning": is_reasoning },
+                "modelConfig": {
+                    "key": cfg.key,
+                    "is_reasoning": cfg.is_reasoning
+                },
                 "originalContent": { "type": "text", "text": prompt }
             },
             "features": [],
             "text": { "type": "text", "text": prompt }
         },
         "model_config": {
-            "key": model,
-            "display_name": model,
-            "is_vl": true,
-            "is_reasoning": is_reasoning,
-            "max_input_tokens": 180000,
+            "key": cfg.key,
+            "display_name": cfg.display_name,
+            "model": "",
             "format": "openai",
-            "source": "system"
+            "is_vl": cfg.is_vl,
+            "is_reasoning": cfg.is_reasoning,
+            "api_key": "",
+            "url": "",
+            "source": "system",
+            "max_input_tokens": cfg.max_input_tokens
         },
         "business": {
             "product": "cli",
             "version": COSY_VERSION,
             "type": "agent",
-            "stage": "start",
             "id": Uuid::new_v4().to_string(),
             "name": prompt.chars().take(30).collect::<String>(),
-            "begin_at": chrono::Utc::now().timestamp_millis()
+            "begin_at": chrono::Utc::now().timestamp_millis(),
+            "stage": "start"
         }
     })
 }
