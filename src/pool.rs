@@ -1,12 +1,14 @@
 use crate::config::Config;
-use crate::db::{self, Account};
+use crate::db::{self, Account, NewRequestLog};
 use crate::error::{AppError, AppResult, ProviderError};
 use crate::openai::ChatCompletionRequest;
 use crate::providers::{ChatOutcome, Provider};
 use crate::state::AppState;
 use chrono::{Duration, Utc};
+use serde_json::Value;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{info, warn};
 
 pub async fn handle_chat(
@@ -23,37 +25,83 @@ pub async fn handle_chat(
         other => return Err(AppError::NotImplemented(other.into())),
     };
 
-    // try up to 3 accounts
+    let model = req.model.clone();
+    let started = Instant::now();
     let mut last_err: Option<AppError> = None;
-    for attempt in 0..3 {
-        let mut account = match db::pick_account(&state.pool, provider_id).await {
-            Ok(a) => a,
-            Err(e) => {
-                if attempt == 0 {
-                    return Err(e);
-                }
-                break;
-            }
-        };
+    let mut last_account: Option<Account> = None;
+    let mut tried: Vec<String> = Vec::new();
 
+    for attempt in 0..3 {
+        let (mut account, strategy) =
+            match db::pick_account(&state.pool, provider_id, &tried).await {
+                Ok(v) => v,
+                Err(e) => {
+                    if attempt == 0 {
+                        let _ = log_request(
+                            &state.pool,
+                            provider_id,
+                            &model,
+                            "error",
+                            false,
+                            started.elapsed().as_millis() as i64,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(e.to_string()),
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    break;
+                }
+            };
+
+        tried.push(account.id.clone());
         info!(
             account = %account.id,
             provider = provider_id,
+            strategy = strategy.as_str(),
             attempt,
             "picked account"
         );
 
         if let Err(e) = provider.ensure_fresh_auth(&mut account).await {
             apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+            let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+            last_account = Some(account);
             last_err = Some(e.into());
             continue;
         }
-        // persist refreshed tokens
         account.updated_at = db::now_rfc3339();
         db::update_account(&state.pool, &account).await?;
 
         match provider.chat(&account, &req).await {
             Ok(outcome) => {
+                let duration_ms = started.elapsed().as_millis() as i64;
+                let (stream, prompt, completion, total) = match &outcome {
+                    ChatOutcome::Json(v) => {
+                        let (p, c, t) = extract_usage(v);
+                        (false, p, c, t)
+                    }
+                    ChatOutcome::Stream(_) => (true, None, None, None),
+                };
+                let _ = log_request(
+                    &state.pool,
+                    provider_id,
+                    &model,
+                    "success",
+                    stream,
+                    duration_ms,
+                    prompt,
+                    completion,
+                    total,
+                    Some(&account),
+                    None,
+                )
+                .await;
+                let _ =
+                    db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
                 account.last_used_at = Some(db::now_rfc3339());
                 account.last_error = None;
                 account.updated_at = db::now_rfc3339();
@@ -63,12 +111,81 @@ pub async fn handle_chat(
             Err(e) => {
                 warn!(account = %account.id, error = %e, "upstream chat failed");
                 apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+                last_account = Some(account);
                 last_err = Some(e.into());
             }
         }
     }
 
-    Err(last_err.unwrap_or_else(|| AppError::NoAccounts(provider_id.into())))
+    let err = last_err.unwrap_or_else(|| AppError::NoAccounts(provider_id.into()));
+    let _ = log_request(
+        &state.pool,
+        provider_id,
+        &model,
+        "error",
+        false,
+        started.elapsed().as_millis() as i64,
+        None,
+        None,
+        None,
+        last_account.as_ref(),
+        Some(err.to_string()),
+    )
+    .await;
+    Err(err)
+}
+
+fn extract_usage(v: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let usage = match v.get("usage") {
+        Some(u) => u,
+        None => return (None, None, None),
+    };
+    let as_i64 = |key: &str| {
+        usage
+            .get(key)
+            .and_then(|x| x.as_i64().or_else(|| x.as_u64().map(|n| n as i64)))
+    };
+    let prompt = as_i64("prompt_tokens").or_else(|| as_i64("input_tokens"));
+    let completion = as_i64("completion_tokens").or_else(|| as_i64("output_tokens"));
+    let total = as_i64("total_tokens").or_else(|| match (prompt, completion) {
+        (Some(p), Some(c)) => Some(p + c),
+        _ => None,
+    });
+    (prompt, completion, total)
+}
+
+async fn log_request(
+    pool: &SqlitePool,
+    provider: &str,
+    model: &str,
+    status: &str,
+    stream: bool,
+    duration_ms: i64,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    account: Option<&Account>,
+    error_message: Option<String>,
+) -> AppResult<()> {
+    db::insert_request_log(
+        pool,
+        NewRequestLog {
+            provider: provider.into(),
+            model: Some(model.into()),
+            status: status.into(),
+            stream,
+            duration_ms: Some(duration_ms),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            account_id: account.map(|a| a.id.clone()),
+            account_email: account.and_then(|a| a.email.clone()),
+            error_message: error_message.map(|e| e.chars().take(500).collect()),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn apply_provider_error(

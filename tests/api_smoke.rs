@@ -16,7 +16,7 @@ async fn test_app() -> (axum::Router, PathBuf) {
     cfg.db_path = db_path.clone();
     cfg.api_key = "test-pool-key".into();
     cfg.admin_key = "test-admin-key".into();
-    cfg.cors_origin = "http://localhost:5173".into();
+    cfg.cors_origin = "http://localhost:1941".into();
     let pool = db::connect(&cfg.db_path).await.unwrap();
     let state = AppState::new(pool, cfg);
     (api::router(state), dir)

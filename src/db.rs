@@ -87,11 +87,375 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           is_active INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS request_logs (
+          id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT,
+          status TEXT NOT NULL,
+          stream INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          total_tokens INTEGER,
+          account_id TEXT,
+          account_email TEXT,
+          error_message TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_request_logs_created
+          ON request_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_provider
+          ON request_logs(provider, created_at DESC);
+        CREATE TABLE IF NOT EXISTS provider_settings (
+          provider TEXT PRIMARY KEY,
+          load_balance TEXT NOT NULL DEFAULT 'round_robin',
+          sticky_account_id TEXT,
+          rr_cursor TEXT,
+          updated_at TEXT NOT NULL
+        );
         "#,
     )
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadBalance {
+    RoundRobin,
+    Sequential,
+    LeastUsed,
+    Priority,
+    Random,
+}
+
+impl LoadBalance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round_robin",
+            Self::Sequential => "sequential",
+            Self::LeastUsed => "least_used",
+            Self::Priority => "priority",
+            Self::Random => "random",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "round_robin" | "round-robin" | "rr" => Some(Self::RoundRobin),
+            "sequential" | "sticky" | "stick" => Some(Self::Sequential),
+            "least_used" | "least-used" | "lru" => Some(Self::LeastUsed),
+            "priority" => Some(Self::Priority),
+            "random" => Some(Self::Random),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "Round robin",
+            Self::Sequential => "Sequential",
+            Self::LeastUsed => "Least used",
+            Self::Priority => "Priority",
+            Self::Random => "Random",
+        }
+    }
+}
+
+impl Default for LoadBalance {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ProviderSettingsRow {
+    pub provider: String,
+    pub load_balance: String,
+    pub sticky_account_id: Option<String>,
+    pub rr_cursor: Option<String>,
+    pub updated_at: String,
+}
+
+pub async fn get_provider_settings(
+    pool: &SqlitePool,
+    provider: &str,
+) -> AppResult<ProviderSettingsRow> {
+    if let Some(row) = sqlx::query_as::<_, ProviderSettingsRow>(
+        "SELECT * FROM provider_settings WHERE provider = ?",
+    )
+    .bind(provider)
+    .fetch_optional(pool)
+    .await?
+    {
+        return Ok(row);
+    }
+    let now = now_rfc3339();
+    let row = ProviderSettingsRow {
+        provider: provider.into(),
+        load_balance: LoadBalance::default().as_str().into(),
+        sticky_account_id: None,
+        rr_cursor: None,
+        updated_at: now.clone(),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO provider_settings (provider, load_balance, sticky_account_id, rr_cursor, updated_at)
+        VALUES (?, ?, NULL, NULL, ?)
+        "#,
+    )
+    .bind(&row.provider)
+    .bind(&row.load_balance)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn list_provider_settings(pool: &SqlitePool) -> AppResult<Vec<ProviderSettingsRow>> {
+    let providers = ["grok-cli", "qoder"];
+    let mut out = Vec::with_capacity(providers.len());
+    for p in providers {
+        out.push(get_provider_settings(pool, p).await?);
+    }
+    Ok(out)
+}
+
+pub async fn set_provider_load_balance(
+    pool: &SqlitePool,
+    provider: &str,
+    strategy: LoadBalance,
+) -> AppResult<ProviderSettingsRow> {
+    let _ = get_provider_settings(pool, provider).await?;
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"
+        UPDATE provider_settings
+        SET load_balance = ?, sticky_account_id = NULL, rr_cursor = NULL, updated_at = ?
+        WHERE provider = ?
+        "#,
+    )
+    .bind(strategy.as_str())
+    .bind(&now)
+    .bind(provider)
+    .execute(pool)
+    .await?;
+    get_provider_settings(pool, provider).await
+}
+
+async fn set_rr_cursor(pool: &SqlitePool, provider: &str, account_id: &str) -> AppResult<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE provider_settings SET rr_cursor = ?, updated_at = ? WHERE provider = ?",
+    )
+    .bind(account_id)
+    .bind(&now)
+    .bind(provider)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_sticky_account(
+    pool: &SqlitePool,
+    provider: &str,
+    account_id: Option<&str>,
+) -> AppResult<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE provider_settings SET sticky_account_id = ?, updated_at = ? WHERE provider = ?",
+    )
+    .bind(account_id)
+    .bind(&now)
+    .bind(provider)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn note_pick_success(
+    pool: &SqlitePool,
+    provider: &str,
+    strategy: LoadBalance,
+    account_id: &str,
+) -> AppResult<()> {
+    match strategy {
+        LoadBalance::RoundRobin => set_rr_cursor(pool, provider, account_id).await,
+        LoadBalance::Sequential => set_sticky_account(pool, provider, Some(account_id)).await,
+        _ => Ok(()),
+    }
+}
+
+pub async fn note_pick_failure(
+    pool: &SqlitePool,
+    provider: &str,
+    strategy: LoadBalance,
+    account_id: &str,
+) -> AppResult<()> {
+    if strategy == LoadBalance::Sequential {
+        let settings = get_provider_settings(pool, provider).await?;
+        if settings.sticky_account_id.as_deref() == Some(account_id) {
+            set_sticky_account(pool, provider, None).await?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RequestLog {
+    pub id: String,
+    pub created_at: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub stream: i64,
+    pub duration_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRequestLog {
+    pub provider: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub stream: bool,
+    pub duration_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub error_message: Option<String>,
+}
+
+pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppResult<String> {
+    let id = Uuid::new_v4().to_string();
+    let created_at = now_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO request_logs (
+          id, created_at, provider, model, status, stream, duration_ms,
+          prompt_tokens, completion_tokens, total_tokens,
+          account_id, account_email, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(&created_at)
+    .bind(&log.provider)
+    .bind(&log.model)
+    .bind(&log.status)
+    .bind(if log.stream { 1 } else { 0 })
+    .bind(log.duration_ms)
+    .bind(log.prompt_tokens)
+    .bind(log.completion_tokens)
+    .bind(log.total_tokens)
+    .bind(&log.account_id)
+    .bind(&log.account_email)
+    .bind(&log.error_message)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn list_request_logs(
+    pool: &SqlitePool,
+    provider: Option<&str>,
+    limit: i64,
+) -> AppResult<Vec<RequestLog>> {
+    let limit = limit.clamp(1, 500);
+    if let Some(p) = provider {
+        let rows = sqlx::query_as::<_, RequestLog>(
+            r#"
+            SELECT * FROM request_logs
+            WHERE provider = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(p)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    } else {
+        let rows = sqlx::query_as::<_, RequestLog>(
+            r#"
+            SELECT * FROM request_logs
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+}
+
+pub async fn usage_summary(pool: &SqlitePool) -> AppResult<serde_json::Value> {
+    let totals = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+        r#"
+        SELECT
+          COUNT(*) as requests,
+          COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as success,
+          COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as errors,
+          COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+          COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+          COALESCE(SUM(total_tokens), 0) as total_tokens
+        FROM request_logs
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let by_model = sqlx::query_as::<_, (Option<String>, String, i64, i64, i64, i64)>(
+        r#"
+        SELECT
+          model,
+          provider,
+          COUNT(*) as requests,
+          COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+          COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+          COALESCE(SUM(total_tokens), 0) as total_tokens
+        FROM request_logs
+        GROUP BY model, provider
+        ORDER BY total_tokens DESC, requests DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let models: Vec<serde_json::Value> = by_model
+        .into_iter()
+        .map(|(model, provider, requests, prompt, completion, total)| {
+            serde_json::json!({
+                "model": model.unwrap_or_else(|| "unknown".into()),
+                "provider": provider,
+                "requests": requests,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "requests": totals.0,
+        "success": totals.1,
+        "errors": totals.2,
+        "prompt_tokens": totals.3,
+        "completion_tokens": totals.4,
+        "total_tokens": totals.5,
+        "by_model": models,
+    }))
 }
 
 pub fn now_rfc3339() -> String {
@@ -300,7 +664,10 @@ pub async fn delete_account(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn pick_account(pool: &SqlitePool, provider: &str) -> AppResult<Account> {
+pub async fn list_eligible_accounts(
+    pool: &SqlitePool,
+    provider: &str,
+) -> AppResult<Vec<Account>> {
     let now = now_rfc3339();
     let rows = sqlx::query_as::<_, Account>(
         r#"
@@ -309,17 +676,96 @@ pub async fn pick_account(pool: &SqlitePool, provider: &str) -> AppResult<Accoun
           AND is_active = 1
           AND (cooldown_until IS NULL OR cooldown_until < ?)
         ORDER BY priority ASC, last_used_at IS NOT NULL, last_used_at ASC, created_at ASC
-        LIMIT 8
         "#,
     )
     .bind(provider)
     .bind(&now)
     .fetch_all(pool)
     .await?;
+    Ok(rows)
+}
 
-    rows.into_iter()
-        .next()
-        .ok_or_else(|| AppError::NoAccounts(provider.into()))
+pub async fn pick_account(
+    pool: &SqlitePool,
+    provider: &str,
+    exclude_ids: &[String],
+) -> AppResult<(Account, LoadBalance)> {
+    let settings = get_provider_settings(pool, provider).await?;
+    let strategy =
+        LoadBalance::parse(&settings.load_balance).unwrap_or_default();
+    let mut eligible = list_eligible_accounts(pool, provider).await?;
+    if !exclude_ids.is_empty() {
+        eligible.retain(|a| !exclude_ids.iter().any(|id| id == &a.id));
+    }
+    if eligible.is_empty() {
+        return Err(AppError::NoAccounts(provider.into()));
+    }
+
+    let chosen = match strategy {
+        LoadBalance::Sequential => {
+            if let Some(sticky) = settings.sticky_account_id.as_ref() {
+                if let Some(a) = eligible.iter().find(|a| &a.id == sticky) {
+                    a.clone()
+                } else {
+                    eligible.into_iter().next().unwrap()
+                }
+            } else {
+                eligible.into_iter().next().unwrap()
+            }
+        }
+        LoadBalance::RoundRobin => {
+            let cursor = settings.rr_cursor.as_deref();
+            if let Some(cur) = cursor {
+                if let Some(idx) = eligible.iter().position(|a| a.id == cur) {
+                    let next = (idx + 1) % eligible.len();
+                    eligible[next].clone()
+                } else {
+                    eligible[0].clone()
+                }
+            } else {
+                eligible[0].clone()
+            }
+        }
+        LoadBalance::LeastUsed => {
+            eligible.sort_by(|a, b| {
+                match (&a.last_used_at, &b.last_used_at) {
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, None) => a.created_at.cmp(&b.created_at),
+                    (Some(x), Some(y)) => x.cmp(y).then_with(|| a.created_at.cmp(&b.created_at)),
+                }
+            });
+            eligible[0].clone()
+        }
+        LoadBalance::Priority => {
+            eligible.sort_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| match (&a.last_used_at, &b.last_used_at) {
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, None) => a.created_at.cmp(&b.created_at),
+                        (Some(x), Some(y)) => x.cmp(y),
+                    })
+            });
+            eligible[0].clone()
+        }
+        LoadBalance::Random => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            now_rfc3339().hash(&mut hasher);
+            provider.hash(&mut hasher);
+            eligible.len().hash(&mut hasher);
+            if let Some(first) = eligible.first() {
+                first.id.hash(&mut hasher);
+            }
+            let idx = (hasher.finish() as usize) % eligible.len();
+            eligible[idx].clone()
+        }
+    };
+
+    Ok((chosen, strategy))
 }
 
 pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {

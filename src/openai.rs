@@ -68,6 +68,7 @@ pub struct ModelsResponse {
 
 pub fn default_models() -> ModelsResponse {
     let ids = [
+        ("gcli/grok-build", "grok-cli"),
         ("gcli/grok-4.5", "grok-cli"),
         ("gcli/grok-4.5-high", "grok-cli"),
         ("gcli/grok-4.5-medium", "grok-cli"),
@@ -77,8 +78,24 @@ pub fn default_models() -> ModelsResponse {
         ("gcli/grok-code-fast-1", "grok-cli"),
         ("gcli/grok-3", "grok-cli"),
         ("qd/lite", "qoder"),
-        ("qd/Lite", "qoder"),
+        ("qd/auto", "qoder"),
+        ("qd/ultimate", "qoder"),
+        ("qd/performance", "qoder"),
+        ("qd/efficient", "qoder"),
         ("qd/qmodel_latest", "qoder"),
+        ("qd/qwen3.7-max", "qoder"),
+        ("qd/qmodel", "qoder"),
+        ("qd/qwen3.6-plus", "qoder"),
+        ("qd/dmodel", "qoder"),
+        ("qd/deepseek-v4-pro", "qoder"),
+        ("qd/dfmodel", "qoder"),
+        ("qd/deepseek-v4-flash", "qoder"),
+        ("qd/gm51model", "qoder"),
+        ("qd/glm-5.1", "qoder"),
+        ("qd/kmodel", "qoder"),
+        ("qd/kimi-k2.6", "qoder"),
+        ("qd/mmodel", "qoder"),
+        ("qd/minimax-m2.7", "qoder"),
     ];
     ModelsResponse {
         object: "list",

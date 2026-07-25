@@ -6,7 +6,7 @@ pub mod models;
 use crate::state::AppState;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 
 pub fn router(state: AppState) -> Router {
@@ -17,6 +17,15 @@ pub fn router(state: AppState) -> Router {
 
     let admin = Router::new()
         .route("/admin/stats", get(admin::stats))
+        .route("/admin/connection", get(admin::connection))
+        .route("/admin/models", get(models::list_models_admin))
+        .route("/admin/usage", get(admin::usage))
+        .route("/admin/requests", get(admin::list_requests))
+        .route("/admin/providers", get(admin::list_provider_settings))
+        .route(
+            "/admin/providers/{provider}",
+            patch(admin::patch_provider_settings),
+        )
         .route("/admin/accounts", get(admin::list_accounts).post(admin::import_accounts))
         .route(
             "/admin/accounts/{id}",

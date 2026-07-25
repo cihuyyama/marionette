@@ -33,8 +33,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .allow_headers(Any)
     } else {
         use axum::http::{HeaderValue, Method};
+        let mut allowed_origins = Vec::new();
+        for origin in cors_origin.split(',') {
+            let o = origin.trim();
+            if !o.is_empty() {
+                if let Ok(val) = o.parse::<HeaderValue>() {
+                    allowed_origins.push(val);
+                }
+            }
+        }
+        let mut extra_origins = Vec::new();
+        for val in &allowed_origins {
+            if let Ok(s) = val.to_str() {
+                if s.contains("localhost") {
+                    let alt = s.replace("localhost", "127.0.0.1");
+                    if let Ok(alt_val) = alt.parse::<HeaderValue>() {
+                        extra_origins.push(alt_val);
+                    }
+                } else if s.contains("127.0.0.1") {
+                    let alt = s.replace("127.0.0.1", "localhost");
+                    if let Ok(alt_val) = alt.parse::<HeaderValue>() {
+                        extra_origins.push(alt_val);
+                    }
+                }
+            }
+        }
+        allowed_origins.extend(extra_origins);
+
         CorsLayer::new()
-            .allow_origin(cors_origin.parse::<HeaderValue>()?)
+            .allow_origin(allowed_origins)
             .allow_methods([
                 Method::GET,
                 Method::POST,

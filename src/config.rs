@@ -40,7 +40,7 @@ impl Config {
             admin_key: env::var("MARIONETTE_ADMIN_KEY")
                 .unwrap_or_else(|_| "change-me-admin".into()),
             cors_origin: env::var("MARIONETTE_CORS_ORIGIN")
-                .unwrap_or_else(|_| "http://localhost:5173".into()),
+                .unwrap_or_else(|_| "http://localhost:1941".into()),
             cooldown_hours: env::var("MARIONETTE_COOLDOWN_HOURS")
                 .ok()
                 .and_then(|s| s.parse().ok())

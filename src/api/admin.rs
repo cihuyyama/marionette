@@ -30,6 +30,128 @@ pub async fn stats(State(state): State<AppState>, _auth: AdminAuth) -> AppResult
     Ok(Json(db::stats(&state.pool).await?))
 }
 
+pub async fn connection(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    let host = &state.config.host;
+    let port = state.config.port;
+    let public_host = if host == "0.0.0.0" || host == "::" {
+        "127.0.0.1"
+    } else {
+        host.as_str()
+    };
+    Ok(Json(json!({
+        "host": host,
+        "port": port,
+        "base_url": format!("http://{}:{}", public_host, port),
+        "pool_key": state.config.api_key,
+        "cors_origin": state.config.cors_origin,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderLbBody {
+    pub load_balance: String,
+}
+
+pub async fn list_provider_settings(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    let rows = db::list_provider_settings(&state.pool).await?;
+    let providers: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            let lb = db::LoadBalance::parse(&r.load_balance).unwrap_or_default();
+            json!({
+                "provider": r.provider,
+                "load_balance": lb.as_str(),
+                "load_balance_label": lb.label(),
+                "sticky_account_id": r.sticky_account_id,
+                "rr_cursor": r.rr_cursor,
+                "updated_at": r.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "providers": providers,
+        "strategies": [
+            {"id": "round_robin", "label": "Round robin", "hint": "Rotate evenly across healthy accounts"},
+            {"id": "sequential", "label": "Sequential", "hint": "Stick to one account until it fails or is sealed"},
+            {"id": "least_used", "label": "Least used", "hint": "Prefer the account idle the longest"},
+            {"id": "priority", "label": "Priority", "hint": "Lowest priority number first, then least used"},
+            {"id": "random", "label": "Random", "hint": "Pick a random healthy account"},
+        ]
+    })))
+}
+
+pub async fn patch_provider_settings(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(provider): Path<String>,
+    Json(body): Json<ProviderLbBody>,
+) -> AppResult<Json<Value>> {
+    if provider != "grok-cli" && provider != "qoder" {
+        return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
+    }
+    let strategy = db::LoadBalance::parse(&body.load_balance).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "invalid load_balance: {} (use round_robin|sequential|least_used|priority|random)",
+            body.load_balance
+        ))
+    })?;
+    let row = db::set_provider_load_balance(&state.pool, &provider, strategy).await?;
+    Ok(Json(json!({
+        "provider": row.provider,
+        "load_balance": strategy.as_str(),
+        "load_balance_label": strategy.label(),
+        "sticky_account_id": row.sticky_account_id,
+        "rr_cursor": row.rr_cursor,
+        "updated_at": row.updated_at,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestsQuery {
+    pub provider: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn list_requests(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Query(q): Query<RequestsQuery>,
+) -> AppResult<Json<Value>> {
+    let limit = q.limit.unwrap_or(100);
+    let rows = db::list_request_logs(&state.pool, q.provider.as_deref(), limit).await?;
+    let logs: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "created_at": r.created_at,
+                "provider": r.provider,
+                "model": r.model,
+                "status": r.status,
+                "stream": r.stream != 0,
+                "duration_ms": r.duration_ms,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "total_tokens": r.total_tokens,
+                "account_id": r.account_id,
+                "account_email": r.account_email,
+                "error_message": r.error_message,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "requests": logs })))
+}
+
+pub async fn usage(State(state): State<AppState>, _auth: AdminAuth) -> AppResult<Json<Value>> {
+    Ok(Json(db::usage_summary(&state.pool).await?))
+}
+
 pub async fn list_accounts(
     State(state): State<AppState>,
     _auth: AdminAuth,
