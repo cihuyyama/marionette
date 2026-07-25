@@ -805,6 +805,21 @@ pub async fn delete_account(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub async fn delete_accounts_by_providers(
+    pool: &SqlitePool,
+    providers: &[&str],
+) -> AppResult<u64> {
+    let mut total = 0u64;
+    for p in providers {
+        let r = sqlx::query("DELETE FROM accounts WHERE provider = ?")
+            .bind(p)
+            .execute(pool)
+            .await?;
+        total += r.rows_affected();
+    }
+    Ok(total)
+}
+
 pub async fn list_eligible_accounts(
     pool: &SqlitePool,
     provider: &str,

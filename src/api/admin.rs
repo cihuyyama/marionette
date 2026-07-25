@@ -1,6 +1,7 @@
 use crate::auth::AdminAuth;
 use crate::db::{self, Account};
 use crate::error::{AppError, AppResult};
+use crate::import_util;
 use crate::providers::Provider;
 use crate::state::AppState;
 use axum::{
@@ -15,6 +16,11 @@ use uuid::Uuid;
 pub struct ListQuery {
     pub provider: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportQuery {
+    pub replace: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,8 +272,57 @@ pub async fn refresh_account(
 pub async fn import_accounts(
     State(state): State<AppState>,
     _auth: AdminAuth,
+    Query(q): Query<ImportQuery>,
     Json(body): Json<Value>,
 ) -> AppResult<Json<Value>> {
+    let replace = q.replace.unwrap_or(false);
+
+    if import_util::is_9router_backup(&body) {
+        let accounts = import_util::parse_9router_backup(&body);
+        let total_parsed = accounts.len();
+
+        let mut deleted = 0u64;
+        if replace {
+            deleted = db::delete_accounts_by_providers(
+                &state.pool,
+                import_util::SUPPORTED_PROVIDERS,
+            )
+            .await?;
+            tracing::info!(deleted, "replace-all: wiped existing accounts");
+        }
+
+        let mut inserted = 0u64;
+        let mut skipped = 0u64;
+        for acc in accounts {
+            match db::upsert_account(&state.pool, &acc).await {
+                Ok(()) => inserted += 1,
+                Err(e) => {
+                    tracing::warn!(error = %e, id = %acc.id, "backup import skip");
+                    skipped += 1;
+                }
+            }
+        }
+
+        return Ok(Json(json!({
+            "source": "9router-backup",
+            "parsed": total_parsed,
+            "inserted": inserted,
+            "updated": 0,
+            "skipped": skipped,
+            "deleted": deleted,
+        })));
+    }
+
+    let mut deleted = 0u64;
+    if replace {
+        deleted = db::delete_accounts_by_providers(
+            &state.pool,
+            import_util::SUPPORTED_PROVIDERS,
+        )
+        .await?;
+        tracing::info!(deleted, "replace-all: wiped existing accounts");
+    }
+
     let items = normalize_import_items(&body)?;
     let mut inserted = 0u64;
     let mut updated = 0u64;
@@ -287,7 +342,8 @@ pub async fn import_accounts(
     Ok(Json(json!({
         "inserted": inserted,
         "updated": updated,
-        "skipped": skipped
+        "skipped": skipped,
+        "deleted": deleted,
     })))
 }
 

@@ -62,6 +62,14 @@ import-json file:
 import-9router db:
     cargo run --bin marionette-import -- --from-9router {{db}}
 
+# Import from 9Router full backup JSON (auto-filters grok-cli + qoder): just import-9router-backup path/to/backup.json
+import-9router-backup file:
+    cargo run --bin marionette-import -- --from-9router-backup {{file}}
+
+# Import from 9Router backup JSON with replace-all: just import-9router-backup-replace path/to/backup.json
+import-9router-backup-replace file:
+    cargo run --bin marionette-import -- --from-9router-backup {{file}} --replace
+
 # ── Setup ────────────────────────────────────────────
 
 # First-time setup: build backend, install web deps, copy .env

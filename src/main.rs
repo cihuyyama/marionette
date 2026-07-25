@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+use axum::extract::DefaultBodyLimit;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -73,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut app = api::router(state)
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 

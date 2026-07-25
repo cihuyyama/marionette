@@ -35,6 +35,9 @@ export type ImportResult = {
   inserted: number;
   updated: number;
   skipped: number;
+  deleted?: number;
+  parsed?: number;
+  source?: string;
 };
 
 export type ModelObject = {
@@ -199,9 +202,10 @@ export function refreshAccount(id: string, settings?: Settings) {
   );
 }
 
-export function importAccounts(body: unknown, settings?: Settings) {
+export function importAccounts(body: unknown, replace = false, settings?: Settings) {
+  const qs = replace ? "?replace=true" : "";
   return request<ImportResult>(
-    "/admin/accounts",
+    `/admin/accounts${qs}`,
     {
       method: "POST",
       body: JSON.stringify(body),

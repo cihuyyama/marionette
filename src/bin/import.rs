@@ -1,5 +1,6 @@
 use marionette::config::Config;
 use marionette::db::{self, Account};
+use marionette::import_util;
 use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
@@ -8,10 +9,12 @@ use uuid::Uuid;
 fn usage() {
     eprintln!(
         "Usage:
-  marionette-import --file <path.json> [--provider grok-cli|qoder] [--db path]
-  marionette-import --from-9router <data.sqlite> [--db path]
+  marionette-import --file <path.json> [--provider grok-cli|qoder] [--replace] [--db path]
+  marionette-import --from-9router <data.sqlite> [--provider grok-cli|qoder] [--replace] [--db path]
+  marionette-import --from-9router-backup <backup.json> [--replace] [--db path]
 
-Env: MARIONETTE_DB (default ./data/marionette.sqlite)"
+Env: MARIONETTE_DB (default ./data/marionette.sqlite)
+  --replace  wipe existing supported-provider accounts before importing"
     );
 }
 
@@ -25,8 +28,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut file: Option<PathBuf> = None;
     let mut from_9router: Option<PathBuf> = None;
+    let mut from_9router_backup: Option<PathBuf> = None;
     let mut provider = "grok-cli".to_string();
     let mut db_path: Option<PathBuf> = None;
+    let mut replace = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,9 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 from_9router = Some(PathBuf::from(&args[i]));
             }
+            "--from-9router-backup" => {
+                i += 1;
+                from_9router_backup = Some(PathBuf::from(&args[i]));
+            }
             "--provider" => {
                 i += 1;
                 provider = args[i].clone();
+            }
+            "--replace" => {
+                replace = true;
             }
             "--db" => {
                 i += 1;
@@ -65,10 +77,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut inserted = 0u64;
     let mut updated = 0u64;
     let mut skipped = 0u64;
+    let mut deleted = 0u64;
+
+    if let Some(path) = from_9router_backup {
+        let raw = std::fs::read_to_string(&path)?;
+        let v: Value = serde_json::from_str(&raw)?;
+
+        let accounts = import_util::parse_9router_backup(&v);
+        let total_parsed = accounts.len();
+
+        if replace {
+            deleted = db::delete_accounts_by_providers(
+                &pool,
+                import_util::SUPPORTED_PROVIDERS,
+            )
+            .await?;
+            eprintln!("replace: deleted {deleted} existing accounts");
+        }
+
+        for acc in accounts {
+            let id = acc.id.clone();
+            match db::upsert_account(&pool, &acc).await {
+                Ok(()) => inserted += 1,
+                Err(e) => {
+                    eprintln!("skip {id}: {e}");
+                    skipped += 1;
+                }
+            }
+        }
+
+        println!(
+            "9router-backup import done: parsed={total_parsed} inserted={inserted} skipped={skipped} deleted={deleted} db={}",
+            cfg.db_path.display()
+        );
+        return Ok(());
+    }
+
+    if replace {
+        deleted = db::delete_accounts_by_providers(
+            &pool,
+            import_util::SUPPORTED_PROVIDERS,
+        )
+        .await?;
+        eprintln!("replace: deleted {deleted} existing accounts");
+    }
 
     if let Some(path) = file {
         let raw = std::fs::read_to_string(&path)?;
         let v: Value = serde_json::from_str(&raw)?;
+
+        if import_util::is_9router_backup(&v) {
+            let accounts = import_util::parse_9router_backup(&v);
+            let total_parsed = accounts.len();
+            for acc in accounts {
+                let id = acc.id.clone();
+                match db::upsert_account(&pool, &acc).await {
+                    Ok(()) => inserted += 1,
+                    Err(e) => {
+                        eprintln!("skip {id}: {e}");
+                        skipped += 1;
+                    }
+                }
+            }
+            println!(
+                "9router-backup import done: parsed={total_parsed} inserted={inserted} skipped={skipped} deleted={deleted} db={}",
+                cfg.db_path.display()
+            );
+            return Ok(());
+        }
+
         let items = extract_items(&v);
         for item in items {
             match import_one(&pool, &provider, &item).await {
@@ -122,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 eprintln!("9Router query failed: {e}");
-                eprintln!("Tip: use --file with JSON export instead.");
+                eprintln!("Tip: use --from-9router-backup with JSON export instead.");
                 skipped += 1;
             }
         }
@@ -132,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "import done: inserted={inserted} updated={updated} skipped={skipped} db={}",
+        "import done: inserted={inserted} updated={updated} skipped={skipped} deleted={deleted} db={}",
         cfg.db_path.display()
     );
     Ok(())

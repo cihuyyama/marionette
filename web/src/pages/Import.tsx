@@ -18,6 +18,7 @@ export function ImportPage() {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [drag, setDrag] = useState(false);
+  const [replace, setReplace] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   function applyFile(file: File) {
@@ -44,7 +45,7 @@ export function ImportPage() {
     }
     setLoading(true);
     try {
-      const res = await importAccounts(body);
+      const res = await importAccounts(body, replace);
       setResult(res);
     } catch (err) {
       setError(
@@ -57,6 +58,18 @@ export function ImportPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function resultSummary(r: ImportResult): string {
+    const parts: string[] = [];
+    if (r.source === "9router-backup" && r.parsed != null) {
+      parts.push(`parsed ${r.parsed}`);
+    }
+    parts.push(`inserted ${r.inserted}`);
+    if (r.updated) parts.push(`updated ${r.updated}`);
+    if (r.skipped) parts.push(`skipped ${r.skipped}`);
+    if (r.deleted) parts.push(`deleted ${r.deleted}`);
+    return parts.join(", ");
   }
 
   return (
@@ -73,8 +86,8 @@ export function ImportPage() {
       )}
       {result && (
         <div className="alert alert-ok" role="status">
-          Imported — inserted {result.inserted}, updated {result.updated}, skipped{" "}
-          {result.skipped}.
+          {result.source === "9router-backup" ? "9Router backup imported" : "Imported"} —{" "}
+          {resultSummary(result)}.
         </div>
       )}
 
@@ -123,19 +136,29 @@ export function ImportPage() {
             spellCheck={false}
           />
           <span className="hint">
-            Accepts array, {"{ accounts: [] }"}, or a single account. Tokens stay on the server;
-            responses are masked.
+            Accepts array, {"{ accounts: [] }"}, single account, or 9Router full backup JSON.
+            Tokens stay on the server; responses are masked.
           </span>
         </div>
+
+        <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+          <input
+            type="checkbox"
+            checked={replace}
+            onChange={(e) => setReplace(e.target.checked)}
+            style={{ marginRight: "0.5rem" }}
+          />
+          Replace all — wipe existing accounts for supported providers before importing
+        </label>
 
         <div className="btn-row">
           <button
             type="submit"
-            className="btn btn-primary"
+            className={`btn ${replace ? "btn-danger" : "btn-primary"}`}
             disabled={loading || !text.trim()}
           >
             {loading ? <span className="spinner inline-spinner" /> : null}
-            Import accounts
+            {replace ? "Replace & import" : "Import accounts"}
           </button>
           <button
             type="button"
