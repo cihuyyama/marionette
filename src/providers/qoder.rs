@@ -363,12 +363,32 @@ pub struct QoderProvider {
 
 impl QoderProvider {
     pub fn new() -> Self {
+        // HTTP/2 preferred: HTTP/1.1-only hit hyper chunked UnexpectedEof on Qoder SSE.
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
-            .http1_only()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .expect("qoder http client");
         Self { client }
+    }
+
+    fn format_reqwest_err(e: &reqwest::Error) -> String {
+        let mut parts = vec![format!("{e}")];
+        let mut src = std::error::Error::source(e);
+        while let Some(s) = src {
+            parts.push(format!("{s}"));
+            src = s.source();
+        }
+        parts.join(" | ")
+    }
+
+    fn is_chunked_eof(e: &reqwest::Error) -> bool {
+        let full = Self::format_reqwest_err(e);
+        full.contains("UnexpectedEof")
+            || full.contains("unexpected EOF")
+            || full.contains("chunk size line")
     }
 
     async fn do_job_token(&self, tokens: &QoderTokens) -> Result<JobTokenResponse, ProviderError> {
@@ -548,8 +568,9 @@ impl Provider for QoderProvider {
         );
 
         let req_model = req.model.clone();
+        let http_version = format!("{:?}", resp.version());
         let decode_ctx = format!(
-            "ct={content_type} ce={content_encoding} te={transfer_encoding}"
+            "ct={content_type} ce={content_encoding} te={transfer_encoding} http={http_version}"
         );
 
         if req.stream_enabled() {
@@ -561,22 +582,47 @@ impl Provider for QoderProvider {
                 let mut buffer = String::new();
                 let resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
                 let mut first_chunk_sent = false;
+                let mut any_content = false;
 
                 while let Some(chunk_res) = upstream_stream.next().await {
                     let chunk = match chunk_res {
                         Ok(c) => c,
                         Err(e) => {
+                            let chain = QoderProvider::format_reqwest_err(&e);
                             tracing::warn!(
-                                error = ?e,
+                                error = %chain,
                                 ctx = %decode_ctx_stream,
+                                first_chunk_sent,
+                                any_content,
                                 "qoder stream body decode failed"
                             );
-                            let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("qoder sse body decode: {e:?} ({decode_ctx_stream})"),
-                                )))
-                                .await;
+                            if first_chunk_sent || any_content {
+                                let chunk_json = json!({
+                                    "id": resp_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": chrono::Utc::now().timestamp(),
+                                    "model": req_model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "stop"
+                                    }]
+                                });
+                                let msg = format!(
+                                    "data: {}\n\ndata: [DONE]\n\n",
+                                    serde_json::to_string(&chunk_json).unwrap_or_default()
+                                );
+                                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                            } else {
+                                let _ = tx
+                                    .send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::UnexpectedEof,
+                                        format!(
+                                            "qoder sse body decode: {chain} ({decode_ctx_stream})"
+                                        ),
+                                    )))
+                                    .await;
+                            }
                             return;
                         }
                     };
@@ -590,6 +636,17 @@ impl Provider for QoderProvider {
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
                             continue;
+                        }
+
+                        if let Some(svc_err) = parse_qoder_service_error(&trimmed) {
+                            tracing::warn!(error = %svc_err, "qoder upstream error in SSE");
+                            let _ = tx
+                                .send(Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    svc_err,
+                                )))
+                                .await;
+                            return;
                         }
 
                         if let Some(inner) = parse_sse_line(&trimmed) {
@@ -632,6 +689,7 @@ impl Provider for QoderProvider {
                                 if !content.is_empty() {
                                     delta_out["content"] = json!(content);
                                     has_delta = true;
+                                    any_content = true;
                                 }
                             }
                             if let Some(reasoning) = delta
@@ -641,6 +699,7 @@ impl Provider for QoderProvider {
                                 if !reasoning.is_empty() {
                                     delta_out["reasoning_content"] = json!(reasoning);
                                     has_delta = true;
+                                    any_content = true;
                                 }
                             }
 
@@ -711,56 +770,72 @@ impl Provider for QoderProvider {
             let mut completion_tokens: i64 = 0;
             let mut total_tokens: i64 = 0;
             let mut upstream_stream = resp.bytes_stream();
+            let mut stream_eof_partial = false;
 
             while let Some(chunk_res) = upstream_stream.next().await {
-                let chunk = chunk_res.map_err(|e| {
-                    ProviderError::Transport(format!(
-                        "qoder sse body decode: {e:?} ({decode_ctx})"
-                    ))
-                })?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim_end_matches('\r').to_string();
-                    buffer = buffer[pos + 1..].to_string();
-
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
+                let chunk = match chunk_res {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let chain = Self::format_reqwest_err(&e);
+                        if Self::is_chunked_eof(&e) && !buffer.is_empty() {
+                            tracing::warn!(
+                                error = %chain,
+                                ctx = %decode_ctx,
+                                buffer_len = buffer.len(),
+                                "qoder non-stream chunked EOF; using partial SSE body"
+                            );
+                            stream_eof_partial = true;
+                            break;
+                        }
+                        return Err(ProviderError::Transport(format!(
+                            "qoder sse body decode: {chain} ({decode_ctx})"
+                        )));
                     }
+                };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+            }
 
-                    if let Some(inner) = parse_sse_line(&trimmed) {
-                        if let Some(u) = inner.get("usage") {
-                            if let Some(p) = usage_i64(u, "prompt_tokens")
-                                .or_else(|| usage_i64(u, "input_tokens"))
-                            {
-                                prompt_tokens = p;
-                            }
-                            if let Some(c) = usage_i64(u, "completion_tokens")
-                                .or_else(|| usage_i64(u, "output_tokens"))
-                            {
-                                completion_tokens = c;
-                            }
-                            if let Some(t) = usage_i64(u, "total_tokens") {
-                                total_tokens = t;
-                            } else if prompt_tokens > 0 || completion_tokens > 0 {
-                                total_tokens = prompt_tokens + completion_tokens;
-                            }
-                        }
-                        let choice = inner
-                            .get("choices")
-                            .and_then(|c| c.as_array())
-                            .and_then(|a| a.first());
-                        let delta = choice.and_then(|c| c.get("delta"));
-                        if let Some(content) = delta
-                            .and_then(|d| d.get("content"))
-                            .and_then(|v| v.as_str())
+            for line in buffer.lines() {
+                let trimmed = line.trim().trim_end_matches('\r');
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(svc_err) = parse_qoder_service_error(trimmed) {
+                    return Err(ProviderError::Transport(svc_err));
+                }
+                if let Some(inner) = parse_sse_line(trimmed) {
+                    if let Some(u) = inner.get("usage") {
+                        if let Some(p) = usage_i64(u, "prompt_tokens")
+                            .or_else(|| usage_i64(u, "input_tokens"))
                         {
-                            accumulated_text.push_str(content);
+                            prompt_tokens = p;
                         }
+                        if let Some(c) = usage_i64(u, "completion_tokens")
+                            .or_else(|| usage_i64(u, "output_tokens"))
+                        {
+                            completion_tokens = c;
+                        }
+                        if let Some(t) = usage_i64(u, "total_tokens") {
+                            total_tokens = t;
+                        } else if prompt_tokens > 0 || completion_tokens > 0 {
+                            total_tokens = prompt_tokens + completion_tokens;
+                        }
+                    }
+                    let choice = inner
+                        .get("choices")
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| a.first());
+                    let delta = choice.and_then(|c| c.get("delta"));
+                    if let Some(content) = delta
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                    {
+                        accumulated_text.push_str(content);
                     }
                 }
             }
+
+            let _ = stream_eof_partial;
 
             if total_tokens == 0 && completion_tokens == 0 && !accumulated_text.is_empty() {
                 completion_tokens = estimate_tokens(&accumulated_text);
@@ -850,6 +925,48 @@ fn derive_session_id(messages: &[crate::openai::ChatMessage]) -> String {
     )
 }
 
+fn parse_qoder_service_error(line: &str) -> Option<String> {
+    if !line.starts_with("data:") {
+        return None;
+    }
+    let data_str = line["data:".len()..].trim();
+    if data_str.is_empty() || data_str == "[DONE]" {
+        return None;
+    }
+    let wrapper: Value = serde_json::from_str(data_str).ok()?;
+    let svc = wrapper
+        .get("statusCodeValue")
+        .and_then(|v| v.as_u64())
+        .or_else(|| wrapper.get("statusCodeValue").and_then(|v| v.as_i64()).map(|n| n as u64))?;
+    if svc < 400 {
+        return None;
+    }
+    let err_status = wrapper
+        .get("statusCode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut err_msg = wrapper
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if err_msg.starts_with('{') {
+        if let Ok(p) = serde_json::from_str::<Value>(&err_msg) {
+            if let Some(url) = p.get("pricingUrl").and_then(|v| v.as_str()) {
+                err_msg = url.to_string();
+            }
+        }
+    }
+    Some(format!(
+        "Qoder HTTP {svc} {err_status}: {}",
+        if err_msg.is_empty() {
+            "rate limited or quota exceeded"
+        } else {
+            &err_msg[..err_msg.len().min(200)]
+        }
+    ))
+}
+
 fn parse_sse_line(line: &str) -> Option<Value> {
     if !line.starts_with("data:") {
         return None;
@@ -859,6 +976,9 @@ fn parse_sse_line(line: &str) -> Option<Value> {
         return None;
     }
     if let Ok(wrapper) = serde_json::from_str::<Value>(data_str) {
+        if wrapper.get("statusCodeValue").is_some() {
+            return None;
+        }
         if let Some(inner_str) = wrapper.get("body").and_then(|b| b.as_str()) {
             if inner_str == "[DONE]" {
                 return None;
