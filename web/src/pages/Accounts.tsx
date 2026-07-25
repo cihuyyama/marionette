@@ -1,34 +1,72 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import {
   ApiError,
-  deleteAccount,
   listAccounts,
-  patchAccount,
-  refreshAccount,
+  listProviderSettings,
+  patchProviderLoadBalance,
   type Account,
+  type LoadBalanceOption,
+  type ProviderSetting,
 } from "../lib/api";
-import { StatusChip } from "../components/StatusChip";
-import { statusTooltip } from "../lib/status";
+import { AddAccountModal } from "../components/AddAccountModal";
+import { PROVIDERS, labelProvider, type ProviderId } from "../lib/providers";
+
+type ProviderCounts = {
+  total: number;
+  bound: number;
+  sealed: number;
+  cut: number;
+  fallen: number;
+  inactive: number;
+};
+
+function emptyCounts(): ProviderCounts {
+  return { total: 0, bound: 0, sealed: 0, cut: 0, fallen: 0, inactive: 0 };
+}
+
+function countFor(accounts: Account[]): ProviderCounts {
+  const c = emptyCounts();
+  for (const a of accounts) {
+    c.total += 1;
+    if (!a.is_active) c.inactive += 1;
+    const s = (a.status || "bound").toLowerCase();
+    if (s === "sealed") c.sealed += 1;
+    else if (s === "cut") c.cut += 1;
+    else if (s === "fallen") c.fallen += 1;
+    else c.bound += 1;
+  }
+  return c;
+}
 
 export function Accounts() {
+  const navigate = useNavigate();
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [provider, setProvider] = useState("");
-  const [status, setStatus] = useState("");
+  const [lbByProvider, setLbByProvider] = useState<
+    Record<string, ProviderSetting>
+  >({});
+  const [strategies, setStrategies] = useState<LoadBalanceOption[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<Account | null>(null);
+  const [savingProvider, setSavingProvider] = useState<string | null>(null);
+  const [addProvider, setAddProvider] = useState<ProviderId | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await listAccounts({
-        provider: provider || undefined,
-        status: status || undefined,
-      });
-      setAccounts(res.accounts);
+      const [acc, prov] = await Promise.all([
+        listAccounts(),
+        listProviderSettings(),
+      ]);
+      setAccounts(acc.accounts);
+      const map: Record<string, ProviderSetting> = {};
+      for (const p of prov.providers) {
+        map[p.provider] = p;
+      }
+      setLbByProvider(map);
+      setStrategies(prov.strategies || []);
     } catch (e) {
       setError(
         e instanceof ApiError
@@ -41,36 +79,76 @@ export function Accounts() {
     } finally {
       setLoading(false);
     }
-  }, [provider, status]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  async function withBusy(id: string, fn: () => Promise<void>) {
-    setBusyId(id);
+  useEffect(() => {
+    if (!message) return;
+    const t = window.setTimeout(() => setMessage(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [message]);
+
+  const byProvider = useMemo(() => {
+    const map: Record<ProviderId, ProviderCounts> = {
+      "grok-cli": emptyCounts(),
+      qoder: emptyCounts(),
+    };
+    for (const p of PROVIDERS) {
+      map[p] = countFor(accounts.filter((a) => a.provider === p));
+    }
+    return map;
+  }, [accounts]);
+
+  const total = accounts.length;
+
+  async function onLoadBalanceChange(provider: string, value: string) {
+    setSavingProvider(provider);
     setError(null);
     try {
-      await fn();
-      await load();
+      const updated = await patchProviderLoadBalance(provider, value);
+      setLbByProvider((prev) => ({ ...prev, [provider]: updated }));
+      setMessage(
+        `${labelProvider(provider)}: ${updated.load_balance_label}`,
+      );
     } catch (e) {
       setError(
         e instanceof ApiError
           ? e.message
           : e instanceof Error
             ? e.message
-            : "Action failed",
+            : "Failed to update load balancing",
       );
     } finally {
-      setBusyId(null);
+      setSavingProvider(null);
     }
   }
 
   return (
     <div>
       <header className="page-header">
-        <h1>Accounts</h1>
-        <p className="subtitle">Bound marionettes</p>
+        <div className="page-header-row">
+          <div>
+            <h1>Accounts</h1>
+            <p className="subtitle">Bound marionettes · {total} total</p>
+          </div>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => void load()}
+              disabled={loading}
+            >
+              {loading ? <span className="spinner inline-spinner" /> : null}
+              Refresh
+            </button>
+            <Link to="/import" className="btn btn-sm btn-primary">
+              Import
+            </Link>
+          </div>
+        </div>
       </header>
 
       {error && (
@@ -78,229 +156,139 @@ export function Accounts() {
           {error}
         </div>
       )}
-
-      <div className="toolbar">
-        <div className="field" style={{ margin: 0, minWidth: 140 }}>
-          <label htmlFor="f-provider">Provider</label>
-          <select
-            id="f-provider"
-            className="select"
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-          >
-            <option value="">All</option>
-            <option value="grok-cli">grok-cli</option>
-            <option value="qoder">qoder</option>
-          </select>
-        </div>
-        <div className="field" style={{ margin: 0, minWidth: 140 }}>
-          <label htmlFor="f-status">Status</label>
-          <select
-            id="f-status"
-            className="select"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-          >
-            <option value="">All</option>
-            <option value="bound">Bound</option>
-            <option value="sealed">Sealed</option>
-            <option value="cut">Cut</option>
-            <option value="fallen">Fallen</option>
-          </select>
-        </div>
-        <div style={{ flex: 1 }} />
-        <button type="button" className="btn btn-sm" onClick={() => void load()} disabled={loading}>
-          {loading ? <span className="spinner inline-spinner" /> : null}
-          Refresh
-        </button>
-      </div>
-
-      {!loading && accounts.length === 0 ? (
-        <div className="panel empty">
-          <p className="flavor">No marionettes bound yet.</p>
-          <p>Import from 9Router or farm JSON.</p>
-          <Link to="/import" className="btn btn-primary">
-            Open Import
-          </Link>
-        </div>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Provider</th>
-                <th>Status</th>
-                <th>Cooldown</th>
-                <th>Last used</th>
-                <th>Error</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((a) => {
-                const busy = busyId === a.id;
-                return (
-                  <tr key={a.id}>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        style={{ padding: 0, color: "var(--parchment)" }}
-                        onClick={() => setDetail(a)}
-                        title={a.id}
-                      >
-                        {a.email ?? a.name ?? (
-                          <span className="mono muted">{a.id.slice(0, 8)}…</span>
-                        )}
-                      </button>
-                    </td>
-                    <td className="mono muted">{a.provider}</td>
-                    <td>
-                      <StatusChip
-                        status={a.status}
-                        channeling={busy}
-                        title={statusTooltip(a)}
-                      />
-                    </td>
-                    <td className="mono muted" style={{ whiteSpace: "nowrap" }}>
-                      {a.cooldown_until ? formatShort(a.cooldown_until) : "—"}
-                    </td>
-                    <td className="mono muted" style={{ whiteSpace: "nowrap" }}>
-                      {a.last_used_at ? formatShort(a.last_used_at) : "—"}
-                    </td>
-                    <td className="truncate muted" title={a.last_error ?? undefined}>
-                      {a.last_error ?? "—"}
-                    </td>
-                    <td>
-                      <div className="actions-cell">
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          disabled={busy}
-                          onClick={() =>
-                            void withBusy(a.id, async () => {
-                              await patchAccount(a.id, { is_active: !a.is_active });
-                            })
-                          }
-                          title={a.is_active ? "is_active → false" : "is_active → true"}
-                        >
-                          {a.is_active ? "Disable" : "Enable"}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          disabled={busy}
-                          onClick={() =>
-                            void withBusy(a.id, async () => {
-                              await refreshAccount(a.id);
-                            })
-                          }
-                        >
-                          Refresh auth
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-danger"
-                          disabled={busy}
-                          onClick={() => {
-                            if (
-                              !window.confirm(
-                                `Delete account ${a.email ?? a.id}? This cannot be undone.`,
-                              )
-                            ) {
-                              return;
-                            }
-                            void withBusy(a.id, async () => {
-                              await deleteAccount(a.id);
-                              if (detail?.id === a.id) setDetail(null);
-                            });
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {message && (
+        <div className="alert alert-ok" role="status">
+          {message}
         </div>
       )}
 
-      {detail && (
-        <>
-          <div className="drawer-backdrop" onClick={() => setDetail(null)} />
-          <aside className="drawer" role="dialog" aria-label="Account detail">
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-              <div>
-                <h2>{detail.email ?? detail.name ?? "Account"}</h2>
-                <p className="meta mono">{detail.id}</p>
-              </div>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDetail(null)}>
-                Close
+      <div className="provider-grid">
+        {PROVIDERS.map((provider) => {
+          const stat = byProvider[provider];
+          const lb = lbByProvider[provider];
+          const current =
+            lb?.load_balance || strategies[0]?.id || "round_robin";
+          const hint =
+            strategies.find((s) => s.id === current)?.hint ||
+            lb?.load_balance_label ||
+            "";
+          return (
+            <div key={provider} className="provider-card provider-card-static">
+              <button
+                type="button"
+                className="provider-card-main"
+                onClick={() => navigate(`/accounts/${provider}`)}
+              >
+                <div className="provider-card-head">
+                  <h2>{labelProvider(provider)}</h2>
+                  <span className="mono muted">{stat.total} accounts</span>
+                </div>
+
+                <div className="provider-stat-grid">
+                  <div className="provider-stat" data-tone="thread">
+                    <p className="provider-stat-value">{stat.bound}</p>
+                    <p className="provider-stat-label">Bound</p>
+                  </div>
+                  <div className="provider-stat" data-tone="fog">
+                    <p className="provider-stat-value">{stat.sealed}</p>
+                    <p className="provider-stat-label">Sealed</p>
+                  </div>
+                  <div className="provider-stat" data-tone="seal">
+                    <p className="provider-stat-value">{stat.cut}</p>
+                    <p className="provider-stat-label">Cut</p>
+                  </div>
+                  <div className="provider-stat" data-tone="blood">
+                    <p className="provider-stat-value">{stat.fallen}</p>
+                    <p className="provider-stat-label">Fallen</p>
+                  </div>
+                </div>
+
+                <div className="provider-card-meta">
+                  <span className="muted">
+                    Inactive: <strong>{stat.inactive}</strong>
+                  </span>
+                  <span className="provider-card-cta">Open list →</span>
+                </div>
               </button>
-            </div>
-            <StatusChip status={detail.status} title={statusTooltip(detail)} />
-            <dl className="kv" style={{ marginTop: 16 }}>
-              <dt>Provider</dt>
-              <dd className="mono">{detail.provider}</dd>
-              <dt>Active</dt>
-              <dd>{detail.is_active ? "true" : "false"}</dd>
-              <dt>Priority</dt>
-              <dd>{detail.priority}</dd>
-              <dt>Cooldown</dt>
-              <dd className="mono">{detail.cooldown_until ?? "—"}</dd>
-              <dt>Last used</dt>
-              <dd className="mono">{detail.last_used_at ?? "—"}</dd>
-              <dt>Last error</dt>
-              <dd>{detail.last_error ?? "—"}</dd>
-              <dt>Created</dt>
-              <dd className="mono">{detail.created_at}</dd>
-              <dt>Updated</dt>
-              <dd className="mono">{detail.updated_at}</dd>
-            </dl>
-            <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-              Token fields (masked by API)
-            </p>
-            <pre className="response">{JSON.stringify(detail.data, null, 2)}</pre>
-            {detail.cooldown_until && (
-              <div className="btn-row" style={{ marginTop: 16 }}>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() =>
-                    void withBusy(detail.id, async () => {
-                      const updated = await patchAccount(detail.id, {
-                        clear_cooldown: true,
-                      });
-                      setDetail(updated);
-                    })
+
+              <div
+                className="provider-lb"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <div className="provider-lb-row">
+                  <label htmlFor={`lb-${provider}`}>Load balancing</label>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={() => setAddProvider(provider)}
+                  >
+                    + Add
+                  </button>
+                </div>
+                <select
+                  id={`lb-${provider}`}
+                  className="select"
+                  value={current}
+                  disabled={savingProvider === provider || loading}
+                  onChange={(e) =>
+                    void onLoadBalanceChange(provider, e.target.value)
                   }
                 >
-                  Clear cooldown
-                </button>
+                  {(strategies.length
+                    ? strategies
+                    : [
+                        {
+                          id: "round_robin",
+                          label: "Round robin",
+                          hint: "",
+                        },
+                      ]
+                  ).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                {hint ? <p className="provider-lb-hint">{hint}</p> : null}
               </div>
-            )}
-          </aside>
-        </>
+            </div>
+          );
+        })}
+      </div>
+
+      {!loading && total === 0 && !error && (
+        <div className="panel empty" style={{ marginTop: "var(--space-4)" }}>
+          <p className="flavor">No marionettes bound yet.</p>
+          <p>Use + Add on a provider card, or bulk import JSON.</p>
+          <div className="btn-row" style={{ justifyContent: "center" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setAddProvider("qoder")}
+            >
+              + Add Qoder
+            </button>
+            <Link to="/import" className="btn">
+              Bulk Import
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {addProvider && (
+        <AddAccountModal
+          provider={addProvider}
+          open
+          onClose={() => setAddProvider(null)}
+          onImported={(res) => {
+            setMessage(
+              `Imported — inserted ${res.inserted}, updated ${res.updated}, skipped ${res.skipped}.`,
+            );
+            void load();
+          }}
+        />
       )}
     </div>
   );
-}
-
-function formatShort(iso: string): string {
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
 }
