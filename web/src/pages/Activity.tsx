@@ -371,7 +371,13 @@ function fmtTps(r: RequestLog): string {
   return tps >= 100 ? tps.toFixed(0) : tps.toFixed(1);
 }
 
-function fmtCredits(_r: RequestLog): string {
+function fmtCredits(r: RequestLog): string {
+  if (r.credits_used != null && r.credits_used > 0) {
+    return fmt(r.credits_used);
+  }
+  if (r.account_quota_after != null) {
+    return `${fmt(r.account_quota_after)} left`;
+  }
   return "—";
 }
 

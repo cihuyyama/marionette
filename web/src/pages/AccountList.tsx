@@ -485,6 +485,7 @@ export function AccountList() {
                     onClick={() => handleSort("last_used")}
                   />
                 </th>
+                <th>Credits</th>
                 <th>Error</th>
                 <th>Actions</th>
               </tr>
@@ -571,6 +572,9 @@ export function AccountList() {
                     </td>
                     <td className="mono muted nowrap">
                       {a.last_used_at ? formatShort(a.last_used_at) : "—"}
+                    </td>
+                    <td className="mono muted nowrap" title={fmtCreditTitle(a)}>
+                      {fmtAccountCredit(a)}
                     </td>
                     <td
                       className="truncate muted"
@@ -723,6 +727,10 @@ export function AccountList() {
               <dd>{detail.is_active ? "true" : "false"}</dd>
               <dt>Priority</dt>
               <dd>{detail.priority}</dd>
+              <dt>Credits</dt>
+              <dd className="mono" title={fmtCreditTitle(detail)}>
+                {fmtAccountCredit(detail)}
+              </dd>
               <dt>Cooldown</dt>
               <dd className="mono">{detail.cooldown_until ?? "—"}</dd>
               <dt>Last used</dt>
@@ -759,6 +767,26 @@ export function AccountList() {
               >
                 {detail.is_active ? "Disable" : "Enable"}
               </button>
+              {detail.quota_kind === "tokens" && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() =>
+                    void withBusy(
+                      detail.id,
+                      async () => {
+                        const updated = await patchAccount(detail.id, {
+                          reset_quota: true,
+                        });
+                        setDetail(updated);
+                      },
+                      "Quota reset to 1M",
+                    )
+                  }
+                >
+                  Reset quota
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-sm"
@@ -801,6 +829,20 @@ export function AccountList() {
       )}
     </div>
   );
+}
+
+function fmtAccountCredit(a: Account): string {
+  if (a.quota_kind === "none" || !a.quota_limit) return "RPM";
+  const rem = new Intl.NumberFormat().format(a.quota_remaining ?? 0);
+  const lim = new Intl.NumberFormat().format(a.quota_limit);
+  return `${rem}/${lim}`;
+}
+
+function fmtCreditTitle(a: Account): string {
+  if (a.quota_kind === "none" || !a.quota_limit) {
+    return "Qoder uses upstream RPM — no local token credits";
+  }
+  return `Local token budget remaining / limit (default 1M for grok-cli)`;
 }
 
 function SortHeader({

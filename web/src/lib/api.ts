@@ -26,6 +26,9 @@ export type Account = {
   created_at: string;
   updated_at: string;
   status: string;
+  quota_limit: number;
+  quota_remaining: number;
+  quota_kind: "tokens" | "none" | string;
 };
 
 export type ImportResult = {
@@ -163,6 +166,9 @@ export function patchAccount(
     clear_cooldown?: boolean;
     name?: string;
     email?: string;
+    quota_limit?: number;
+    quota_remaining?: number;
+    reset_quota?: boolean;
   },
   settings?: Settings,
 ) {
@@ -232,6 +238,9 @@ export type RequestLog = {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   total_tokens: number | null;
+  credits_used: number | null;
+  account_quota_before: number | null;
+  account_quota_after: number | null;
   account_id: string | null;
   account_email: string | null;
   error_message: string | null;

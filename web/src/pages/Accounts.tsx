@@ -19,10 +19,23 @@ type ProviderCounts = {
   cut: number;
   fallen: number;
   inactive: number;
+  quotaLimit: number;
+  quotaRemaining: number;
+  quotaKind: string;
 };
 
 function emptyCounts(): ProviderCounts {
-  return { total: 0, bound: 0, sealed: 0, cut: 0, fallen: 0, inactive: 0 };
+  return {
+    total: 0,
+    bound: 0,
+    sealed: 0,
+    cut: 0,
+    fallen: 0,
+    inactive: 0,
+    quotaLimit: 0,
+    quotaRemaining: 0,
+    quotaKind: "none",
+  };
 }
 
 function countFor(accounts: Account[]): ProviderCounts {
@@ -35,8 +48,23 @@ function countFor(accounts: Account[]): ProviderCounts {
     else if (s === "cut") c.cut += 1;
     else if (s === "fallen") c.fallen += 1;
     else c.bound += 1;
+    if (a.quota_kind === "tokens" || a.quota_limit > 0) {
+      c.quotaKind = "tokens";
+      c.quotaLimit += a.quota_limit || 0;
+      c.quotaRemaining += a.quota_remaining || 0;
+    }
+  }
+  if (accounts.length > 0 && accounts.every((a) => a.quota_kind === "none" || !a.quota_limit)) {
+    c.quotaKind = "none";
   }
   return c;
+}
+
+function fmtPoolCredits(c: ProviderCounts): string {
+  if (c.quotaKind !== "tokens" || c.quotaLimit <= 0) return "RPM / no credits";
+  const rem = new Intl.NumberFormat().format(c.quotaRemaining);
+  const lim = new Intl.NumberFormat().format(c.quotaLimit);
+  return `${rem} / ${lim} tok`;
 }
 
 export function Accounts() {
@@ -205,9 +233,14 @@ export function Accounts() {
 
                 <div className="provider-card-meta">
                   <span className="muted">
-                    Inactive: <strong>{stat.inactive}</strong>
+                    Credits: <strong className="mono">{fmtPoolCredits(stat)}</strong>
                   </span>
                   <span className="provider-card-cta">Open list →</span>
+                </div>
+                <div className="provider-card-meta">
+                  <span className="muted">
+                    Inactive: <strong>{stat.inactive}</strong>
+                  </span>
                 </div>
               </button>
 
