@@ -12,10 +12,11 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use uuid::Uuid;
 
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
-const CHAT_URL: &str = "https://api.x.ai/v1/chat/completions";
-const USER_AGENT: &str = "grok-cli/marionette";
+const RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
+const USER_AGENT: &str = "grok-shell/0.2.99 (linux; x86_64)";
 
 pub struct GrokCliProvider {
     client: Client,
@@ -131,33 +132,48 @@ impl GrokCliProvider {
         Ok(())
     }
 
-    fn build_upstream_body(req: &ChatCompletionRequest) -> Value {
-        let mut body = json!({
-            "model": req.upstream_model(),
-            "messages": req.messages,
-            "stream": req.stream_enabled(),
-        });
-        if let Some(t) = req.temperature {
-            body["temperature"] = json!(t);
+    fn resolve_model_and_effort(model_name: &str) -> (String, Option<String>) {
+        let (model, effort) = if model_name.ends_with("-high") {
+            (model_name.trim_end_matches("-high"), Some("high".to_string()))
+        } else if model_name.ends_with("-medium") {
+            (model_name.trim_end_matches("-medium"), Some("medium".to_string()))
+        } else if model_name.ends_with("-low") {
+            (model_name.trim_end_matches("-low"), Some("low".to_string()))
+        } else if model_name.ends_with("-xhigh") {
+            (model_name.trim_end_matches("-xhigh"), Some("xhigh".to_string()))
+        } else {
+            (model_name, None)
+        };
+
+        let resolved = match model {
+            "gb" | "grok-build" => "grok-build",
+            m => m,
+        };
+
+        (resolved.to_string(), effort)
+    }
+
+    fn build_responses_input(messages: &[crate::openai::ChatMessage]) -> Vec<Value> {
+        let mut input = Vec::new();
+        for msg in messages {
+            let content_str = match &msg.content {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            input.push(json!({
+                "type": "message",
+                "role": msg.role,
+                "content": content_str
+            }));
         }
-        if let Some(m) = req.max_tokens {
-            body["max_tokens"] = json!(m);
+        if input.is_empty() {
+            input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": "..."
+            }));
         }
-        if let Some(p) = req.top_p {
-            body["top_p"] = json!(p);
-        }
-        // merge safe extras
-        if let Value::Object(extra) = &req.extra {
-            if let Some(obj) = body.as_object_mut() {
-                for (k, v) in extra {
-                    if k == "model" || k == "messages" || k == "stream" {
-                        continue;
-                    }
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        body
+        input
     }
 }
 
@@ -186,14 +202,56 @@ impl Provider for GrokCliProvider {
         let data = account.data_json();
         let token = Self::access_token(&data)
             .ok_or_else(|| ProviderError::AuthInvalid("missing accessToken".into()))?;
-        let body = Self::build_upstream_body(req);
 
-        let resp = self
+        let model_name = req.upstream_model();
+        let (upstream_model_id, effort) = Self::resolve_model_and_effort(model_name);
+        let input_items = Self::build_responses_input(&req.messages);
+
+        let supports_effort = upstream_model_id.starts_with("grok-4.5");
+        let mut reasoning = json!({
+            "summary": "concise"
+        });
+        if supports_effort {
+            let effort_val = effort.unwrap_or_else(|| "high".to_string());
+            reasoning["effort"] = json!(effort_val);
+        }
+
+        // Always request stream upstream
+        let body = json!({
+            "model": upstream_model_id,
+            "input": input_items,
+            "stream": true,
+            "store": false,
+            "reasoning": reasoning,
+            "include": ["reasoning.encrypted_content"]
+        });
+
+        let session_id = Uuid::new_v4().to_string();
+        let req_id = Uuid::new_v4().to_string();
+
+        let mut req_builder = self
             .client
-            .post(CHAT_URL)
+            .post(RESPONSES_URL)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
             .header("User-Agent", USER_AGENT)
+            .header("x-grok-client-identifier", "grok-shell")
+            .header("x-grok-client-version", "0.2.99")
+            .header("x-grok-session-id", &session_id)
+            .header("x-grok-conv-id", &session_id)
+            .header("x-grok-req-id", &req_id)
+            .header("x-grok-turn-idx", "1")
+            .header("x-grok-model-override", &upstream_model_id);
+
+        if let Some(email) = data.get("email").and_then(|v| v.as_str()) {
+            req_builder = req_builder.header("x-email", email);
+        }
+        if let Some(user_id) = data.get("userId").or_else(|| data.get("user_id")).and_then(|v| v.as_str()) {
+            req_builder = req_builder.header("x-userid", user_id);
+        }
+
+        let resp = req_builder
             .json(&body)
             .send()
             .await
@@ -208,18 +266,155 @@ impl Provider for GrokCliProvider {
             return Err(classify_http_status(status, &text));
         }
 
+        let req_model = req.model.clone();
+
         if req.stream_enabled() {
-            let stream = resp.bytes_stream().map(|chunk| {
-                chunk
-                    .map(|b| b.to_vec())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+            let mut upstream_stream = resp.bytes_stream();
+
+            tokio::spawn(async move {
+                let mut buffer = String::new();
+                let mut resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+                let mut first_chunk_sent = false;
+
+                while let Some(chunk_res) = upstream_stream.next().await {
+                    let chunk = match chunk_res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e))).await;
+                            return;
+                        }
+                    };
+
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim_end_matches('\r').to_string();
+                        buffer = buffer[pos + 1..].to_string();
+
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(data_str) = trimmed.strip_prefix("data:") {
+                            let data_str = data_str.trim();
+                            if data_str == "[DONE]" {
+                                let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                                return;
+                            }
+
+                            if let Ok(v) = serde_json::from_str::<Value>(data_str) {
+                                let event_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+
+                                match event_type {
+                                    "response.created" | "response.in_progress" => {
+                                        if let Some(id) = v.pointer("/response/id").and_then(|s| s.as_str()) {
+                                            resp_id = format!("chatcmpl-{id}");
+                                        }
+                                        if !first_chunk_sent {
+                                            first_chunk_sent = true;
+                                            let chunk_json = json!({
+                                                "id": resp_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": Utc::now().timestamp(),
+                                                "model": req_model,
+                                                "choices": [{
+                                                    "index": 0,
+                                                    "delta": { "role": "assistant", "content": "" },
+                                                    "finish_reason": null
+                                                }]
+                                            });
+                                            let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
+                                            if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    "response.output_text.delta" => {
+                                        if let Some(delta) = v.get("delta").and_then(|s| s.as_str()) {
+                                            if !delta.is_empty() {
+                                                let chunk_json = json!({
+                                                    "id": resp_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": Utc::now().timestamp(),
+                                                    "model": req_model,
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": { "content": delta },
+                                                        "finish_reason": null
+                                                    }]
+                                                });
+                                                let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
+                                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                                        if let Some(delta) = v.get("delta").and_then(|s| s.as_str()) {
+                                            if !delta.is_empty() {
+                                                let chunk_json = json!({
+                                                    "id": resp_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": Utc::now().timestamp(),
+                                                    "model": req_model,
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": { "reasoning_content": delta },
+                                                        "finish_reason": null
+                                                    }]
+                                                });
+                                                let msg = format!("data: {}\n\n", serde_json::to_string(&chunk_json).unwrap());
+                                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "response.completed" => {
+                                        let chunk_json = json!({
+                                            "id": resp_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": Utc::now().timestamp(),
+                                            "model": req_model,
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": {},
+                                                "finish_reason": "stop"
+                                            }]
+                                        });
+                                        let msg = format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&chunk_json).unwrap());
+                                        let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If stream ended without response.completed or [DONE]
+                let chunk_json = json!({
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": Utc::now().timestamp(),
+                    "model": req_model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                });
+                let msg = format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&chunk_json).unwrap());
+                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
             });
-            let body = Body::from_stream(stream);
+
+            let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
             let mut headers = HeaderMap::new();
-            headers.insert(
-                "content-type",
-                HeaderValue::from_static("text/event-stream"),
-            );
+            headers.insert("content-type", HeaderValue::from_static("text/event-stream"));
             headers.insert("cache-control", HeaderValue::from_static("no-cache"));
             headers.insert("connection", HeaderValue::from_static("keep-alive"));
             let response = Response::builder()
@@ -230,11 +425,97 @@ impl Provider for GrokCliProvider {
             parts.headers = headers;
             Ok(ChatOutcome::Stream(Response::from_parts(parts, body)))
         } else {
-            let json: Value = resp
-                .json()
-                .await
-                .map_err(|e| ProviderError::Transport(e.to_string()))?;
-            Ok(ChatOutcome::Json(json))
+            let mut buffer = String::new();
+            let mut resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+            let mut accumulated_text = String::new();
+            let mut prompt_tokens: i64 = 0;
+            let mut completion_tokens: i64 = 0;
+            let mut total_tokens: i64 = 0;
+            let mut upstream_stream = resp.bytes_stream();
+
+            while let Some(chunk_res) = upstream_stream.next().await {
+                let chunk = chunk_res.map_err(|e| ProviderError::Transport(e.to_string()))?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(data_str) = trimmed.strip_prefix("data:") {
+                        let data_str = data_str.trim();
+                        if data_str == "[DONE]" {
+                            break;
+                        }
+
+                        if let Ok(v) = serde_json::from_str::<Value>(data_str) {
+                            let event_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+                            match event_type {
+                                "response.created" | "response.in_progress" => {
+                                    if let Some(id) = v.pointer("/response/id").and_then(|s| s.as_str()) {
+                                        resp_id = format!("chatcmpl-{id}");
+                                    }
+                                }
+                                "response.output_text.delta" => {
+                                    if let Some(delta) = v.get("delta").and_then(|s| s.as_str()) {
+                                        accumulated_text.push_str(delta);
+                                    }
+                                }
+                                "response.completed" => {
+                                    if let Some(u) = v.pointer("/response/usage").or_else(|| v.get("usage"))
+                                    {
+                                        prompt_tokens = usage_i64(u, "input_tokens")
+                                            .or_else(|| usage_i64(u, "prompt_tokens"))
+                                            .unwrap_or(prompt_tokens);
+                                        completion_tokens = usage_i64(u, "output_tokens")
+                                            .or_else(|| usage_i64(u, "completion_tokens"))
+                                            .unwrap_or(completion_tokens);
+                                        total_tokens = usage_i64(u, "total_tokens").unwrap_or(
+                                            if prompt_tokens > 0 || completion_tokens > 0 {
+                                                prompt_tokens + completion_tokens
+                                            } else {
+                                                total_tokens
+                                            },
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            if total_tokens == 0 && completion_tokens == 0 && !accumulated_text.is_empty() {
+                completion_tokens = estimate_tokens(&accumulated_text);
+                total_tokens = prompt_tokens + completion_tokens;
+            }
+
+            let result_json = json!({
+                "id": resp_id,
+                "object": "chat.completion",
+                "created": Utc::now().timestamp(),
+                "model": req_model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": accumulated_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
+                }
+            });
+
+            Ok(ChatOutcome::Json(result_json))
         }
     }
 }
@@ -250,4 +531,15 @@ fn urlencoding_basic(s: &str) -> String {
         }
     }
     out
+}
+
+fn usage_i64(usage: &Value, key: &str) -> Option<i64> {
+    usage
+        .get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+}
+
+fn estimate_tokens(text: &str) -> i64 {
+    let n = (text.chars().count() as f64 / 4.0).ceil() as i64;
+    n.max(1)
 }
