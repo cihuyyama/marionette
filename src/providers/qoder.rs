@@ -6,9 +6,6 @@ use crate::db::Account;
 use crate::error::ProviderError;
 use crate::openai::ChatCompletionRequest;
 use async_trait::async_trait;
-use axum::body::Body;
-use axum::http::StatusCode;
-use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use md5::{Md5, Digest as Md5Digest};
@@ -16,8 +13,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use futures_util::StreamExt;
-use axum::http::{HeaderMap, HeaderValue};
 use sha2::Sha256;
 
 const COSY_VERSION: &str = "1.0.22";
@@ -428,20 +423,32 @@ fn sign_bearer_request(payload_b64: &str, cosy_key: &str, cosy_date: &str, body:
 }
 
 pub struct QoderProvider {
+    /// Default client (HTTP/2 allowed). Used for jobToken + first chat attempt.
     client: Client,
+    /// HTTP/1.1-only fallback. Some Qoder SSE paths die mid-stream on H2
+    /// (`stream error … unexpected internal error`) while H1 still works (or vice versa).
+    client_h1: Client,
 }
 
 impl QoderProvider {
     pub fn new() -> Self {
-        // HTTP/2 preferred: HTTP/1.1-only hit hyper chunked UnexpectedEof on Qoder SSE.
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .tcp_keepalive(std::time::Duration::from_secs(30))
+        let common = || {
+            Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                // Short idle: stale pooled conns often surface as H2 stream errors on SSE.
+                .pool_idle_timeout(std::time::Duration::from_secs(15))
+                .pool_max_idle_per_host(2)
+                .tcp_keepalive(std::time::Duration::from_secs(30))
+                .tcp_nodelay(true)
+        };
+        // HTTP/2 preferred first: pure H1-only previously hit hyper chunked UnexpectedEof.
+        let client = common().build().expect("qoder http client");
+        let client_h1 = common()
+            .http1_only()
             .build()
-            .expect("qoder http client");
-        Self { client }
+            .expect("qoder http1 client");
+        Self { client, client_h1 }
     }
 
     fn format_reqwest_err(e: &reqwest::Error) -> String {
@@ -454,11 +461,23 @@ impl QoderProvider {
         parts.join(" | ")
     }
 
-    fn is_chunked_eof(e: &reqwest::Error) -> bool {
-        let full = Self::format_reqwest_err(e);
-        full.contains("UnexpectedEof")
-            || full.contains("unexpected EOF")
+    /// Transport deaths while reading Qoder SSE body (H1 chunked EOF or H2 stream reset).
+    fn is_sse_transport_error(e: &reqwest::Error) -> bool {
+        let full = Self::format_reqwest_err(e).to_ascii_lowercase();
+        full.contains("unexpectedeof")
+            || full.contains("unexpected eof")
             || full.contains("chunk size line")
+            || full.contains("unexpected internal error")
+            || full.contains("stream error")
+            || full.contains("error decoding response body")
+            || full.contains("error reading a body")
+            || full.contains("connection reset")
+            || full.contains("broken pipe")
+    }
+
+    fn chat_clients(&self) -> [&Client; 2] {
+        // H2 first, then H1-only retry (covers both failure modes).
+        [&self.client, &self.client_h1]
     }
 
     async fn do_job_token(&self, tokens: &QoderTokens) -> Result<JobTokenResponse, ProviderError> {
@@ -547,302 +566,379 @@ impl Provider for QoderProvider {
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError> {
-        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let data: serde_json::Value = serde_json::from_str(&account.data).unwrap_or(serde_json::Value::Null);
         let tokens = QoderTokens::from_data(&data)?;
         if tokens.security_oauth_token.is_none()
             || tokens.security_oauth_token.as_deref() == Some("")
         {
             return Err(ProviderError::AuthExpired);
         }
-        let session = build_cosy_session(&tokens)?;
-        let payload_b64 = build_payload_b64(&session.info);
-        let cosy_date = format!("{}", chrono::Utc::now().timestamp());
-        let cfg = model_cfg(req.upstream_model());
-        let model = cfg.key.to_string();
-        let body = build_chat_body(req, &cfg);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
-        let body_encoded = encode_qoder_payload(body_str.as_bytes());
-        let path_sig = path_sig_from_url(CHAT_URL);
-        let bearer_sig = sign_bearer_request(
-            &payload_b64,
-            &session.cosy_key,
-            &cosy_date,
-            &body_encoded,
-            &path_sig,
-        );
-        let bearer = format!("COSY.{payload_b64}.{bearer_sig}");
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("cosy-data-policy", "agree".parse().unwrap());
-        headers.insert("cosy-machinetype", "5".parse().unwrap());
-        headers.insert("cosy-clienttype", "5".parse().unwrap());
-        headers.insert("cosy-date", cosy_date.parse().unwrap());
-        headers.insert(
-            "cosy-user",
-            tokens
-                .user_id
-                .as_deref()
-                .unwrap_or("")
-                .parse()
-                .unwrap_or_else(|_| "".parse().unwrap()),
-        );
-        headers.insert("cosy-key", session.cosy_key.parse().unwrap());
-        headers.insert("cache-control", "no-cache".parse().unwrap());
-        headers.insert("cosy-business-product", "cli".parse().unwrap());
-        headers.insert("cosy-business-type", "agent".parse().unwrap());
-        headers.insert("cosy-scene", "assistant".parse().unwrap());
-        headers.insert("accept", "text/event-stream".parse().unwrap());
-        headers.insert(
-            "authorization",
-            format!("Bearer {bearer}").parse().unwrap(),
-        );
-        headers.insert("accept-encoding", "identity".parse().unwrap());
-        headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
-        headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
-        headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
-        headers.insert("login-version", "v2".parse().unwrap());
-        headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
-        headers.insert("content-type", "application/json".parse().unwrap());
-        headers.insert("x-model-key", model.parse().unwrap());
-        headers.insert("x-model-source", "system".parse().unwrap());
-
-        let resp = self
-            .client
-            .post(CHAT_URL)
-            .headers(headers)
-            .body(body_encoded)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(format!("qoder send: {e:?}")))?;
-        let status = resp.status().as_u16();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let content_encoding = resp
-            .headers()
-            .get(reqwest::header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let transfer_encoding = resp
-            .headers()
-            .get(reqwest::header::TRANSFER_ENCODING)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        if status != 200 {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(classify_http_status(status, &text));
-        }
-        tracing::debug!(
-            status,
-            content_type = %content_type,
-            content_encoding = %content_encoding,
-            transfer_encoding = %transfer_encoding,
-            "qoder chat upstream ok"
-        );
 
         let req_model = req.model.clone();
-        let http_version = format!("{:?}", resp.version());
-        let decode_ctx = format!(
-            "ct={content_type} ce={content_encoding} te={transfer_encoding} http={http_version}"
-        );
+        let stream_mode = req.stream_enabled();
+        let mut last_err: Option<ProviderError> = None;
 
-        if req.stream_enabled() {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
-            let mut upstream_stream = resp.bytes_stream();
-            let decode_ctx_stream = decode_ctx.clone();
+        for (attempt, client) in self.chat_clients().into_iter().enumerate() {
+            let attempt_label = if attempt == 0 { "h2-preferred" } else { "http1-only" };
 
-            tokio::spawn(async move {
-                let mut buffer = String::new();
-                let resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
-                let mut first_chunk_sent = false;
-                let mut any_content = false;
+            let session = match build_cosy_session(&tokens) {
+                Ok(s) => s,
+                Err(e) => return Err(e),
+            };
+            let payload_b64 = build_payload_b64(&session.info);
+            let cosy_date = format!("{}", chrono::Utc::now().timestamp());
+            let cfg = model_cfg(req.upstream_model());
+            let model = cfg.key.to_string();
+            let body = build_chat_body(req, &cfg);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
+            let body_encoded = encode_qoder_payload(body_str.as_bytes());
+            let path_sig = path_sig_from_url(CHAT_URL);
+            let bearer_sig = sign_bearer_request(
+                &payload_b64,
+                &session.cosy_key,
+                &cosy_date,
+                &body_encoded,
+                &path_sig,
+            );
+            let bearer = format!("COSY.{payload_b64}.{bearer_sig}");
 
-                while let Some(chunk_res) = upstream_stream.next().await {
-                    let chunk = match chunk_res {
-                        Ok(c) => c,
-                        Err(e) => {
-                            let chain = QoderProvider::format_reqwest_err(&e);
-                            tracing::warn!(
-                                error = %chain,
-                                ctx = %decode_ctx_stream,
-                                first_chunk_sent,
-                                any_content,
-                                "qoder stream body decode failed"
-                            );
-                            if first_chunk_sent || any_content {
-                                let chunk_json = json!({
-                                    "id": resp_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": chrono::Utc::now().timestamp(),
-                                    "model": req_model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {},
-                                        "finish_reason": "stop"
-                                    }]
-                                });
-                                let msg = format!(
-                                    "data: {}\n\ndata: [DONE]\n\n",
-                                    serde_json::to_string(&chunk_json).unwrap_or_default()
-                                );
-                                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
-                            } else {
-                                let _ = tx
-                                    .send(Err(std::io::Error::new(
-                                        std::io::ErrorKind::UnexpectedEof,
-                                        format!(
-                                            "qoder sse body decode: {chain} ({decode_ctx_stream})"
-                                        ),
-                                    )))
-                                    .await;
-                            }
-                            return;
-                        }
-                    };
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("cosy-data-policy", "agree".parse().unwrap());
+            headers.insert("cosy-machinetype", "5".parse().unwrap());
+            headers.insert("cosy-clienttype", "5".parse().unwrap());
+            headers.insert("cosy-date", cosy_date.parse().unwrap());
+            headers.insert(
+                "cosy-user",
+                tokens
+                    .user_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap_or_else(|_| "".parse().unwrap()),
+            );
+            headers.insert("cosy-key", session.cosy_key.parse().unwrap());
+            headers.insert("cache-control", "no-cache".parse().unwrap());
+            headers.insert("cosy-business-product", "cli".parse().unwrap());
+            headers.insert("cosy-business-type", "agent".parse().unwrap());
+            headers.insert("cosy-scene", "assistant".parse().unwrap());
+            headers.insert("accept", "text/event-stream".parse().unwrap());
+            headers.insert(
+                "authorization",
+                format!("Bearer {bearer}").parse().unwrap(),
+            );
+            headers.insert("accept-encoding", "identity".parse().unwrap());
+            headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
+            headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+            headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
+            headers.insert("login-version", "v2".parse().unwrap());
+            headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
+            headers.insert("content-type", "application/json".parse().unwrap());
+            headers.insert("x-model-key", model.parse().unwrap());
+            headers.insert("x-model-source", "system".parse().unwrap());
 
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let resp = match client
+                .post(CHAT_URL)
+                .headers(headers)
+                .body(body_encoded)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let chain = Self::format_reqwest_err(&e);
+                    tracing::warn!(attempt = attempt_label, error = %chain, "qoder send failed");
+                    last_err = Some(ProviderError::Transport(format!("qoder send: {chain}")));
+                    if attempt + 1 < 2 {
+                        continue;
+                    }
+                    return Err(last_err.unwrap());
+                }
+            };
 
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].trim_end_matches('\r').to_string();
-                        buffer = buffer[pos + 1..].to_string();
+            let status = resp.status().as_u16();
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let content_encoding = resp
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let transfer_encoding = resp
+                .headers()
+                .get(reqwest::header::TRANSFER_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            if status != 200 {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(classify_http_status(status, &text));
+            }
 
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
+            let http_version = format!("{:?}", resp.version());
+            let decode_ctx = format!(
+                "ct={content_type} ce={content_encoding} te={transfer_encoding} http={http_version} attempt={attempt_label}"
+            );
+            tracing::debug!(
+                status,
+                content_type = %content_type,
+                http_version = %http_version,
+                attempt = attempt_label,
+                "qoder chat upstream ok"
+            );
+
+            if stream_mode {
+                let mut upstream_stream = resp.bytes_stream();
+                // Probe first body chunk BEFORE returning SSE to client.
+                let first = tokio::time::timeout(
+                    std::time::Duration::from_secs(45),
+                    futures_util::StreamExt::next(&mut upstream_stream),
+                )
+                .await;
+
+                let first_chunk: Option<bytes::Bytes> = match first {
+                    Ok(Some(Ok(c))) => Some(c),
+                    Ok(Some(Err(e))) => {
+                        let chain = Self::format_reqwest_err(&e);
+                        tracing::warn!(
+                            attempt = attempt_label,
+                            error = %chain,
+                            ctx = %decode_ctx,
+                            "qoder stream first-chunk decode failed"
+                        );
+                        if Self::is_sse_transport_error(&e) && attempt + 1 < 2 {
+                            last_err = Some(ProviderError::Transport(format!(
+                                "qoder sse body decode: {chain} ({decode_ctx})"
+                            )));
                             continue;
                         }
-
-                        if let Some(svc_err) = parse_qoder_service_error(&trimmed) {
-                            tracing::warn!(error = %svc_err, "qoder upstream error in SSE");
-                            let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    svc_err,
-                                )))
-                                .await;
-                            return;
+                        return Err(ProviderError::Transport(format!(
+                            "qoder sse body decode: {chain} ({decode_ctx})"
+                        )));
+                    }
+                    Ok(None) => {
+                        if attempt + 1 < 2 {
+                            last_err = Some(ProviderError::Transport(format!(
+                                "qoder sse empty body ({decode_ctx})"
+                            )));
+                            continue;
                         }
+                        return Err(ProviderError::Transport(format!(
+                            "qoder sse empty body ({decode_ctx})"
+                        )));
+                    }
+                    Err(_) => {
+                        if attempt + 1 < 2 {
+                            last_err = Some(ProviderError::Transport(format!(
+                                "qoder sse idle timeout waiting first chunk ({decode_ctx})"
+                            )));
+                            continue;
+                        }
+                        return Err(ProviderError::Transport(format!(
+                            "qoder sse idle timeout waiting first chunk ({decode_ctx})"
+                        )));
+                    }
+                };
 
-                        if let Some(inner) = parse_sse_line(&trimmed) {
-                            if !first_chunk_sent {
-                                first_chunk_sent = true;
-                                let chunk_json = json!({
-                                    "id": resp_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": chrono::Utc::now().timestamp(),
-                                    "model": req_model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": { "role": "assistant", "content": "" },
-                                        "finish_reason": null
-                                    }]
-                                });
-                                let msg = format!(
-                                    "data: {}\n\n",
-                                    serde_json::to_string(&chunk_json).unwrap()
-                                );
-                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
-                                    return;
-                                }
+                let (tx, rx) =
+                    tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+                let decode_ctx_stream = decode_ctx.clone();
+                let req_model_stream = req_model.clone();
+
+                tokio::spawn(async move {
+                    let mut buffer = String::new();
+                    if let Some(c) = first_chunk {
+                        buffer.push_str(&String::from_utf8_lossy(&c));
+                    }
+                    let resp_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+                    let mut first_chunk_sent = false;
+                    let mut any_content = false;
+
+                    loop {
+                        while let Some(pos) = buffer.find('\n') {
+                            let line = buffer[..pos].trim_end_matches('\r').to_string();
+                            buffer = buffer[pos + 1..].to_string();
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
                             }
-
-                            let choice = inner
-                                .get("choices")
-                                .and_then(|c| c.as_array())
-                                .and_then(|a| a.first());
-                            let delta = choice.and_then(|c| c.get("delta"));
-                            let finish_reason = choice.and_then(|c| c.get("finish_reason"));
-
-                            let mut delta_out = json!({});
-                            let mut has_delta = false;
-
-                            if let Some(content) = delta
-                                .and_then(|d| d.get("content"))
-                                .and_then(|v| v.as_str())
-                            {
-                                if !content.is_empty() {
-                                    delta_out["content"] = json!(content);
-                                    has_delta = true;
-                                    any_content = true;
-                                }
-                            }
-                            if let Some(reasoning) = delta
-                                .and_then(|d| d.get("reasoning_content"))
-                                .and_then(|v| v.as_str())
-                            {
-                                if !reasoning.is_empty() {
-                                    delta_out["reasoning_content"] = json!(reasoning);
-                                    has_delta = true;
-                                    any_content = true;
-                                }
-                            }
-
-                            if has_delta || finish_reason.is_some() {
-                                let chunk_json = json!({
-                                    "id": resp_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": chrono::Utc::now().timestamp(),
-                                    "model": req_model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": delta_out,
-                                        "finish_reason": finish_reason
-                                    }]
-                                });
-                                let msg = format!(
-                                    "data: {}\n\n",
-                                    serde_json::to_string(&chunk_json).unwrap()
-                                );
-                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
-                                    return;
-                                }
-                            }
-
-                            if finish_reason.is_some() {
-                                let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                            if let Some(svc_err) = parse_qoder_service_error(trimmed) {
+                                tracing::warn!(error = %svc_err, "qoder upstream error in SSE");
+                                let _ = tx
+                                    .send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        svc_err,
+                                    )))
+                                    .await;
                                 return;
                             }
+                            if let Some(inner) = parse_sse_line(trimmed) {
+                                if !first_chunk_sent {
+                                    first_chunk_sent = true;
+                                    let chunk_json = serde_json::json!({
+                                        "id": resp_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": chrono::Utc::now().timestamp(),
+                                        "model": req_model_stream,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": { "role": "assistant", "content": "" },
+                                            "finish_reason": serde_json::Value::Null
+                                        }]
+                                    });
+                                    let msg = format!(
+                                        "data: {}\n\n",
+                                        serde_json::to_string(&chunk_json).unwrap()
+                                    );
+                                    if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                        return;
+                                    }
+                                }
+
+                                let choice = inner
+                                    .get("choices")
+                                    .and_then(|c| c.as_array())
+                                    .and_then(|a| a.first());
+                                let delta = choice.and_then(|c| c.get("delta"));
+                                let finish_reason = choice.and_then(|c| c.get("finish_reason"));
+
+                                let mut delta_out = serde_json::json!({});
+                                let mut has_delta = false;
+
+                                if let Some(content) = delta
+                                    .and_then(|d| d.get("content"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !content.is_empty() {
+                                        delta_out["content"] = serde_json::json!(content);
+                                        has_delta = true;
+                                        any_content = true;
+                                    }
+                                }
+                                if let Some(reasoning) = delta
+                                    .and_then(|d| d.get("reasoning_content"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !reasoning.is_empty() {
+                                        delta_out["reasoning_content"] = serde_json::json!(reasoning);
+                                        has_delta = true;
+                                        any_content = true;
+                                    }
+                                }
+
+                                if has_delta || finish_reason.is_some() {
+                                    let chunk_json = serde_json::json!({
+                                        "id": resp_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": chrono::Utc::now().timestamp(),
+                                        "model": req_model_stream,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": delta_out,
+                                            "finish_reason": finish_reason
+                                        }]
+                                    });
+                                    let msg = format!(
+                                        "data: {}\n\n",
+                                        serde_json::to_string(&chunk_json).unwrap()
+                                    );
+                                    if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                        return;
+                                    }
+                                }
+
+                                if finish_reason.is_some() {
+                                    let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                                    return;
+                                }
+                            }
+                        }
+
+                        match futures_util::StreamExt::next(&mut upstream_stream).await {
+                            Some(Ok(c)) => {
+                                buffer.push_str(&String::from_utf8_lossy(&c));
+                            }
+                            Some(Err(e)) => {
+                                let chain = QoderProvider::format_reqwest_err(&e);
+                                tracing::warn!(
+                                    error = %chain,
+                                    ctx = %decode_ctx_stream,
+                                    first_chunk_sent,
+                                    any_content,
+                                    "qoder stream body decode failed"
+                                );
+                                if first_chunk_sent || any_content {
+                                    let chunk_json = serde_json::json!({
+                                        "id": resp_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": chrono::Utc::now().timestamp(),
+                                        "model": req_model_stream,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": serde_json::json!({}),
+                                            "finish_reason": "stop"
+                                        }]
+                                    });
+                                    let msg = format!(
+                                        "data: {}\n\ndata: [DONE]\n\n",
+                                        serde_json::to_string(&chunk_json).unwrap_or_default()
+                                    );
+                                    let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+                                } else {
+                                    let _ = tx
+                                        .send(Err(std::io::Error::new(
+                                            std::io::ErrorKind::UnexpectedEof,
+                                            format!(
+                                                "qoder sse body decode: {chain} ({decode_ctx_stream})"
+                                            ),
+                                        )))
+                                        .await;
+                                }
+                                return;
+                            }
+                            None => break,
                         }
                     }
-                }
 
-                let chunk_json = json!({
-                    "id": resp_id,
-                    "object": "chat.completion.chunk",
-                    "created": chrono::Utc::now().timestamp(),
-                    "model": req_model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
+                    let chunk_json = serde_json::json!({
+                        "id": resp_id,
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": req_model_stream,
+                        "choices": [{
+                            "index": 0,
+                            "delta": serde_json::json!({}),
+                            "finish_reason": "stop"
+                        }]
+                    });
+                    let msg = format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        serde_json::to_string(&chunk_json).unwrap()
+                    );
+                    let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
                 });
-                let msg = format!(
-                    "data: {}\n\ndata: [DONE]\n\n",
-                    serde_json::to_string(&chunk_json).unwrap()
-                );
-                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
-            });
 
-            let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-            let mut headers = HeaderMap::new();
-            headers.insert("content-type", HeaderValue::from_static("text/event-stream"));
-            headers.insert("cache-control", HeaderValue::from_static("no-cache"));
-            headers.insert("connection", HeaderValue::from_static("keep-alive"));
-            let response = Response::builder()
-                .status(StatusCode::OK)
-                .body(body)
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
-            let (mut parts, body) = response.into_parts();
-            parts.headers = headers;
-            Ok(ChatOutcome::Stream(Response::from_parts(parts, body)))
-        } else {
+                let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+                let mut out_headers = axum::http::HeaderMap::new();
+                out_headers.insert("content-type", axum::http::HeaderValue::from_static("text/event-stream"));
+                out_headers.insert("cache-control", axum::http::HeaderValue::from_static("no-cache"));
+                out_headers.insert("connection", axum::http::HeaderValue::from_static("keep-alive"));
+                let response = axum::response::Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .body(body)
+                    .map_err(|e| ProviderError::Other(e.to_string()))?;
+                let (mut parts, body) = response.into_parts();
+                parts.headers = out_headers;
+                return Ok(ChatOutcome::Stream(axum::response::Response::from_parts(parts, body)));
+            }
+
+            // Non-stream
             let mut buffer = String::new();
-            let resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+            let resp_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
             let mut accumulated_text = String::new();
             let mut prompt_tokens: i64 = 0;
             let mut completion_tokens: i64 = 0;
@@ -854,7 +950,7 @@ impl Provider for QoderProvider {
             loop {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(IDLE_SECS),
-                    upstream_stream.next(),
+                    futures_util::StreamExt::next(&mut upstream_stream),
                 )
                 .await
                 {
@@ -863,10 +959,7 @@ impl Provider for QoderProvider {
                     }
                     Ok(Some(Err(e))) => {
                         let chain = Self::format_reqwest_err(&e);
-                        if (Self::is_chunked_eof(&e)
-                            || chain.contains("unexpected internal error"))
-                            && !buffer.is_empty()
-                        {
+                        if Self::is_sse_transport_error(&e) && !buffer.is_empty() {
                             tracing::warn!(
                                 error = %chain,
                                 ctx = %decode_ctx,
@@ -876,6 +969,21 @@ impl Provider for QoderProvider {
                             stream_eof_partial = true;
                             break;
                         }
+                        if Self::is_sse_transport_error(&e) && buffer.is_empty() && attempt + 1 < 2
+                        {
+                            tracing::warn!(
+                                attempt = attempt_label,
+                                error = %chain,
+                                ctx = %decode_ctx,
+                                "qoder non-stream empty-body transport error; retrying"
+                            );
+                            last_err = Some(ProviderError::Transport(format!(
+                                "qoder sse body decode: {chain} ({decode_ctx})"
+                            )));
+                            buffer.clear();
+                            stream_eof_partial = false;
+                            break; // breaks inner match, falls through to next iter
+                        }
                         return Err(ProviderError::Transport(format!(
                             "qoder sse body decode: {chain} ({decode_ctx})"
                         )));
@@ -883,6 +991,12 @@ impl Provider for QoderProvider {
                     Ok(None) => break,
                     Err(_) => {
                         if buffer.is_empty() {
+                            if attempt + 1 < 2 {
+                                last_err = Some(ProviderError::Transport(format!(
+                                    "qoder sse idle timeout {IDLE_SECS}s with empty body ({decode_ctx})"
+                                )));
+                                break;
+                            }
                             return Err(ProviderError::Transport(format!(
                                 "qoder sse idle timeout {IDLE_SECS}s with empty body ({decode_ctx}) — upstream accepted request but never streamed tokens"
                             )));
@@ -896,6 +1010,17 @@ impl Provider for QoderProvider {
                         break;
                     }
                 }
+            }
+
+            // If we broke early for retry, buffer will be empty and we should continue the outer loop
+            if buffer.is_empty() && attempt + 1 < 2 {
+                continue;
+            }
+
+            if buffer.is_empty() {
+                return Err(last_err.unwrap_or_else(|| {
+                    ProviderError::Transport(format!("qoder sse empty body ({decode_ctx})"))
+                }));
             }
 
             for line in buffer.lines() {
@@ -945,7 +1070,7 @@ impl Provider for QoderProvider {
                 total_tokens = prompt_tokens + completion_tokens;
             }
 
-            let result_json = json!({
+            let result_json = serde_json::json!({
                 "id": resp_id,
                 "object": "chat.completion",
                 "created": chrono::Utc::now().timestamp(),
@@ -965,8 +1090,12 @@ impl Provider for QoderProvider {
                 }
             });
 
-            Ok(ChatOutcome::Json(result_json))
+            return Ok(ChatOutcome::Json(result_json));
         }
+
+        Err(last_err.unwrap_or_else(|| {
+            ProviderError::Transport("qoder chat failed after H2/H1 attempts".into())
+        }))
     }
 }
 
