@@ -12,6 +12,8 @@ pub struct Config {
     pub cooldown_hours: u64,
     pub grok_client_id: String,
     pub refresh_lead_secs: i64,
+    pub refresh_interval_secs: u64,
+    pub refresh_workers: usize,
     pub static_dir: Option<PathBuf>,
 }
 
@@ -51,7 +53,16 @@ impl Config {
             refresh_lead_secs: env::var("MARIONETTE_REFRESH_LEAD_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(300),
+                .unwrap_or(10_800),
+            refresh_interval_secs: env::var("MARIONETTE_REFRESH_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1_800),
+            refresh_workers: env::var("MARIONETTE_REFRESH_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8)
+                .max(1),
             static_dir,
         }
     }

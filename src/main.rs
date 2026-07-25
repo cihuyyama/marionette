@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let static_dir = config.static_dir.clone();
     let cors_origin = config.cors_origin.clone();
     let state = AppState::new(pool, config);
+    marionette::workers::refresh::spawn(state.clone());
 
     let cors = if cors_origin == "*" {
         CorsLayer::new()

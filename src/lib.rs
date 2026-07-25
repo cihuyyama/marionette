@@ -8,3 +8,4 @@ pub mod openai;
 pub mod pool;
 pub mod providers;
 pub mod state;
+pub mod workers;
