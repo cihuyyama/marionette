@@ -701,7 +701,16 @@ impl Provider for QoderProvider {
                 .await;
 
                 let first_chunk: Option<bytes::Bytes> = match first {
-                    Ok(Some(Ok(c))) => Some(c),
+                    Ok(Some(Ok(c))) => {
+                        let text = String::from_utf8_lossy(&c);
+                        if text.trim().is_empty() {
+                            // If Qoder replies HTTP 200 but sends an empty first chunk right away,
+                            // it means silent reject (EOF) due to quota/context limit.
+                            tracing::warn!("Qoder silent reject detected (empty first chunk). Returning RateLimited 429 to pool.");
+                            return Err(ProviderError::RateLimited { retry_after_secs: None });
+                        }
+                        Some(c)
+                    },
                     Ok(Some(Err(e))) => {
                         let chain = Self::format_reqwest_err(&e);
                         tracing::warn!(
@@ -721,15 +730,9 @@ impl Provider for QoderProvider {
                         )));
                     }
                     Ok(None) => {
-                        if attempt + 1 < 2 {
-                            last_err = Some(ProviderError::Transport(format!(
-                                "qoder sse empty body ({decode_ctx})"
-                            )));
-                            continue;
-                        }
-                        return Err(ProviderError::Transport(format!(
-                            "qoder sse empty body ({decode_ctx})"
-                        )));
+                        // Qoder closed connection with empty body immediately (silent context reject)
+                        tracing::warn!("Qoder silent reject detected (EOF no chunks). Returning RateLimited 429 to pool.");
+                        return Err(ProviderError::RateLimited { retry_after_secs: None });
                     }
                     Err(_) => {
                         if attempt + 1 < 2 {
@@ -830,7 +833,14 @@ impl Provider for QoderProvider {
                                     }
                                 }
 
-                                if has_delta || finish_reason.is_some() {
+                                let mut finish_reason_val = finish_reason.cloned();
+                                if finish_reason.is_some() && !any_content {
+                                    // Silent reject detected during stream (context limit).
+                                    tracing::warn!("Qoder silent reject mid-stream (no content generated). Marking finish_reason as 'length'.");
+                                    finish_reason_val = Some(serde_json::json!("length"));
+                                }
+
+                                if has_delta || finish_reason_val.is_some() {
                                     let chunk_json = serde_json::json!({
                                         "id": resp_id,
                                         "object": "chat.completion.chunk",
@@ -839,7 +849,7 @@ impl Provider for QoderProvider {
                                         "choices": [{
                                             "index": 0,
                                             "delta": delta_out,
-                                            "finish_reason": finish_reason
+                                            "finish_reason": finish_reason_val
                                         }]
                                     });
                                     let msg = format!(
@@ -872,6 +882,12 @@ impl Provider for QoderProvider {
                                     "qoder stream body decode failed"
                                 );
                                 if first_chunk_sent || any_content {
+                                    let mut eof_finish = "stop";
+                                    if !any_content {
+                                        tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
+                                        eof_finish = "length";
+                                    }
+
                                     let chunk_json = serde_json::json!({
                                         "id": resp_id,
                                         "object": "chat.completion.chunk",
@@ -880,7 +896,7 @@ impl Provider for QoderProvider {
                                         "choices": [{
                                             "index": 0,
                                             "delta": serde_json::json!({}),
-                                            "finish_reason": "stop"
+                                            "finish_reason": eof_finish
                                         }]
                                     });
                                     let msg = format!(
@@ -904,6 +920,12 @@ impl Provider for QoderProvider {
                         }
                     }
 
+                    let mut eof_finish = "stop";
+                    if !any_content {
+                        tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
+                        eof_finish = "length";
+                    }
+
                     let chunk_json = serde_json::json!({
                         "id": resp_id,
                         "object": "chat.completion.chunk",
@@ -912,7 +934,7 @@ impl Provider for QoderProvider {
                         "choices": [{
                             "index": 0,
                             "delta": serde_json::json!({}),
-                            "finish_reason": "stop"
+                            "finish_reason": eof_finish
                         }]
                     });
                     let msg = format!(
@@ -940,6 +962,7 @@ impl Provider for QoderProvider {
             let mut buffer = String::new();
             let resp_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
             let mut accumulated_text = String::new();
+            let mut accumulated_reasoning = String::new();
             let mut prompt_tokens: i64 = 0;
             let mut completion_tokens: i64 = 0;
             let mut total_tokens: i64 = 0;
@@ -1058,16 +1081,38 @@ impl Provider for QoderProvider {
                         .and_then(|d| d.get("content"))
                         .and_then(|v| v.as_str())
                     {
-                        accumulated_text.push_str(content);
+                        if !content.is_empty() {
+                            accumulated_text.push_str(content);
+                        }
+                    }
+                    if let Some(reasoning) = delta
+                        .and_then(|d| d.get("reasoning_content"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !reasoning.is_empty() {
+                            accumulated_reasoning.push_str(reasoning);
+                        }
                     }
                 }
             }
 
             let _ = stream_eof_partial;
 
-            if total_tokens == 0 && completion_tokens == 0 && !accumulated_text.is_empty() {
-                completion_tokens = estimate_tokens(&accumulated_text);
+            let final_text = if !accumulated_text.is_empty() {
+                accumulated_text
+            } else {
+                accumulated_reasoning
+            };
+
+            if total_tokens == 0 && completion_tokens == 0 && !final_text.is_empty() {
+                completion_tokens = estimate_tokens(&final_text);
                 total_tokens = prompt_tokens + completion_tokens;
+            }
+
+            let mut finish_reason_str = "stop";
+            if final_text.is_empty() {
+                tracing::warn!("Qoder silent reject mid-non-stream (no content generated). Marking finish_reason as 'length'.");
+                finish_reason_str = "length";
             }
 
             let result_json = serde_json::json!({
@@ -1079,9 +1124,9 @@ impl Provider for QoderProvider {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": accumulated_text
+                        "content": final_text
                     },
-                    "finish_reason": "stop"
+                    "finish_reason": finish_reason_str
                 }],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
@@ -1208,9 +1253,6 @@ fn parse_sse_line(line: &str) -> Option<Value> {
         return None;
     }
     if let Ok(wrapper) = serde_json::from_str::<Value>(data_str) {
-        if wrapper.get("statusCodeValue").is_some() {
-            return None;
-        }
         if let Some(inner_str) = wrapper.get("body").and_then(|b| b.as_str()) {
             if inner_str == "[DONE]" {
                 return None;
@@ -1220,6 +1262,14 @@ fn parse_sse_line(line: &str) -> Option<Value> {
             }
         }
         if wrapper.get("choices").is_some() || wrapper.get("usage").is_some() {
+            if let Some(svc) = wrapper
+                .get("statusCodeValue")
+                .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            {
+                if svc >= 400 {
+                    return None;
+                }
+            }
             return Some(wrapper);
         }
     }
