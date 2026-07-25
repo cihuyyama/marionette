@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Thin Rust OpenAI-compatible proxy pool (grok-cli + qoder)"
 license = "MIT"
+default-run = "marionette"
 
 [lib]
 name = "marionette"

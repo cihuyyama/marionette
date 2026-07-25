@@ -21,7 +21,7 @@ impl AppState {
             .build()
             .expect("http client");
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
-        let qoder = Arc::new(QoderProvider::new(http.clone()));
+        let qoder = Arc::new(QoderProvider::new());
         Self {
             pool,
             config,

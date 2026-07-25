@@ -11,14 +11,14 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use aes::cipher::{BlockEncrypt, KeyInit};
 use md5::{Md5, Digest as Md5Digest};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
-
 use uuid::Uuid;
+use futures_util::StreamExt;
+use axum::http::{HeaderMap, HeaderValue};
+use sha2::Sha256;
 
 const COSY_VERSION: &str = "1.0.22";
 const APPCODE: &str = "cosy";
@@ -95,14 +95,20 @@ fn aes_128_cbc_encrypt(plain: &[u8], key: &[u8]) -> Result<Vec<u8>, ProviderErro
     let mut padded = plain.to_vec();
     let pad_len = 16 - (padded.len() % 16);
     padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-    let cipher = Aes128::new_from_slice(key).map_err(|e| ProviderError::Other(format!("AES init: {e}")))?;
+    let cipher = Aes128::new_from_slice(key)
+        .map_err(|e| ProviderError::Other(format!("AES init: {e}")))?;
     let mut result = Vec::with_capacity(padded.len());
+    // qodercli: IV == key (not zero IV)
     let mut prev = [0u8; 16];
+    prev.copy_from_slice(key);
     for chunk in padded.chunks(16) {
         let mut block = [0u8; 16];
         block.copy_from_slice(chunk);
-        for i in 0..16 { block[i] ^= prev[i]; }
-        let mut gblock = aes::cipher::generic_array::GenericArray::from_mut_slice(&mut block); cipher.encrypt_block(&mut gblock);
+        for i in 0..16 {
+            block[i] ^= prev[i];
+        }
+        let mut gblock = aes::cipher::generic_array::GenericArray::from_mut_slice(&mut block);
+        cipher.encrypt_block(&mut gblock);
         result.extend_from_slice(&block);
         prev = block;
     }
@@ -141,31 +147,111 @@ struct QoderTokens {
     machine_type: String,
 }
 
-impl QoderTokens {
+    impl QoderTokens {
+    fn effective_data(data: &Value) -> Value {
+        let mut out = serde_json::Map::new();
+        if let Some(obj) = data.as_object() {
+            for (k, v) in obj {
+                if k == "providerSpecificData" {
+                    continue;
+                }
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(psd) = data
+            .get("providerSpecificData")
+            .and_then(|v| v.as_object())
+        {
+            for (k, v) in psd {
+                let overwrite = !out.contains_key(k)
+                    || out
+                        .get(k)
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true);
+                if overwrite {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if !out.contains_key("securityOauthToken")
+            || out
+                .get("securityOauthToken")
+                .and_then(|v| v.as_str())
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+        {
+            if let Some(at) = out
+                .get("accessToken")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                out.insert("securityOauthToken".into(), json!(at));
+            }
+        }
+        Value::Object(out)
+    }
+
     fn from_data(data: &Value) -> Result<Self, ProviderError> {
-        let pt = data.get("personalToken")
+        let data = Self::effective_data(data);
+        let pt = data
+            .get("personalToken")
+            .or_else(|| data.get("personal_token"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| ProviderError::AuthInvalid("missing personalToken".into()))?
             .to_string();
-        let mid = data.get("machineId")
+        let mid = data
+            .get("machineId")
+            .or_else(|| data.get("machine_id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let mt = data.get("machineToken")
+        let mt = data
+            .get("machineToken")
+            .or_else(|| data.get("machine_token"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| mid.clone());
         Ok(Self {
             personal_token: pt,
-            security_oauth_token: data.get("securityOauthToken").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            refresh_token: data.get("refreshToken").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            user_id: data.get("userId").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            user_name: data.get("userName").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            user_type: data.get("userType").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            expire_time: data.get("expireTime").and_then(|v| v.as_u64()),
+            security_oauth_token: data
+                .get("securityOauthToken")
+                .or_else(|| data.get("security_oauth_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            refresh_token: data
+                .get("refreshToken")
+                .or_else(|| data.get("refresh_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            user_id: data
+                .get("userId")
+                .or_else(|| data.get("user_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            user_name: data
+                .get("userName")
+                .or_else(|| data.get("user_name"))
+                .or_else(|| data.get("displayName"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            user_type: data
+                .get("userType")
+                .or_else(|| data.get("user_type"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            expire_time: data
+                .get("expireTime")
+                .or_else(|| data.get("expire_time"))
+                .and_then(|v| v.as_u64()),
             machine_id: mid,
             machine_token: mt,
-            machine_type: data.get("machineType").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| "5".into()),
+            machine_type: data
+                .get("machineType")
+                .or_else(|| data.get("machine_type"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "5".into()),
         })
     }
     fn to_data(&self) -> Value {
@@ -190,13 +276,14 @@ struct JobTokenResponse {
     id: Option<String>,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "securityOauthToken")]
     security_oauth_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "refreshToken")]
     refresh_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "expireTime")]
+    #[allow(dead_code)]
     expire_time: Option<u64>,
-    #[serde(default)]
+    #[serde(default, alias = "userType")]
     user_type: Option<String>,
 }
 
@@ -275,7 +362,12 @@ pub struct QoderProvider {
 }
 
 impl QoderProvider {
-    pub fn new(client: Client) -> Self {
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .http1_only()
+            .build()
+            .expect("qoder http client");
         Self { client }
     }
 
@@ -318,7 +410,20 @@ impl Provider for QoderProvider {
     async fn ensure_fresh_auth(&self, account: &mut Account) -> Result<(), ProviderError> {
         let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
         let mut tokens = QoderTokens::from_data(&data)?;
-        if tokens.security_oauth_token.is_none() || tokens.security_oauth_token.as_deref() == Some("") {
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let expired = tokens
+            .expire_time
+            .map(|exp| exp <= now_ms + 60_000)
+            .unwrap_or(false);
+
+        let needs_refresh = tokens.security_oauth_token.is_none()
+            || tokens.security_oauth_token.as_deref() == Some("")
+            || tokens.user_id.is_none()
+            || tokens.user_id.as_deref() == Some("")
+            || expired;
+
+        if needs_refresh {
             let job = self.do_job_token(&tokens).await?;
             if let Some(sot) = job.security_oauth_token {
                 tokens.security_oauth_token = Some(sot);
@@ -347,102 +452,532 @@ impl Provider for QoderProvider {
     ) -> Result<ChatOutcome, ProviderError> {
         let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
         let tokens = QoderTokens::from_data(&data)?;
-        if tokens.security_oauth_token.is_none() || tokens.security_oauth_token.as_deref() == Some("") {
+        if tokens.security_oauth_token.is_none()
+            || tokens.security_oauth_token.as_deref() == Some("")
+        {
             return Err(ProviderError::AuthExpired);
         }
         let session = build_cosy_session(&tokens)?;
         let payload_b64 = build_payload_b64(&session.info);
-        let cosy_date = rfc1123_date();
-        let body = build_chat_body(req);
+        let cosy_date = format!("{}", chrono::Utc::now().timestamp());
+        let model = map_model(req.upstream_model()).to_string();
+        let body = build_chat_body(req, &model);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let body_encoded = encode_qoder_payload(body_str.as_bytes());
         let path_sig = path_sig_from_url(CHAT_URL);
-        let bearer_sig = sign_bearer_request(&payload_b64, &session.cosy_key, &cosy_date, &body_str, &path_sig);
-        let bearer = format!("{}.{}.{}.{}", payload_b64, session.cosy_key, cosy_date, bearer_sig);
-        let mut headers = signature_headers(&tokens);
-        headers.insert("authorization", format!("Bearer {}", bearer).parse().unwrap());
-        headers.insert("cosy-payload", payload_b64.parse().unwrap());
-        headers.insert("cosy-key", session.cosy_key.clone().parse().unwrap());
+        let bearer_sig = sign_bearer_request(
+            &payload_b64,
+            &session.cosy_key,
+            &cosy_date,
+            &body_encoded,
+            &path_sig,
+        );
+        let bearer = format!("COSY.{payload_b64}.{bearer_sig}");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cosy-data-policy", "agree".parse().unwrap());
+        headers.insert("cosy-machinetype", "5".parse().unwrap());
+        headers.insert("cosy-clienttype", "5".parse().unwrap());
         headers.insert("cosy-date", cosy_date.parse().unwrap());
-        headers.insert("cosy-bearer-signature", bearer_sig.parse().unwrap());
-        let resp = self.client
+        headers.insert(
+            "cosy-user",
+            tokens
+                .user_id
+                .as_deref()
+                .unwrap_or("")
+                .parse()
+                .unwrap_or_else(|_| "".parse().unwrap()),
+        );
+        headers.insert("cosy-key", session.cosy_key.parse().unwrap());
+        headers.insert("cache-control", "no-cache".parse().unwrap());
+        headers.insert("cosy-business-product", "cli".parse().unwrap());
+        headers.insert("cosy-business-type", "agent".parse().unwrap());
+        headers.insert("cosy-scene", "assistant".parse().unwrap());
+        headers.insert("accept", "text/event-stream".parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Bearer {bearer}").parse().unwrap(),
+        );
+        headers.insert("accept-encoding", "identity".parse().unwrap());
+        headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
+        headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+        headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
+        headers.insert("login-version", "v2".parse().unwrap());
+        headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("x-model-key", model.parse().unwrap());
+        headers.insert("x-model-source", "system".parse().unwrap());
+
+        let resp = self
+            .client
             .post(CHAT_URL)
             .headers(headers)
-            .body(body_str)
+            .body(body_encoded)
             .send()
             .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+            .map_err(|e| ProviderError::Transport(format!("qoder send: {e:?}")))?;
         let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let content_encoding = resp
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let transfer_encoding = resp
+            .headers()
+            .get(reqwest::header::TRANSFER_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         if status != 200 {
             let text = resp.text().await.unwrap_or_default();
             return Err(classify_http_status(status, &text));
         }
+        tracing::debug!(
+            status,
+            content_type = %content_type,
+            content_encoding = %content_encoding,
+            transfer_encoding = %transfer_encoding,
+            "qoder chat upstream ok"
+        );
+
+        let req_model = req.model.clone();
+        let decode_ctx = format!(
+            "ct={content_type} ce={content_encoding} te={transfer_encoding}"
+        );
+
         if req.stream_enabled() {
-            let byte_stream = resp.bytes_stream();
-            let body = Body::from_stream(byte_stream);
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+            let mut upstream_stream = resp.bytes_stream();
+            let decode_ctx_stream = decode_ctx.clone();
+
+            tokio::spawn(async move {
+                let mut buffer = String::new();
+                let resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+                let mut first_chunk_sent = false;
+
+                while let Some(chunk_res) = upstream_stream.next().await {
+                    let chunk = match chunk_res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = ?e,
+                                ctx = %decode_ctx_stream,
+                                "qoder stream body decode failed"
+                            );
+                            let _ = tx
+                                .send(Err(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    format!("qoder sse body decode: {e:?} ({decode_ctx_stream})"),
+                                )))
+                                .await;
+                            return;
+                        }
+                    };
+
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].trim_end_matches('\r').to_string();
+                        buffer = buffer[pos + 1..].to_string();
+
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(inner) = parse_sse_line(&trimmed) {
+                            if !first_chunk_sent {
+                                first_chunk_sent = true;
+                                let chunk_json = json!({
+                                    "id": resp_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": chrono::Utc::now().timestamp(),
+                                    "model": req_model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": { "role": "assistant", "content": "" },
+                                        "finish_reason": null
+                                    }]
+                                });
+                                let msg = format!(
+                                    "data: {}\n\n",
+                                    serde_json::to_string(&chunk_json).unwrap()
+                                );
+                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                    return;
+                                }
+                            }
+
+                            let choice = inner
+                                .get("choices")
+                                .and_then(|c| c.as_array())
+                                .and_then(|a| a.first());
+                            let delta = choice.and_then(|c| c.get("delta"));
+                            let finish_reason = choice.and_then(|c| c.get("finish_reason"));
+
+                            let mut delta_out = json!({});
+                            let mut has_delta = false;
+
+                            if let Some(content) = delta
+                                .and_then(|d| d.get("content"))
+                                .and_then(|v| v.as_str())
+                            {
+                                if !content.is_empty() {
+                                    delta_out["content"] = json!(content);
+                                    has_delta = true;
+                                }
+                            }
+                            if let Some(reasoning) = delta
+                                .and_then(|d| d.get("reasoning_content"))
+                                .and_then(|v| v.as_str())
+                            {
+                                if !reasoning.is_empty() {
+                                    delta_out["reasoning_content"] = json!(reasoning);
+                                    has_delta = true;
+                                }
+                            }
+
+                            if has_delta || finish_reason.is_some() {
+                                let chunk_json = json!({
+                                    "id": resp_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": chrono::Utc::now().timestamp(),
+                                    "model": req_model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": delta_out,
+                                        "finish_reason": finish_reason
+                                    }]
+                                });
+                                let msg = format!(
+                                    "data: {}\n\n",
+                                    serde_json::to_string(&chunk_json).unwrap()
+                                );
+                                if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
+                                    return;
+                                }
+                            }
+
+                            if finish_reason.is_some() {
+                                let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                let chunk_json = json!({
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": req_model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                });
+                let msg = format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    serde_json::to_string(&chunk_json).unwrap()
+                );
+                let _ = tx.send(Ok(bytes::Bytes::from(msg))).await;
+            });
+
+            let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", HeaderValue::from_static("text/event-stream"));
+            headers.insert("cache-control", HeaderValue::from_static("no-cache"));
+            headers.insert("connection", HeaderValue::from_static("keep-alive"));
             let response = Response::builder()
                 .status(StatusCode::OK)
-                .header("content-type", "text/event-stream")
-                .header("cache-control", "no-cache")
                 .body(body)
-                .map_err(|e| ProviderError::Transport(format!("body build: {e}")))?;
-            Ok(ChatOutcome::Stream(response))
+                .map_err(|e| ProviderError::Other(e.to_string()))?;
+            let (mut parts, body) = response.into_parts();
+            parts.headers = headers;
+            Ok(ChatOutcome::Stream(Response::from_parts(parts, body)))
         } else {
-            let text = resp.text().await.unwrap_or_default();
-            let json_val = parse_nonstream_response(&text)?;
-            Ok(ChatOutcome::Json(json_val))
+            let mut buffer = String::new();
+            let resp_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+            let mut accumulated_text = String::new();
+            let mut prompt_tokens: i64 = 0;
+            let mut completion_tokens: i64 = 0;
+            let mut total_tokens: i64 = 0;
+            let mut upstream_stream = resp.bytes_stream();
+
+            while let Some(chunk_res) = upstream_stream.next().await {
+                let chunk = chunk_res.map_err(|e| {
+                    ProviderError::Transport(format!(
+                        "qoder sse body decode: {e:?} ({decode_ctx})"
+                    ))
+                })?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(inner) = parse_sse_line(&trimmed) {
+                        if let Some(u) = inner.get("usage") {
+                            if let Some(p) = usage_i64(u, "prompt_tokens")
+                                .or_else(|| usage_i64(u, "input_tokens"))
+                            {
+                                prompt_tokens = p;
+                            }
+                            if let Some(c) = usage_i64(u, "completion_tokens")
+                                .or_else(|| usage_i64(u, "output_tokens"))
+                            {
+                                completion_tokens = c;
+                            }
+                            if let Some(t) = usage_i64(u, "total_tokens") {
+                                total_tokens = t;
+                            } else if prompt_tokens > 0 || completion_tokens > 0 {
+                                total_tokens = prompt_tokens + completion_tokens;
+                            }
+                        }
+                        let choice = inner
+                            .get("choices")
+                            .and_then(|c| c.as_array())
+                            .and_then(|a| a.first());
+                        let delta = choice.and_then(|c| c.get("delta"));
+                        if let Some(content) = delta
+                            .and_then(|d| d.get("content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            accumulated_text.push_str(content);
+                        }
+                    }
+                }
+            }
+
+            if total_tokens == 0 && completion_tokens == 0 && !accumulated_text.is_empty() {
+                completion_tokens = estimate_tokens(&accumulated_text);
+                total_tokens = prompt_tokens + completion_tokens;
+            }
+
+            let result_json = json!({
+                "id": resp_id,
+                "object": "chat.completion",
+                "created": chrono::Utc::now().timestamp(),
+                "model": req_model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": accumulated_text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
+                }
+            });
+
+            Ok(ChatOutcome::Json(result_json))
         }
     }
 }
 
-fn build_chat_body(req: &ChatCompletionRequest) -> Value {
-    let messages: Vec<Value> = req.messages.iter().map(|m| {
-        json!({
-            "role": m.role,
-            "content": m.content
-        })
-    }).collect();
-    let model = map_model(req.upstream_model()).to_string();
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": req.stream_enabled(),
-        "business": {
-            "product": "cli",
-            "type": "agent",
-            "version": "1.0.22"
-        },
-        "scene": "assistant"
-    });
-    if let Some(max) = req.max_tokens {
-        body["max_tokens"] = json!(max);
-    }
-    if let Some(temp) = req.temperature {
-        body["temperature"] = json!(temp);
-    }
-    body
-}
-
-fn parse_nonstream_response(text: &str) -> Result<Value, ProviderError> {
-    let mut last_data: Option<&str> = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("data:") {
-            let rest = rest.trim();
-            if rest == "[DONE]" { continue; }
-            last_data = Some(rest);
+fn extract_user_text(req: &ChatCompletionRequest) -> String {
+    for m in req.messages.iter().rev() {
+        if m.role == "user" {
+            return content_to_text(&m.content);
         }
     }
-    let raw = last_data.unwrap_or(text);
-    if let Ok(wrapper) = serde_json::from_str::<Value>(raw) {
-        if let Some(inner_str) = wrapper.get("body").and_then(|b| b.as_str()) {
-            if let Ok(inner) = serde_json::from_str::<Value>(inner_str) {
-                return Ok(inner);
+    String::new()
+}
+
+fn content_to_text(content: &Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut parts = Vec::new();
+        for item in arr {
+            if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                parts.push(t.to_string());
+            } else if let Some(s) = item.as_str() {
+                parts.push(s.to_string());
             }
         }
-        return Ok(wrapper);
+        return parts.join("\n");
     }
-    if let Ok(val) = serde_json::from_str::<Value>(raw) {
-        return Ok(val);
+    content.to_string()
+}
+
+fn derive_session_id(messages: &[crate::openai::ChatMessage]) -> String {
+    let mut hasher = Sha256::new();
+    let mut first_user_seen = false;
+    for m in messages {
+        if m.role == "system" {
+            hasher.update(b"system:");
+            hasher.update(content_to_text(&m.content).as_bytes());
+            hasher.update(b"\n");
+        } else if m.role == "user" && !first_user_seen {
+            hasher.update(b"user:");
+            hasher.update(content_to_text(&m.content).as_bytes());
+            hasher.update(b"\n");
+            first_user_seen = true;
+            break;
+        }
     }
-    Err(ProviderError::Transport(format!("qoder parse: no JSON in {} bytes", text.len())))
+    if !first_user_seen {
+        hasher.update(b"__no_user__");
+    }
+    let hash_result = hasher.finalize();
+    let hex = hex::encode(hash_result);
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
+fn parse_sse_line(line: &str) -> Option<Value> {
+    if !line.starts_with("data:") {
+        return None;
+    }
+    let data_str = line["data:".len()..].trim();
+    if data_str.is_empty() || data_str == "[DONE]" {
+        return None;
+    }
+    if let Ok(wrapper) = serde_json::from_str::<Value>(data_str) {
+        if let Some(inner_str) = wrapper.get("body").and_then(|b| b.as_str()) {
+            if inner_str == "[DONE]" {
+                return None;
+            }
+            if let Ok(inner) = serde_json::from_str::<Value>(inner_str) {
+                return Some(inner);
+            }
+        }
+        if wrapper.get("choices").is_some() || wrapper.get("usage").is_some() {
+            return Some(wrapper);
+        }
+    }
+    None
+}
+
+fn usage_i64(usage: &Value, key: &str) -> Option<i64> {
+    usage
+        .get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+}
+
+fn estimate_tokens(text: &str) -> i64 {
+    let n = (text.chars().count() as f64 / 4.0).ceil() as i64;
+    n.max(1)
+}
+
+fn build_chat_body(req: &ChatCompletionRequest, model: &str) -> Value {
+    let prompt = extract_user_text(req);
+    let mut messages: Vec<Value> = Vec::new();
+    let has_system = req.messages.iter().any(|m| m.role == "system");
+    if !has_system {
+        messages.push(json!({
+            "role": "system",
+            "content": "You are a helpful AI assistant. Answer the user's questions clearly and concisely.",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
+                }
+            ]
+        }));
+    }
+    for m in &req.messages {
+        let content_str = content_to_text(&m.content);
+        messages.push(json!({
+            "role": m.role,
+            "content": content_str,
+            "contents": [
+                {
+                    "type": "text",
+                    "text": content_str
+                }
+            ]
+        }));
+    }
+    let system_text = messages
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let is_reasoning = matches!(
+        model,
+        "ultimate" | "dmodel" | "dfmodel" | "gm51model"
+    );
+    let max_tokens = req.max_tokens.unwrap_or(32_768);
+    let req_id = Uuid::new_v4().to_string();
+    let chat_record_id = Uuid::new_v4().to_string();
+    let session_id = derive_session_id(&req.messages);
+    json!({
+        "request_id": req_id,
+        "request_set_id": Uuid::new_v4().to_string(),
+        "chat_record_id": chat_record_id,
+        "session_id": session_id,
+        "stream": true,
+        "chat_task": "FREE_INPUT",
+        "is_reply": true,
+        "is_retry": false,
+        "source": 1,
+        "version": "3",
+        "session_type": "qodercli",
+        "agent_id": "agent_common",
+        "task_id": "common",
+        "code_language": "",
+        "chat_prompt": "",
+        "image_urls": null,
+        "aliyun_user_type": "",
+        "system": system_text,
+        "messages": messages,
+        "tools": [],
+        "parameters": { "max_tokens": max_tokens },
+        "chat_context": {
+            "chatPrompt": "",
+            "imageUrls": null,
+            "extra": {
+                "context": [],
+                "modelConfig": { "key": model, "is_reasoning": is_reasoning },
+                "originalContent": { "type": "text", "text": prompt }
+            },
+            "features": [],
+            "text": { "type": "text", "text": prompt }
+        },
+        "model_config": {
+            "key": model,
+            "display_name": model,
+            "is_vl": true,
+            "is_reasoning": is_reasoning,
+            "max_input_tokens": 180000,
+            "format": "openai",
+            "source": "system"
+        },
+        "business": {
+            "product": "cli",
+            "version": COSY_VERSION,
+            "type": "agent",
+            "stage": "start",
+            "id": Uuid::new_v4().to_string(),
+            "name": prompt.chars().take(30).collect::<String>(),
+            "begin_at": chrono::Utc::now().timestamp_millis()
+        }
+    })
 }
