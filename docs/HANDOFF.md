@@ -1,9 +1,9 @@
-# Marionette — OpenCode Handoff
+﻿# Marionette â€” OpenCode Handoff
 
 **Created:** 2026-07-25  
 **Owner:** Iqbal (Windows local + VPS)  
 **Goal:** Greenfield Rust proxy pool for **Grok CLI + Qoder only**.  
-**Name origin:** Lord of the Mysteries — *marionette* (many controlled accounts).
+**Name origin:** Lord of the Mysteries â€” *marionette* (many controlled accounts).
 
 This file is the single source of truth when continuing in **OpenCode** or a new Hermes session.
 
@@ -24,7 +24,7 @@ Providers:
 | ID | Upstream idea | Auth |
 |----|---------------|------|
 | `grok-cli` | Grok Build CLI path (`cli-chat-proxy.grok.com` style, same tokens as 9Router) | OAuth access + refresh |
-| `qoder` | Qoder chat (same behavior as etteeum Qoder provider) | PAT → job/session token + machineId/userId |
+| `qoder` | Qoder chat (same behavior as etteeum Qoder provider) | PAT â†’ job/session token + machineId/userId |
 
 **Out of scope v1:** full etteeum rewrite, multi-provider zoo, React dashboard, browser login bots, pudidil/compression suite.
 
@@ -33,12 +33,12 @@ Providers:
 ## 2. Why this exists
 
 - etteeum-pool = Bun + Hono + many providers (heavy, TS-fast iteration)
-- User wants **Rust**, but only **2 providers** → rewrite scope is viable
+- User wants **Rust**, but only **2 providers** â†’ rewrite scope is viable
 - Grok tokens already farmed + stored in 9Router
 - Qoder behavior already proven in etteeum; port carefully
 
 Decision trail:
-- Full etteeum → Rust: overkill
+- Full etteeum â†’ Rust: overkill
 - Go + TanStack: good alternative
 - **Rust + 2 providers only: approved direction**
 - Product name: **marionette** (not qogrok / etteeum-rs)
@@ -69,11 +69,11 @@ ssh -i C:\Users\miqba\Documents\tencent_lighthouse.pem ubuntu@43.156.232.106
 | 9Router port | `20128` (public via domain reverse proxy) |
 | Grok farm | `/home/ubuntu/grok-farm` |
 | Grok hygiene | `/home/ubuntu/grok-refresh` (`grok-refresh` + `grok-quota` systemd) |
-| WARP for farm only | **WarpProxy SOCKS5 `127.0.0.1:40000`** — NOT full tunnel |
+| WARP for farm only | **WarpProxy SOCKS5 `127.0.0.1:40000`** â€” NOT full tunnel |
 | Farm proxies.txt | `socks5://127.0.0.1:40000` |
 
 **Important farm note (2026-07-24):**  
-Local farm OAuth often works; VPS farm often hits **Access denied** at consent even via WARP. User may buy residential proxy later. Marionette does **not** depend on VPS farming — it consumes tokens already in DB/export.
+Local farm OAuth often works; VPS farm often hits **Access denied** at consent even via WARP. User may buy residential proxy later. Marionette does **not** depend on VPS farming â€” it consumes tokens already in DB/export.
 
 ---
 
@@ -100,12 +100,12 @@ Refresh rules (mirror `grok-refresh` / quota pack):
   - `grant_type=refresh_token`
   - `client_id=b1a00492-073a-47ea-816f-4c329264a828`
   - `refresh_token=...`
-- `invalid_grant` → delete/disable account
-- **429 free usage** → cooldown ~**25 hours** (rolling, not strict midnight)
-- **401** → cooldown / refresh attempt
-- **402 / 403** → disable or delete
+- `invalid_grant` â†’ delete/disable account
+- **429 free usage** â†’ cooldown ~**25 hours** (rolling, not strict midnight)
+- **401** â†’ cooldown / refresh attempt
+- **402 / 403** â†’ disable or delete
 
-Optional also store `grok-web` (SSO cookie) later — **not required for v1**.
+Optional also store `grok-web` (SSO cookie) later â€” **not required for v1**.
 
 ### Qoder (priority #2)
 Reference implementation:
@@ -125,24 +125,24 @@ Critical quirks (from ops skill):
 
 ```
 marionette/
-├── Cargo.toml
-├── src/
-│   ├── main.rs
-│   ├── config.rs
-│   ├── api/{mod,chat,models,health,admin}.rs
-│   ├── pool/{mod,cooldown}.rs
-│   ├── providers/{mod,grok_cli,qoder}.rs
-│   ├── auth/{grok_refresh,qoder_auth}.rs
-│   ├── db.rs
-│   └── error.rs
-├── data/                 # gitignored sqlite
-├── scripts/              # import from 9router / farm json
-├── web/                  # React + Vite + TS admin dashboard
-│   ├── PRODUCT.md        # Impeccable product context
-│   ├── DESIGN.md         # visual world (LoTM soft, dark-only)
-│   └── src/
-└── docs/
-    └── DESIGN.md         # same design brief (source of truth until web/ exists)
+â”œâ”€â”€ Cargo.toml
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ main.rs
+â”‚   â”œâ”€â”€ config.rs
+â”‚   â”œâ”€â”€ api/{mod,chat,models,health,admin}.rs
+â”‚   â”œâ”€â”€ pool/{mod,cooldown}.rs
+â”‚   â”œâ”€â”€ providers/{mod,grok_cli,qoder}.rs
+â”‚   â”œâ”€â”€ auth/{grok_refresh,qoder_auth}.rs
+â”‚   â”œâ”€â”€ db.rs
+â”‚   â””â”€â”€ error.rs
+â”œâ”€â”€ data/                 # gitignored sqlite
+â”œâ”€â”€ scripts/              # import from 9router / farm json
+â”œâ”€â”€ web/                  # React + Vite + TS admin dashboard
+â”‚   â”œâ”€â”€ PRODUCT.md        # Impeccable product context
+â”‚   â”œâ”€â”€ DESIGN.md         # visual world (LoTM soft, dark-only)
+â”‚   â””â”€â”€ src/
+â””â”€â”€ docs/
+    â””â”€â”€ DESIGN.md         # same design brief (source of truth until web/ exists)
 ```
 
 ### Stack
@@ -159,7 +159,7 @@ marionette/
 - React + Vite + TypeScript (SPA, **not** TanStack Start / Next)
 - Impeccable skill for design system + craft
 - Dark-only; LoTM identity soft (see `docs/DESIGN.md`)
-- Dev: Vite `:5173` proxies to Axum `:1940`
+- Dev: Vite `:1941` proxies to Axum `:1940`
 - Prod: Axum serves `web/dist` (preferred) or reverse-proxy static
 
 ### Provider trait (sketch)
@@ -175,7 +175,7 @@ trait Provider {
 
 ### Pool flow
 1. Authenticate client with pool API key
-2. Map model → provider (`gcli/*` or `qd/*` — decide convention early)
+2. Map model â†’ provider (`gcli/*` or `qd/*` â€” decide convention early)
 3. Pick active account not in cooldown
 4. `ensure_fresh_auth`
 5. Call upstream
@@ -188,7 +188,7 @@ MARIONETTE_PORT=1940
 MARIONETTE_DB=./data/marionette.sqlite
 MARIONETTE_API_KEY=change-me
 MARIONETTE_ADMIN_KEY=change-me-admin
-MARIONETTE_CORS_ORIGIN=http://localhost:5173
+MARIONETTE_CORS_ORIGIN=http://localhost:1941
 RUST_LOG=info,marionette=debug
 ```
 
@@ -201,14 +201,14 @@ Admin auth: **separate** `MARIONETTE_ADMIN_KEY` (not the same as pool chat key).
 ## 6. Implementation phases
 
 **Locked order (2026-07-25 brainstorm):**  
-Grok full → Admin API → React+Vite dashboard (Impeccable + LoTM soft) → **then** Qoder.
+Grok full â†’ Admin API â†’ React+Vite dashboard (Impeccable + LoTM soft) â†’ **then** Qoder.
 
-### Phase 0 — done
+### Phase 0 â€” done
 - [x] Name locked: marionette
 - [x] Folder + handoff docs
 - [x] Plan: dashboard before Qoder; design brief `docs/DESIGN.md`
 
-### Phase 1 — skeleton (Rust) — done
+### Phase 1 â€” skeleton (Rust) â€” done
 - [x] `cargo init`
 - [x] Axum server
 - [x] `/health`, `/v1/models` (hardcoded `gcli/*`; `qd/*` placeholders OK, chat may 501)
@@ -217,18 +217,18 @@ Grok full → Admin API → React+Vite dashboard (Impeccable + LoTM soft) → **
 - [x] Provider trait + `grok_cli` stub
 - [x] Compile on Windows
 
-### Phase 2 — Grok CLI E2E — code complete (live smoke needs tokens)
+### Phase 2 â€” Grok CLI E2E â€” code complete (live smoke needs tokens)
 - [x] Import script from 9Router SQLite or farm JSON (`marionette-import`)
 - [x] Non-stream chat completion
 - [x] Stream SSE OpenAI-compatible
 - [x] Token refresh (`auth.x.ai`) + persist rotated refresh
 - [x] 429 cooldown ~25h; 401 refresh; 402/403 disable
 - [x] Pool pick: active + not cooling
-- [ ] Smoke test with ≥1 real account (non-stream + stream) — needs live tokens
+- [ ] Smoke test with â‰¥1 real account (non-stream + stream) â€” needs live tokens
 
 **Exit gate:** curl with pool key + `gcli/grok-4.5` works end-to-end (code path ready; run when tokens available).
 
-### Phase 3 — Admin JSON API — done
+### Phase 3 â€” Admin JSON API â€” done
 - [x] `GET /admin/accounts` (filter provider/status; **mask tokens**)
 - [x] `GET /admin/accounts/:id`
 - [x] `PATCH /admin/accounts/:id` (active, priority, clear cooldown)
@@ -239,24 +239,24 @@ Grok full → Admin API → React+Vite dashboard (Impeccable + LoTM soft) → **
 - [x] Admin key auth + CORS for Vite dev origin
 - [x] Never return full OAuth secrets in JSON
 
-### Phase 4 — Dashboard (React + Vite) — done (`web/`)
+### Phase 4 â€” Dashboard (React + Vite) â€” done (`web/`)
 Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 
-- [x] **4a** Impeccable init/shape → `web/PRODUCT.md`, pin `docs/DESIGN.md` / `web/DESIGN.md`
+- [x] **4a** Impeccable init/shape â†’ `web/PRODUCT.md`, pin `docs/DESIGN.md` / `web/DESIGN.md`
 - [x] **4b** Vite + React + TS scaffold; design tokens (dark-only LoTM soft)
 - [x] **4c** App shell (sidebar English ops labels)
 - [x] **4d** Screens: Overview, Accounts, Import, Smoke test, Settings
 - [ ] **4e** Polish / a11y / visual-qa (optional follow-up)
 
 **Nav labels (English ops only):**  
-`Overview` · `Accounts` · `Import` · `Smoke test` · `Settings`
+`Overview` Â· `Accounts` Â· `Import` Â· `Smoke test` Â· `Settings`
 
 **Design locks:** see `docs/DESIGN.md`  
 - Soft LoTM (chips/empty/brand only; not cosplay nav)  
 - Dark only  
 - Operate mode (dense admin tool first)
 
-### Phase 5 — Qoder — code complete (live smoke needs tokens)
+### Phase 5 â€” Qoder â€” code complete (live smoke needs tokens)
 - [x] Port auth from etteeum `qoder.ts` (jobToken exchange + COSY bearer)
 - [x] Non-stream + stream chat
 - [x] AES-128-CBC + RSA-1024 crypto (faithful port)
@@ -266,7 +266,7 @@ Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 
 `src/providers/qoder.rs` implements full COSY auth + chat flow.
 
-### Phase 6 — Deploy polish
+### Phase 6 â€” Deploy polish
 - [ ] Serve `web/dist` from Axum (or nginx)
 - [ ] systemd unit for VPS
 - [ ] README run / import / UI (partial: README how-to-run added)
@@ -278,13 +278,13 @@ Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 ### Must-read for Grok
 - 9Router (VPS): `9router_wyx0/open-sse/providers/registry/grok-cli.js` (or similar)
 - 9Router token refresh: `open-sse/services/tokenRefresh*` / xai refresh
-- Hermes skill: `9router-instance-operations` → `references/grok-providers.md`, `grok-refresh-quota-pack.md`
-- Farm inject format: `grok-farm/farm.py` → `auto_inject_to_9router`
+- Hermes skill: `9router-instance-operations` â†’ `references/grok-providers.md`, `grok-refresh-quota-pack.md`
+- Farm inject format: `grok-farm/farm.py` â†’ `auto_inject_to_9router`
 
 ### Must-read for Qoder
 - `etteum-pool/src/proxy/providers/qoder.ts`
 - Hermes skill: `etteum-pool-operations` (+ Qoder notes)
-- 9Router Qoder import notes: `9router-instance-operations` → `references/qoder-etteum-token-import.md`
+- 9Router Qoder import notes: `9router-instance-operations` â†’ `references/qoder-etteum-token-import.md`
 
 ### Do not start from
 - Full etteeum router/compression as mandatory v1
@@ -309,7 +309,7 @@ qd/Lite
 
 ## 9. Security
 
-- DB has live OAuth refresh tokens — treat as secrets
+- DB has live OAuth refresh tokens â€” treat as secrets
 - Never log full access/refresh tokens
 - Backup before any bulk DB write
 - Gitignore: `.env`, `data/*.sqlite`, `*.json` token dumps
@@ -318,9 +318,9 @@ qd/Lite
 
 ## 10. Acceptance criteria
 
-### Usable product (Grok + dashboard) — primary track
+### Usable product (Grok + dashboard) â€” primary track
 1. `cargo build --release` succeeds on Windows (and ideally Linux VPS)
-2. Import ≥1 grok-cli account and complete one chat (non-stream)
+2. Import â‰¥1 grok-cli account and complete one chat (non-stream)
 3. Stream chat works for same account
 4. Expired access token auto-refreshes via refresh_token
 5. Simulated/real 429 marks cooldown, account skipped by pool
@@ -330,14 +330,14 @@ qd/Lite
 9. README has run / import / UI instructions
 
 ### Full two-provider (after Phase 5)
-10. ≥1 Qoder account chat works
+10. â‰¥1 Qoder account chat works
 11. Dashboard supports qoder filter + models
 
 ---
 
 ## 11. Open questions (resolve while coding)
 
-1. Exact Grok CLI upstream base URL + headers (copy from 9Router executor — verify live)
+1. Exact Grok CLI upstream base URL + headers (copy from 9Router executor â€” verify live)
 2. Whether to support only chat completions or also `/v1/responses` later
 3. Single SQLite file vs import-on-start from 9Router path (recommend **own DB + import**, don't lock 9Router file)
 4. Qoder model list minimal set for Phase 5
@@ -361,11 +361,11 @@ Scaffold a Rust Axum app (Phase 1 only):
 - Provider trait + grok_cli stub
 
 Do NOT implement Qoder fully.
-Do NOT start React dashboard until Phase 2–3 done (see HANDOFF order).
+Do NOT start React dashboard until Phase 2â€“3 done (see HANDOFF order).
 Keep secrets out of git. Follow AGENTS.md.
 ```
 
-After Phase 2–3, dashboard work must use Impeccable + `docs/DESIGN.md`.
+After Phase 2â€“3, dashboard work must use Impeccable + `docs/DESIGN.md`.
 
 ---
 
@@ -375,9 +375,9 @@ After Phase 2–3, dashboard work must use Impeccable + `docs/DESIGN.md`.
 - VPS is RAM-tight (~2GB): concurrent browsers bad; Rust binary good
 - Already runs 9Router + grok-refresh; Marionette should coexist
 - Farm concurrent=1; proxy for VPS farm is separate issue
-- **Product order:** Grok complete → admin API → React+Vite dashboard → Qoder later
+- **Product order:** Grok complete â†’ admin API â†’ React+Vite dashboard â†’ Qoder later
 - **UI:** React+Vite (not TanStack Start); Impeccable craft; LoTM soft; dark only; English ops labels
 
 ---
 
-**End of handoff.** Phases 1–4 code-complete as of 2026-07-25; next is live Grok smoke (tokens) then Phase 5 Qoder.
+**End of handoff.** Phases 1â€“4 code-complete as of 2026-07-25; next is live Grok smoke (tokens) then Phase 5 Qoder.

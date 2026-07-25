@@ -32,6 +32,9 @@ Named after *Lord of the Mysteries* marionettes — **soft** thematic identity o
 ```
 Overview
 Accounts
+Models
+Activity
+Setup
 Import
 Smoke test
 Settings
