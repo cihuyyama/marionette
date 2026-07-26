@@ -19,6 +19,7 @@ docs/HANDOFF.md
 
 # Agent scratch / continuation state
 .omo/
+.omc/
 /refs/
 
 # OS / IDE
