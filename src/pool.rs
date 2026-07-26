@@ -81,164 +81,59 @@ pub async fn handle_chat(
 
         match provider.chat(&account, &req).await {
             Ok(outcome) => {
-                let duration_ms = started.elapsed().as_millis() as i64;
-                match outcome {
-                    ChatOutcome::Json(v) => {
-                        let (prompt, completion, total) = extract_usage(&v);
-                        let credits = if account.has_quota_budget() {
-                            total.or_else(|| match (prompt, completion) {
-                                (Some(p), Some(c)) => Some(p + c),
-                                (Some(p), None) => Some(p),
-                                (None, Some(c)) => Some(c),
-                                _ => None,
-                            })
-                        } else {
-                            None
-                        };
-                        let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0)
-                        {
-                            db::decrement_quota(&state.pool, &account.id, c)
-                                .await
-                                .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
-                        } else {
-                            (account.quota_remaining, account.quota_remaining, 0)
-                        };
-                        if used > 0 {
-                            account.quota_remaining = q_after;
-                        }
-                        let _ = log_request(
-                            &state.pool,
-                            provider_id,
-                            &model,
-                            "success",
-                            false,
-                            duration_ms,
-                            prompt,
-                            completion,
-                            total,
-                            if used > 0 { Some(used) } else { None },
-                            if account.has_quota_budget() {
-                                Some(q_before)
-                            } else {
-                                None
-                            },
-                            if account.has_quota_budget() {
-                                Some(q_after)
-                            } else {
-                                None
-                            },
-                            Some(&account),
-                            None,
-                        )
-                        .await;
-                        let _ = db::note_pick_success(
-                            &state.pool,
-                            provider_id,
-                            strategy,
-                            &account.id,
-                        )
-                        .await;
-                        account.last_used_at = Some(db::now_rfc3339());
-                        account.last_error = None;
-                        account.updated_at = db::now_rfc3339();
-                        db::update_account(&state.pool, &account).await?;
-                        return Ok(ChatOutcome::Json(v));
-                    }
-                    ChatOutcome::Stream {
-                        response,
-                        usage_rx,
-                    } => {
-                        let log_id = match log_request_returning_id(
-                            &state.pool,
-                            provider_id,
-                            &model,
-                            "success",
-                            true,
-                            duration_ms,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            Some(&account),
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(id) => id,
-                            Err(e) => {
-                                warn!(error = %e, "stream request log insert failed");
-                                String::new()
-                            }
-                        };
-                        let _ = db::note_pick_success(
-                            &state.pool,
-                            provider_id,
-                            strategy,
-                            &account.id,
-                        )
-                        .await;
-                        account.last_used_at = Some(db::now_rfc3339());
-                        account.last_error = None;
-                        account.updated_at = db::now_rfc3339();
-                        db::update_account(&state.pool, &account).await?;
-
-                        let pool = state.pool.clone();
-                        let account_id = account.id.clone();
-                        let has_quota = account.has_quota_budget();
-                        let started_at = started;
-                        tokio::spawn(async move {
-                            let usage = match usage_rx.await {
-                                Ok(Some(u)) => u.normalized(),
-                                Ok(None) | Err(_) => return,
-                            };
-                            if usage.is_empty() || log_id.is_empty() {
-                                return;
-                            }
-                            let total = if usage.total_tokens > 0 {
-                                usage.total_tokens
-                            } else {
-                                usage.prompt_tokens + usage.completion_tokens
-                            };
-                            let mut credits_used = None;
-                            let mut q_before = None;
-                            let mut q_after = None;
-                            if has_quota && total > 0 {
-                                if let Ok((before, after, used)) =
-                                    db::decrement_quota(&pool, &account_id, total).await
-                                {
-                                    if used > 0 {
-                                        credits_used = Some(used);
-                                        q_before = Some(before);
-                                        q_after = Some(after);
-                                    }
-                                }
-                            }
-                            let full_ms = started_at.elapsed().as_millis() as i64;
-                            let _ = db::update_request_log_usage(
-                                &pool,
-                                &log_id,
-                                usage.prompt_tokens,
-                                usage.completion_tokens,
-                                total,
-                                credits_used,
-                                q_before,
-                                q_after,
-                                Some(full_ms),
-                            )
-                            .await;
-                        });
-
-                        let (_tx, dummy_rx) = tokio::sync::oneshot::channel();
-                        return Ok(ChatOutcome::Stream {
-                            response,
-                            usage_rx: dummy_rx,
-                        });
-                    }
-                }
+                return handle_chat_success(
+                    state,
+                    provider_id,
+                    &model,
+                    strategy,
+                    started,
+                    account,
+                    outcome,
+                )
+                .await;
             }
             Err(e) => {
+                if should_retry_same_account(provider_id, &e, false) {
+                    warn!(account = %account.id, error = %e, "qoder auth expired; forcing jobToken refresh + retry");
+                    match provider.force_refresh(&mut account).await {
+                        Ok(()) => {
+                            account.updated_at = db::now_rfc3339();
+                            if let Err(db_e) = db::update_account(&state.pool, &account).await {
+                                warn!(account = %account.id, error = %db_e, "persist after force_refresh failed");
+                            }
+                            match provider.chat(&account, &req).await {
+                                Ok(outcome) => {
+                                    return handle_chat_success(
+                                        state,
+                                        provider_id,
+                                        &model,
+                                        strategy,
+                                        started,
+                                        account,
+                                        outcome,
+                                    )
+                                    .await;
+                                }
+                                Err(e2) => {
+                                    warn!(account = %account.id, error = %e2, "qoder retry after refresh still failed");
+                                    apply_provider_error(&state.pool, &state.config, &mut account, &e2).await?;
+                                    let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+                                    last_account = Some(account);
+                                    last_err = Some(e2.into());
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(re) => {
+                            warn!(account = %account.id, error = %re, "qoder force_refresh failed");
+                            apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                            let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+                            last_account = Some(account);
+                            last_err = Some(e.into());
+                            continue;
+                        }
+                    }
+                }
                 warn!(account = %account.id, error = %e, "upstream chat failed");
                 apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
                 let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
@@ -267,6 +162,168 @@ pub async fn handle_chat(
     )
     .await;
     Err(err)
+}
+
+fn should_retry_same_account(
+    provider_id: &str,
+    err: &ProviderError,
+    already_retried: bool,
+) -> bool {
+    provider_id == "qoder" && matches!(err, ProviderError::AuthExpired) && !already_retried
+}
+
+async fn handle_chat_success(
+    state: &AppState,
+    provider_id: &str,
+    model: &str,
+    strategy: db::LoadBalance,
+    started: Instant,
+    mut account: Account,
+    outcome: ChatOutcome,
+) -> AppResult<ChatOutcome> {
+    let duration_ms = started.elapsed().as_millis() as i64;
+    match outcome {
+        ChatOutcome::Json(v) => {
+            let (prompt, completion, total) = extract_usage(&v);
+            let credits = if account.has_quota_budget() {
+                total.or_else(|| match (prompt, completion) {
+                    (Some(p), Some(c)) => Some(p + c),
+                    (Some(p), None) => Some(p),
+                    (None, Some(c)) => Some(c),
+                    _ => None,
+                })
+            } else {
+                None
+            };
+            let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0) {
+                db::decrement_quota(&state.pool, &account.id, c)
+                    .await
+                    .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
+            } else {
+                (account.quota_remaining, account.quota_remaining, 0)
+            };
+            if used > 0 {
+                account.quota_remaining = q_after;
+            }
+            let _ = log_request(
+                &state.pool,
+                provider_id,
+                model,
+                "success",
+                false,
+                duration_ms,
+                prompt,
+                completion,
+                total,
+                if used > 0 { Some(used) } else { None },
+                if account.has_quota_budget() {
+                    Some(q_before)
+                } else {
+                    None
+                },
+                if account.has_quota_budget() {
+                    Some(q_after)
+                } else {
+                    None
+                },
+                Some(&account),
+                None,
+            )
+            .await;
+            let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
+            account.last_used_at = Some(db::now_rfc3339());
+            account.last_error = None;
+            account.updated_at = db::now_rfc3339();
+            db::update_account(&state.pool, &account).await?;
+            Ok(ChatOutcome::Json(v))
+        }
+        ChatOutcome::Stream {
+            response,
+            usage_rx,
+        } => {
+            let log_id = match log_request_returning_id(
+                &state.pool,
+                provider_id,
+                model,
+                "success",
+                true,
+                duration_ms,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&account),
+                None,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(error = %e, "stream request log insert failed");
+                    String::new()
+                }
+            };
+            let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
+            account.last_used_at = Some(db::now_rfc3339());
+            account.last_error = None;
+            account.updated_at = db::now_rfc3339();
+            db::update_account(&state.pool, &account).await?;
+
+            let pool = state.pool.clone();
+            let account_id = account.id.clone();
+            let has_quota = account.has_quota_budget();
+            let started_at = started;
+            tokio::spawn(async move {
+                let usage = match usage_rx.await {
+                    Ok(Some(u)) => u.normalized(),
+                    Ok(None) | Err(_) => return,
+                };
+                if usage.is_empty() || log_id.is_empty() {
+                    return;
+                }
+                let total = if usage.total_tokens > 0 {
+                    usage.total_tokens
+                } else {
+                    usage.prompt_tokens + usage.completion_tokens
+                };
+                let mut credits_used = None;
+                let mut q_before = None;
+                let mut q_after = None;
+                if has_quota && total > 0 {
+                    if let Ok((before, after, used)) =
+                        db::decrement_quota(&pool, &account_id, total).await
+                    {
+                        if used > 0 {
+                            credits_used = Some(used);
+                            q_before = Some(before);
+                            q_after = Some(after);
+                        }
+                    }
+                }
+                let full_ms = started_at.elapsed().as_millis() as i64;
+                let _ = db::update_request_log_usage(
+                    &pool,
+                    &log_id,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    total,
+                    credits_used,
+                    q_before,
+                    q_after,
+                    Some(full_ms),
+                )
+                .await;
+            });
+
+            let (_tx, dummy_rx) = tokio::sync::oneshot::channel();
+            Ok(ChatOutcome::Stream {
+                response,
+                usage_rx: dummy_rx,
+            })
+        }
+    }
 }
 
 fn extract_usage(v: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
@@ -408,4 +465,38 @@ async fn apply_provider_error(
 
     db::update_account(pool, account).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_qoder_authexpired_first_time() {
+        assert!(should_retry_same_account("qoder", &ProviderError::AuthExpired, false));
+    }
+
+    #[test]
+    fn no_retry_grok_authexpired() {
+        assert!(!should_retry_same_account("grok-cli", &ProviderError::AuthExpired, false));
+    }
+
+    #[test]
+    fn no_retry_qoder_already_retried() {
+        assert!(!should_retry_same_account("qoder", &ProviderError::AuthExpired, true));
+    }
+
+    #[test]
+    fn no_retry_qoder_ratelimited() {
+        assert!(!should_retry_same_account(
+            "qoder",
+            &ProviderError::RateLimited { retry_after_secs: None },
+            false
+        ));
+    }
+
+    #[test]
+    fn no_retry_qoder_accessdenied() {
+        assert!(!should_retry_same_account("qoder", &ProviderError::AccessDenied, false));
+    }
 }

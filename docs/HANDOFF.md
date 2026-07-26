@@ -266,6 +266,17 @@ Use skill **impeccable** + `frontend-ui-ux`; category `visual-engineering`.
 
 `src/providers/qoder.rs` implements full COSY auth + chat flow.
 
+### Phase 5.5 â€” Qoder P0 Recovery Parity â€” DONE (2026-07-26, Oracle APPROVED)
+Plan: `.omo/plans/qoder-p0-recovery-parity.md`. Makes Qoder survive stale SOT + multi-account 403 like etteeum, WITHOUT full etteeum port (no warmup/probe/quota-sync/browser).
+- [x] **P0-1** Same-account retry: `src/pool.rs` `handle_chat` Err-arm â€” on Qoder `AuthExpired`, call `force_refresh` (clear SOT+userId â†’ jobToken) + persist + retry chat ONCE, BEFORE `apply_provider_error`. Pure fn `should_retry_same_account(provider_id,err,already_retried)`. Ok-arm extracted to `handle_chat_success`.
+- [x] **P0-2** Qoder-scoped 403/402: `src/providers/qoder.rs` `classify_qoder_status` (403|402â†’RateLimited/cooldown, 401â†’AuthExpired, else delegate). Wired into 2 HTTP non-200 sites + non-stream SSE scan. Global `classify_http_status` (mod.rs) UNCHANGED â†’ Grok keeps 402/403â†’disable.
+- [x] **P0-3** Import: `src/import_util.rs` `build_qoder_data` copies numeric `expireTime` (psd-first, top fallback). No mass SOT invalidation.
+- [x] `force_refresh` added to `Provider` trait (mod.rs) with default = `ensure_fresh_auth` (grok safe).
+- Evidence: `cargo test --lib` 20 passed/0 failed; `cargo build --release` exit 0 no warnings; live QA /health 200, /v1/models 200 (9 gcli/* + 19 qd/*), no-key 401; Oracle review APPROVED unconditionally.
+- **KNOWN P0 LIMITATION** (documented in qoder.rs, accepted): mid-stream SSE 403 (after `Ok(Stream)` returned) stays client-only io::Error, does NOT trigger pool cooldown. Candidate P1.
+- **NOT committed yet** (awaiting user "commit"). Commit strategy in the plan file (atomic per RED/GREEN).
+- P1 deferred (optional): jobToken dedup lock; thin Qoder refresh worker; harden expireTime string parse.
+
 ### Phase 6 â€” Deploy polish
 - [ ] Serve `web/dist` from Axum (or nginx)
 - [ ] systemd unit for VPS
