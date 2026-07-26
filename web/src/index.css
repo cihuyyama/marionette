@@ -317,6 +317,83 @@ button {
   color: var(--parchment);
 }
 
+/* ——— Account health bars (quota + OAuth TTL) ——— */
+.health-cell {
+  min-width: 118px;
+  max-width: 160px;
+}
+
+.health-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.health-stack-compact {
+  gap: 4px;
+  min-width: 100px;
+}
+
+.health-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.health-stack-compact .health-row {
+  grid-template-columns: 1fr auto;
+}
+
+.health-tag {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  width: 36px;
+}
+
+.health-track {
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(138, 132, 120, 0.16);
+  overflow: hidden;
+  min-width: 48px;
+}
+
+.health-stack-compact .health-track {
+  height: 4px;
+  min-width: 40px;
+}
+
+.health-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.25s ease;
+}
+
+.health-fill.health-ok {
+  background: var(--thread);
+  box-shadow: 0 0 8px rgba(196, 163, 90, 0.25);
+}
+
+.health-fill.health-warn {
+  background: #9bb8c7;
+  box-shadow: 0 0 6px rgba(74, 107, 124, 0.35);
+}
+
+.health-fill.health-crit {
+  background: #d47a86;
+  box-shadow: 0 0 6px rgba(139, 46, 58, 0.4);
+}
+
+.health-meta {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* ——— Status chips ——— */
 .chip {
   display: inline-flex;
@@ -949,6 +1026,26 @@ pre.response {
   color: var(--thread);
   font-size: 12px;
   font-weight: 500;
+}
+
+.provider-credit-bar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 4px;
+  padding: 0 2px;
+}
+
+.provider-credit-bar .health-track {
+  height: 5px;
+  min-width: 0;
+}
+
+.provider-credit-bar-none {
+  display: block;
+  margin: 0 0 2px;
+  padding: 0 2px;
 }
 
 .list-toolbar {

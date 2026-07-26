@@ -67,6 +67,52 @@ function fmtPoolCredits(c: ProviderCounts): string {
   return `${rem} / ${lim} tok`;
 }
 
+function poolCreditPct(c: ProviderCounts): number | null {
+  if (c.quotaKind !== "tokens" || c.quotaLimit <= 0) return null;
+  return Math.max(
+    0,
+    Math.min(100, Math.round((c.quotaRemaining / c.quotaLimit) * 100)),
+  );
+}
+
+function creditTone(pct: number): "ok" | "warn" | "crit" {
+  if (pct <= 15) return "crit";
+  if (pct <= 40) return "warn";
+  return "ok";
+}
+
+function ProviderCreditBar({ counts }: { counts: ProviderCounts }) {
+  const pct = poolCreditPct(counts);
+  if (pct === null) {
+    return (
+      <div className="provider-credit-bar provider-credit-bar-none">
+        <span className="health-meta mono muted">No local token budget</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="provider-credit-bar"
+      title={`Pool token budget ${fmtPoolCredits(counts)}`}
+    >
+      <div
+        className="health-track"
+        role="meter"
+        aria-label="Provider credit remaining"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+      >
+        <div
+          className={`health-fill health-${creditTone(pct)}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="health-meta mono muted">{pct}%</span>
+    </div>
+  );
+}
+
 export function Accounts() {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -237,6 +283,7 @@ export function Accounts() {
                   </span>
                   <span className="provider-card-cta">Open list →</span>
                 </div>
+                <ProviderCreditBar counts={stat} />
                 <div className="provider-card-meta">
                   <span className="muted">
                     Inactive: <strong>{stat.inactive}</strong>

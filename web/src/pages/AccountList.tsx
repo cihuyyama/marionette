@@ -500,7 +500,7 @@ export function AccountList() {
                     onClick={() => handleSort("last_used")}
                   />
                 </th>
-                <th>Credits</th>
+                <th>Health</th>
                 <th>Error</th>
                 <th>Actions</th>
               </tr>
@@ -588,8 +588,8 @@ export function AccountList() {
                     <td className="mono muted nowrap">
                       {a.last_used_at ? formatShort(a.last_used_at) : "—"}
                     </td>
-                    <td className="mono muted nowrap" title={fmtCreditTitle(a)}>
-                      {fmtAccountCredit(a)}
+                    <td className="health-cell" title={fmtCreditTitle(a)}>
+                      <AccountHealth a={a} compact />
                     </td>
                     <td
                       className="truncate muted"
@@ -742,9 +742,9 @@ export function AccountList() {
               <dd>{detail.is_active ? "true" : "false"}</dd>
               <dt>Priority</dt>
               <dd>{detail.priority}</dd>
-              <dt>Credits</dt>
-              <dd className="mono" title={fmtCreditTitle(detail)}>
-                {fmtAccountCredit(detail)}
+              <dt>Credits / token</dt>
+              <dd title={fmtCreditTitle(detail)}>
+                <AccountHealth a={detail} />
               </dd>
               <dt>Cooldown</dt>
               <dd className="mono">{detail.cooldown_until ?? "—"}</dd>
@@ -871,7 +871,143 @@ function fmtCreditTitle(a: Account): string {
   if (a.quota_kind === "none" || !a.quota_limit) {
     return "Qoder uses upstream RPM — no local token credits";
   }
-  return `Local token budget remaining / limit (default 1M for grok-cli)`;
+  const parts = [
+    `Quota ${fmtAccountCredit(a)} (local budget, default 1M for grok-cli)`,
+  ];
+  const ttl = readTtl(a);
+  if (ttl) {
+    parts.push(
+      ttl.pct <= 0
+        ? `Access token expired (${ttl.expiresAt})`
+        : `Access TTL ~${ttl.label} left (${ttl.pct}% of window)`,
+    );
+  }
+  return parts.join(" · ");
+}
+
+type TtlInfo = {
+  pct: number;
+  label: string;
+  expiresAt: string;
+};
+
+function readTtl(a: Account): TtlInfo | null {
+  const raw = a.data?.expiresAt ?? a.data?.expires_at;
+  if (typeof raw !== "string" || !raw) return null;
+  const expMs = Date.parse(raw);
+  if (Number.isNaN(expMs)) return null;
+  const expiresInRaw = a.data?.expiresIn ?? a.data?.expires_in;
+  const windowSec =
+    typeof expiresInRaw === "number" && expiresInRaw > 0
+      ? expiresInRaw
+      : typeof expiresInRaw === "string" && Number(expiresInRaw) > 0
+        ? Number(expiresInRaw)
+        : 21600;
+  const leftSec = Math.max(0, (expMs - Date.now()) / 1000);
+  const pct = Math.max(
+    0,
+    Math.min(100, Math.round((leftSec / windowSec) * 100)),
+  );
+  return { pct, label: formatDuration(leftSec), expiresAt: raw };
+}
+
+function quotaPct(a: Account): number | null {
+  if (a.quota_kind === "none" || !a.quota_limit || a.quota_limit <= 0) {
+    return null;
+  }
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(((a.quota_remaining ?? 0) / a.quota_limit) * 100),
+    ),
+  );
+}
+
+function healthTone(pct: number): "ok" | "warn" | "crit" {
+  if (pct <= 15) return "crit";
+  if (pct <= 40) return "warn";
+  return "ok";
+}
+
+function formatDuration(sec: number): string {
+  if (sec <= 0) return "0m";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h >= 24) {
+    const d = Math.floor(h / 24);
+    const rh = h % 24;
+    return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
+  }
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return `${Math.max(1, m)}m`;
+}
+
+function AccountHealth({
+  a,
+  compact = false,
+}: {
+  a: Account;
+  compact?: boolean;
+}) {
+  const qPct = quotaPct(a);
+  const ttl = readTtl(a);
+
+  if (qPct === null && !ttl) {
+    return (
+      <span className="mono muted nowrap">{fmtAccountCredit(a)}</span>
+    );
+  }
+
+  return (
+    <div
+      className={`health-stack${compact ? " health-stack-compact" : ""}`}
+      title={fmtCreditTitle(a)}
+    >
+      {qPct !== null && (
+        <div className="health-row">
+          {!compact && <span className="health-tag">Quota</span>}
+          <div
+            className="health-track"
+            role="meter"
+            aria-label="Quota remaining"
+            aria-valuemin={0}
+            aria-valuemax={a.quota_limit}
+            aria-valuenow={a.quota_remaining ?? 0}
+          >
+            <div
+              className={`health-fill health-${healthTone(qPct)}`}
+              style={{ width: `${qPct}%` }}
+            />
+          </div>
+          <span className="health-meta mono muted">
+            {fmtAccountCredit(a)}
+          </span>
+        </div>
+      )}
+      {ttl && (
+        <div className="health-row">
+          {!compact && <span className="health-tag">TTL</span>}
+          <div
+            className="health-track"
+            role="meter"
+            aria-label="Access token time remaining"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={ttl.pct}
+          >
+            <div
+              className={`health-fill health-${healthTone(ttl.pct)}`}
+              style={{ width: `${ttl.pct}%` }}
+            />
+          </div>
+          <span className="health-meta mono muted">
+            {compact ? ttl.label : `${ttl.label} left`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SortHeader({
