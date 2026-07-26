@@ -7,13 +7,16 @@ Cargo.lock.bak
 .env
 .env.*
 !.env.example
-data/*.sqlite
-data/*.sqlite-*
-data/*.db
+# Everything under data/ is local (token dumps, proxy lists, QA logs, DBs) — never commit.
+data/
 **/*token*
 **/*secret*
 **/accounts*.json
 !docs/**
+
+# Agent scratch / continuation state
+.omo/
+/refs/
 
 # OS / IDE
 .DS_Store
