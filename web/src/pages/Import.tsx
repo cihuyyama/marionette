@@ -1,19 +1,14 @@
-import { useRef, useState, type FormEvent } from "react";
-import { ApiError, importAccounts, type ImportResult } from "../lib/api";
+﻿import { useRef, useState, type FormEvent } from "react";
+import { ApiError, importAccountsFile, type ImportResult } from "../lib/api";
 
-const PLACEHOLDER = `[
-  {
-    "provider": "grok-cli",
-    "email": "account@example.com",
-    "accessToken": "...",
-    "refreshToken": "...",
-    "expiresAt": "2026-07-26T00:00:00.000Z",
-    "clientId": "b1a00492-073a-47ea-816f-4c329264a828"
-  }
-]`;
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 export function ImportPage() {
-  const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -21,31 +16,27 @@ export function ImportPage() {
   const [replace, setReplace] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  function applyFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      setText(String(reader.result ?? ""));
-      setError(null);
-      setResult(null);
-    };
-    reader.onerror = () => setError("Failed to read file");
-    reader.readAsText(file);
+  function pickFile(f: File) {
+    setFile(f);
+    setError(null);
+    setResult(null);
+  }
+
+  function clearAll() {
+    setFile(null);
+    setResult(null);
+    setError(null);
+    if (fileRef.current) fileRef.current.value = "";
   }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!file) return;
     setError(null);
     setResult(null);
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      setError("Invalid JSON — paste an array, {accounts:[]}, or a single account object.");
-      return;
-    }
     setLoading(true);
     try {
-      const res = await importAccounts(body, replace);
+      const res = await importAccountsFile(file, replace);
       setResult(res);
     } catch (err) {
       setError(
@@ -62,9 +53,7 @@ export function ImportPage() {
 
   function resultSummary(r: ImportResult): string {
     const parts: string[] = [];
-    if (r.source === "9router-backup" && r.parsed != null) {
-      parts.push(`parsed ${r.parsed}`);
-    }
+    if (r.parsed != null) parts.push(`parsed ${r.parsed}`);
     parts.push(`inserted ${r.inserted}`);
     if (r.updated) parts.push(`updated ${r.updated}`);
     if (r.skipped) parts.push(`skipped ${r.skipped}`);
@@ -76,7 +65,7 @@ export function ImportPage() {
     <div>
       <header className="page-header">
         <h1>Import</h1>
-        <p className="subtitle">Bind accounts into the pool</p>
+        <p className="subtitle">9Router backup → pool (grok-cli + qoder only)</p>
       </header>
 
       {error && (
@@ -86,8 +75,7 @@ export function ImportPage() {
       )}
       {result && (
         <div className="alert alert-ok" role="status">
-          {result.source === "9router-backup" ? "9Router backup imported" : "Imported"} —{" "}
-          {resultSummary(result)}.
+          9Router backup imported — {resultSummary(result)}.
         </div>
       )}
 
@@ -104,7 +92,7 @@ export function ImportPage() {
             e.preventDefault();
             setDrag(false);
             const f = e.dataTransfer.files[0];
-            if (f) applyFile(f);
+            if (f) pickFile(f);
           }}
           role="button"
           tabIndex={0}
@@ -112,7 +100,16 @@ export function ImportPage() {
             if (e.key === "Enter" || e.key === " ") fileRef.current?.click();
           }}
         >
-          Drop JSON file here, or click to upload
+          {file ? (
+            <>
+              <strong>{file.name}</strong>
+              <span className="hint" style={{ display: "block", marginTop: "0.35rem" }}>
+                {formatBytes(file.size)} — uploaded as-is; server filters supported providers
+              </span>
+            </>
+          ) : (
+            "Drop 9Router backup JSON here, or click to choose file"
+          )}
           <input
             ref={fileRef}
             type="file"
@@ -120,26 +117,15 @@ export function ImportPage() {
             hidden
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) applyFile(f);
+              if (f) pickFile(f);
             }}
           />
         </div>
 
-        <div className="field" style={{ marginBottom: 0 }}>
-          <label htmlFor="import-json">JSON payload</label>
-          <textarea
-            id="import-json"
-            className="textarea"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={PLACEHOLDER}
-            spellCheck={false}
-          />
-          <span className="hint">
-            Accepts array, {"{ accounts: [] }"}, single account, or 9Router full backup JSON.
-            Tokens stay on the server; responses are masked.
-          </span>
-        </div>
+        <p className="hint" style={{ margin: 0 }}>
+          Expects a full 9Router backup export. Other providers in the file are ignored.
+          For single or bulk tokens per provider, use <strong>+ Add</strong> on the Accounts hub.
+        </p>
 
         <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
           <input
@@ -148,28 +134,19 @@ export function ImportPage() {
             onChange={(e) => setReplace(e.target.checked)}
             style={{ marginRight: "0.5rem" }}
           />
-          Replace all — wipe existing accounts for supported providers before importing
+          Replace all — wipe existing grok-cli and qoder accounts before importing
         </label>
 
         <div className="btn-row">
           <button
             type="submit"
             className={`btn ${replace ? "btn-danger" : "btn-primary"}`}
-            disabled={loading || !text.trim()}
+            disabled={loading || !file}
           >
             {loading ? <span className="spinner inline-spinner" /> : null}
-            {replace ? "Replace & import" : "Import accounts"}
+            {replace ? "Replace & import backup" : "Import backup"}
           </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={!text}
-            onClick={() => {
-              setText("");
-              setResult(null);
-              setError(null);
-            }}
-          >
+          <button type="button" className="btn" disabled={!file} onClick={clearAll}>
             Clear
           </button>
         </div>

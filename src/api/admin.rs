@@ -273,10 +273,19 @@ pub async fn import_accounts(
     State(state): State<AppState>,
     _auth: AdminAuth,
     Query(q): Query<ImportQuery>,
-    Json(body): Json<Value>,
+    body: axum::body::Bytes,
 ) -> AppResult<Json<Value>> {
     let replace = q.replace.unwrap_or(false);
+    if body.is_empty() {
+        return Err(AppError::BadRequest("empty import body".into()));
+    }
+    let value: Value = serde_json::from_slice(&body).map_err(|e| {
+        AppError::BadRequest(format!("invalid JSON: {e}"))
+    })?;
+    run_import(&state, value, replace).await
+}
 
+async fn run_import(state: &AppState, body: Value, replace: bool) -> AppResult<Json<Value>> {
     if import_util::is_9router_backup(&body) {
         let accounts = import_util::parse_9router_backup(&body);
         let total_parsed = accounts.len();
@@ -329,7 +338,7 @@ pub async fn import_accounts(
     let mut skipped = 0u64;
 
     for item in items {
-        match upsert_import_item(&state, &item).await {
+        match upsert_import_item(state, &item).await {
             Ok(true) => inserted += 1,
             Ok(false) => updated += 1,
             Err(e) => {

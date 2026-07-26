@@ -215,6 +215,24 @@ export function importAccounts(body: unknown, replace = false, settings?: Settin
   );
 }
 
+export function importAccountsFile(
+  file: Blob,
+  replace = false,
+  settings?: Settings,
+) {
+  const qs = replace ? "?replace=true" : "";
+  return request<ImportResult>(
+    `/admin/accounts${qs}`,
+    {
+      method: "POST",
+      body: file,
+      headers: { "Content-Type": "application/json" },
+      auth: "admin",
+    },
+    settings,
+  );
+}
+
 export function listModels(settings?: Settings) {
   return request<{ object: string; data: ModelObject[] }>(
     "/v1/models",
