@@ -13,6 +13,9 @@ data/
 **/*secret*
 **/accounts*.json
 !docs/**
+# HANDOFF holds VPS host/user/key path + infra layout — local only.
+# MUST stay below `!docs/**`: last matching rule wins.
+docs/HANDOFF.md
 
 # Agent scratch / continuation state
 .omo/
