@@ -87,6 +87,7 @@ pub fn default_models() -> ModelsResponse {
     let ids = [
         ("gcli/grok-build", "grok-cli"),
         ("gcli/grok-4.5", "grok-cli"),
+        ("gcli/grok-4.5-xhigh", "grok-cli"),
         ("gcli/grok-4.5-high", "grok-cli"),
         ("gcli/grok-4.5-medium", "grok-cli"),
         ("gcli/grok-4.5-low", "grok-cli"),
