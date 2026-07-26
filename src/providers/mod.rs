@@ -52,6 +52,12 @@ pub trait Provider: Send + Sync {
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError>;
+
+    /// Force a token refresh even if not obviously expired (e.g. after a mid-request
+    /// AuthExpired where the cached SOT/userId is silently stale). Default = ensure_fresh_auth.
+    async fn force_refresh(&self, account: &mut Account) -> Result<(), ProviderError> {
+        self.ensure_fresh_auth(account).await
+    }
 }
 
 pub fn classify_http_status(status: u16, body: &str) -> ProviderError {
