@@ -203,6 +203,16 @@ fn build_qoder_data(item: &Value) -> Result<Value, String> {
         out.entry("userName".to_string()).or_insert_with(|| json!(dn));
     }
 
+    // Copy expireTime (numeric millis) — providerSpecificData preferred, top-level fallback.
+    // Stale/past expireTime is intentional: forces a lazy jobToken refresh on first use.
+    if let Some(v) = psd
+        .get("expireTime")
+        .and_then(|v| v.as_i64())
+        .or_else(|| item.get("expireTime").and_then(|v| v.as_i64()))
+    {
+        out.insert("expireTime".into(), json!(v));
+    }
+
     // Validate: personalToken is required for Qoder
     if !out.contains_key("personalToken") {
         return Err("qoder: missing personalToken in providerSpecificData".into());
@@ -338,5 +348,44 @@ mod tests {
         item["providerSpecificData"].as_object_mut().unwrap().remove("personalToken");
         let result = map_connection(&item);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn qoder_expiretime_from_psd() {
+        let mut item = qoder_item();
+        item["providerSpecificData"]["expireTime"] = json!(1893456000000i64);
+        let acc = map_connection(&item).unwrap();
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(
+            data["expireTime"],
+            json!(1893456000000i64),
+            "expireTime must be copied from providerSpecificData"
+        );
+    }
+
+    #[test]
+    fn qoder_expiretime_from_toplevel() {
+        let mut item = qoder_item();
+        // No expireTime in providerSpecificData (qoder_item() doesn't have one).
+        // Place it at the top level of the connection object.
+        item["expireTime"] = json!(1893456000000i64);
+        let acc = map_connection(&item).unwrap();
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(
+            data["expireTime"],
+            json!(1893456000000i64),
+            "expireTime must fall back to top-level connection field"
+        );
+    }
+
+    #[test]
+    fn qoder_expiretime_absent_ok() {
+        // qoder_item() has no expireTime anywhere.
+        let acc = map_connection(&qoder_item()).unwrap();
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert!(
+            data.get("expireTime").is_none(),
+            "must NOT invent expireTime when absent"
+        );
     }
 }
