@@ -8,6 +8,10 @@ pub struct ChatMessage {
     pub content: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,6 +26,12 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<Value>,
     #[serde(flatten)]
     pub extra: Value,
 }
@@ -32,7 +42,6 @@ impl ChatCompletionRequest {
     }
 
     pub fn upstream_model(&self) -> &str {
-        // gcli/grok-4.5 -> grok-4.5 ; qd/lite -> lite
         if let Some((_, rest)) = self.model.split_once('/') {
             rest
         } else {
@@ -50,6 +59,14 @@ impl ChatCompletionRequest {
         } else {
             None
         }
+    }
+
+    pub fn has_tools(&self) -> bool {
+        self.tools
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
     }
 }
 

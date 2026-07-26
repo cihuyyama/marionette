@@ -131,11 +131,16 @@ async fn provider_routing() {
             role: "user".into(),
             content: serde_json::json!("hi"),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }],
         stream: None,
         temperature: None,
         max_tokens: None,
         top_p: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
         extra: serde_json::json!({}),
     };
     assert_eq!(req.provider_id(), Some("grok-cli"));
