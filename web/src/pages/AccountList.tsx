@@ -8,8 +8,9 @@ import {
   refreshAccount,
   type Account,
 } from "../lib/api";
+import { AddAccountModal } from "../components/AddAccountModal";
 import { StatusChip } from "../components/StatusChip";
-import { isProviderId, labelProvider } from "../lib/providers";
+import { isProviderId, labelProvider, type ProviderId } from "../lib/providers";
 import { statusTooltip } from "../lib/status";
 
 type StatusFilter = "all" | "bound" | "sealed" | "cut" | "fallen" | "inactive";
@@ -45,6 +46,7 @@ export function AccountList() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [addOpen, setAddOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!provider) return;
@@ -344,9 +346,13 @@ export function AccountList() {
             >
               Disable all ({activeCount})
             </button>
-            <Link to="/import" className="btn btn-sm btn-primary">
-              Import
-            </Link>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => setAddOpen(true)}
+            >
+              + Add
+            </button>
           </div>
         </div>
       </header>
@@ -420,13 +426,22 @@ export function AccountList() {
           <p className="flavor">No threads in this filter.</p>
           <p>
             {accounts.length === 0
-              ? "Import accounts for this provider."
+              ? "Add accounts for this provider, or import a 9Router backup."
               : "Try another status or search."}
           </p>
           {accounts.length === 0 && (
-            <Link to="/import" className="btn btn-primary">
-              Open Import
-            </Link>
+            <div className="btn-row" style={{ justifyContent: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setAddOpen(true)}
+              >
+                + Add
+              </button>
+              <Link to="/import" className="btn">
+                9Router backup
+              </Link>
+            </div>
           )}
         </div>
       ) : (
@@ -826,6 +841,20 @@ export function AccountList() {
             </div>
           </aside>
         </>
+      )}
+
+      {provider && (
+        <AddAccountModal
+          provider={provider as ProviderId}
+          open={addOpen}
+          onClose={() => setAddOpen(false)}
+          onImported={(res) => {
+            setMessage(
+              `Imported — inserted ${res.inserted}, updated ${res.updated}, skipped ${res.skipped}.`,
+            );
+            void load();
+          }}
+        />
       )}
     </div>
   );

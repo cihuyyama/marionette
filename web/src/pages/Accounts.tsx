@@ -172,8 +172,8 @@ export function Accounts() {
               {loading ? <span className="spinner inline-spinner" /> : null}
               Refresh
             </button>
-            <Link to="/import" className="btn btn-sm btn-primary">
-              Import
+            <Link to="/import" className="btn btn-sm">
+              9Router backup
             </Link>
           </div>
         </div>
@@ -293,7 +293,7 @@ export function Accounts() {
       {!loading && total === 0 && !error && (
         <div className="panel empty" style={{ marginTop: "var(--space-4)" }}>
           <p className="flavor">No marionettes bound yet.</p>
-          <p>Use + Add on a provider card, or bulk import JSON.</p>
+          <p>Use + Add on a provider card, or import a 9Router backup.</p>
           <div className="btn-row" style={{ justifyContent: "center" }}>
             <button
               type="button"
@@ -303,7 +303,7 @@ export function Accounts() {
               + Add Qoder
             </button>
             <Link to="/import" className="btn">
-              Bulk Import
+              9Router backup
             </Link>
           </div>
         </div>
