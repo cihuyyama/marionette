@@ -504,10 +504,33 @@ impl QoderProvider {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if status != 200 {
-            return Err(classify_http_status(status, &text));
+            return Err(classify_qoder_status(status, &text));
         }
         serde_json::from_str(&text)
             .map_err(|e| ProviderError::Transport(format!("jobToken parse: {e}")))
+    }
+
+    async fn apply_job_token(&self, tokens: &mut QoderTokens) -> Result<(), ProviderError> {
+        let job = self.do_job_token(tokens).await?;
+        if let Some(sot) = job.security_oauth_token {
+            tokens.security_oauth_token = Some(sot);
+        }
+        if let Some(rt) = job.refresh_token {
+            tokens.refresh_token = Some(rt);
+        }
+        if let Some(uid) = job.id {
+            tokens.user_id = Some(uid);
+        }
+        if let Some(name) = job.name {
+            tokens.user_name = Some(name);
+        }
+        if let Some(ut) = job.user_type {
+            tokens.user_type = Some(ut);
+        }
+        if let Some(exp) = job.expire_time {
+            tokens.expire_time = Some(exp);
+        }
+        Ok(())
     }
 }
 
@@ -535,30 +558,22 @@ impl Provider for QoderProvider {
             || expired;
 
         if needs_refresh {
-            let job = self.do_job_token(&tokens).await?;
-            if let Some(sot) = job.security_oauth_token {
-                tokens.security_oauth_token = Some(sot);
-            }
-            if let Some(rt) = job.refresh_token {
-                tokens.refresh_token = Some(rt);
-            }
-            if let Some(uid) = job.id {
-                tokens.user_id = Some(uid);
-            }
-            if let Some(name) = job.name {
-                tokens.user_name = Some(name);
-            }
-            if let Some(ut) = job.user_type {
-                tokens.user_type = Some(ut);
-            }
-            if let Some(exp) = job.expire_time {
-                tokens.expire_time = Some(exp);
-            }
+            self.apply_job_token(&mut tokens).await?;
             dirty = true;
         }
         if dirty {
             account.data = tokens.to_data().to_string();
         }
+        Ok(())
+    }
+
+    async fn force_refresh(&self, account: &mut Account) -> Result<(), ProviderError> {
+        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let mut tokens = QoderTokens::from_data(&data)?;
+        tokens.security_oauth_token = None;
+        tokens.user_id = None;
+        self.apply_job_token(&mut tokens).await?;
+        account.data = tokens.to_data().to_string();
         Ok(())
     }
 
@@ -678,7 +693,7 @@ impl Provider for QoderProvider {
                 .to_string();
             if status != 200 {
                 let text = resp.text().await.unwrap_or_default();
-                return Err(classify_http_status(status, &text));
+                return Err(classify_qoder_status(status, &text));
             }
 
             let http_version = format!("{:?}", resp.version());
@@ -764,11 +779,14 @@ impl Provider for QoderProvider {
                     let resp_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
                     let mut first_chunk_sent = false;
                     let mut any_content = false;
+                    let mut any_tool_calls = false;
                     let mut prompt_tokens: i64 = 0;
                     let mut completion_tokens: i64 = 0;
                     let mut total_tokens: i64 = 0;
                     let mut accumulated_text = String::new();
                     let mut usage_tx = Some(usage_tx);
+                    let mut tool_state = ToolCallStreamState::default();
+                    let mut upstream_finish: Option<String> = None;
 
                     loop {
                         while let Some(pos) = buffer.find('\n') {
@@ -778,12 +796,13 @@ impl Provider for QoderProvider {
                             if trimmed.is_empty() {
                                 continue;
                             }
-                            if let Some(svc_err) = parse_qoder_service_error(trimmed) {
-                                tracing::warn!(error = %svc_err, "qoder upstream error in SSE");
+                            // NOTE (P0 limitation): mid-stream Qoder 403 cannot trigger pool cooldown because Ok(Stream) was already returned; surfaced as client stream error only. See plan AC#9.
+                            if let Some((_svc_status, svc_msg)) = parse_qoder_service_error(trimmed) {
+                                tracing::warn!(error = %svc_msg, "qoder upstream error in SSE");
                                 let _ = tx
                                     .send(Err(std::io::Error::new(
                                         std::io::ErrorKind::Other,
-                                        svc_err,
+                                        svc_msg,
                                     )))
                                     .await;
                                 if let Some(txu) = usage_tx.take() {
@@ -810,31 +829,6 @@ impl Provider for QoderProvider {
                                     }
                                 }
 
-                                if !first_chunk_sent {
-                                    first_chunk_sent = true;
-                                    let chunk_json = serde_json::json!({
-                                        "id": resp_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": chrono::Utc::now().timestamp(),
-                                        "model": req_model_stream,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": { "role": "assistant", "content": "" },
-                                            "finish_reason": serde_json::Value::Null
-                                        }]
-                                    });
-                                    let msg = format!(
-                                        "data: {}\n\n",
-                                        serde_json::to_string(&chunk_json).unwrap()
-                                    );
-                                    if tx.send(Ok(bytes::Bytes::from(msg))).await.is_err() {
-                                        if let Some(txu) = usage_tx.take() {
-                                            let _ = txu.send(None);
-                                        }
-                                        return;
-                                    }
-                                }
-
                                 let choice = inner
                                     .get("choices")
                                     .and_then(|c| c.as_array())
@@ -844,6 +838,11 @@ impl Provider for QoderProvider {
                                 let is_finish = finish_reason
                                     .map(|v| !v.is_null())
                                     .unwrap_or(false);
+                                if is_finish {
+                                    if let Some(fr) = finish_reason.and_then(|v| v.as_str()) {
+                                        upstream_finish = Some(fr.to_string());
+                                    }
+                                }
 
                                 let mut delta_out = serde_json::json!({});
                                 let mut has_delta = false;
@@ -882,7 +881,25 @@ impl Provider for QoderProvider {
                                     }
                                 }
 
+                                if let Some(tcs) = delta
+                                    .and_then(|d| d.get("tool_calls"))
+                                    .and_then(|v| v.as_array())
+                                {
+                                    if !tcs.is_empty() {
+                                        let remapped = tool_state.ingest(tcs);
+                                        if !remapped.is_empty() {
+                                            delta_out["tool_calls"] = json!(remapped);
+                                            has_delta = true;
+                                            any_tool_calls = true;
+                                        }
+                                    }
+                                }
+
                                 if has_delta {
+                                    if !first_chunk_sent {
+                                        first_chunk_sent = true;
+                                        delta_out["role"] = json!("assistant");
+                                    }
                                     let chunk_json = serde_json::json!({
                                         "id": resp_id,
                                         "object": "chat.completion.chunk",
@@ -907,7 +924,12 @@ impl Provider for QoderProvider {
                                 }
 
                                 if is_finish {
-                                    if !any_content {
+                                    let fr = resolve_qoder_finish_reason(
+                                        upstream_finish.as_deref(),
+                                        any_content,
+                                        any_tool_calls,
+                                    );
+                                    if !any_content && !any_tool_calls {
                                         tracing::warn!("Qoder silent reject mid-stream (no content generated). Marking finish_reason as 'length'.");
                                     }
                                     qoder_emit_stream_end(
@@ -919,7 +941,7 @@ impl Provider for QoderProvider {
                                         total_tokens,
                                         estimated_prompt_stream,
                                         &accumulated_text,
-                                        if any_content { "stop" } else { "length" },
+                                        fr,
                                         &mut usage_tx,
                                     )
                                     .await;
@@ -939,11 +961,16 @@ impl Provider for QoderProvider {
                                     ctx = %decode_ctx_stream,
                                     first_chunk_sent,
                                     any_content,
+                                    any_tool_calls,
                                     "qoder stream body decode failed"
                                 );
-                                if first_chunk_sent || any_content {
-                                    let eof_finish = if any_content { "stop" } else { "length" };
-                                    if !any_content {
+                                if first_chunk_sent || any_content || any_tool_calls {
+                                    let eof_finish = resolve_qoder_finish_reason(
+                                        upstream_finish.as_deref(),
+                                        any_content,
+                                        any_tool_calls,
+                                    );
+                                    if !any_content && !any_tool_calls {
                                         tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
                                     }
                                     qoder_emit_stream_end(
@@ -978,8 +1005,12 @@ impl Provider for QoderProvider {
                         }
                     }
 
-                    let eof_finish = if any_content { "stop" } else { "length" };
-                    if !any_content {
+                    let eof_finish = resolve_qoder_finish_reason(
+                        upstream_finish.as_deref(),
+                        any_content,
+                        any_tool_calls,
+                    );
+                    if !any_content && !any_tool_calls {
                         tracing::warn!("Qoder silent reject at EOF (no content). Marking fallback finish_reason as 'length'.");
                     }
                     qoder_emit_stream_end(
@@ -1102,13 +1133,19 @@ impl Provider for QoderProvider {
                 }));
             }
 
+            let mut tool_state = ToolCallStreamState::default();
+            let mut upstream_finish: Option<String> = None;
+
             for line in buffer.lines() {
                 let trimmed = line.trim().trim_end_matches('\r');
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Some(svc_err) = parse_qoder_service_error(trimmed) {
-                    return Err(ProviderError::Transport(svc_err));
+                if let Some((svc_status, svc_msg)) = parse_qoder_service_error(trimmed) {
+                    if svc_status == 403 || svc_status == 402 {
+                        return Err(ProviderError::RateLimited { retry_after_secs: None });
+                    }
+                    return Err(ProviderError::Transport(svc_msg));
                 }
                 if let Some(inner) = parse_sse_line(trimmed) {
                     if let Some(u) = inner.get("usage") {
@@ -1133,6 +1170,12 @@ impl Provider for QoderProvider {
                         .and_then(|c| c.as_array())
                         .and_then(|a| a.first());
                     let delta = choice.and_then(|c| c.get("delta"));
+                    if let Some(fr) = choice
+                        .and_then(|c| c.get("finish_reason"))
+                        .and_then(|v| v.as_str())
+                    {
+                        upstream_finish = Some(fr.to_string());
+                    }
                     if let Some(content) = delta
                         .and_then(|d| d.get("content"))
                         .and_then(|v| v.as_str())
@@ -1149,13 +1192,23 @@ impl Provider for QoderProvider {
                             accumulated_reasoning.push_str(reasoning);
                         }
                     }
+                    if let Some(tcs) = delta
+                        .and_then(|d| d.get("tool_calls"))
+                        .and_then(|v| v.as_array())
+                    {
+                        let _ = tool_state.ingest(tcs);
+                    }
                 }
             }
 
             let _ = stream_eof_partial;
 
+            let filled_tools = tool_state.snapshot_filled();
+            let any_tool_calls = !filled_tools.is_empty();
             let final_text = if !accumulated_text.is_empty() {
                 accumulated_text
+            } else if any_tool_calls {
+                String::new()
             } else {
                 accumulated_reasoning
             };
@@ -1168,10 +1221,21 @@ impl Provider for QoderProvider {
                 &final_text,
             );
 
-            let mut finish_reason_str = "stop";
-            if final_text.is_empty() {
+            let finish_reason_str = resolve_qoder_finish_reason(
+                upstream_finish.as_deref(),
+                !final_text.is_empty(),
+                any_tool_calls,
+            );
+            if final_text.is_empty() && !any_tool_calls {
                 tracing::warn!("Qoder silent reject mid-non-stream (no content generated). Marking finish_reason as 'length'.");
-                finish_reason_str = "length";
+            }
+
+            let mut message = serde_json::json!({
+                "role": "assistant",
+                "content": final_text
+            });
+            if any_tool_calls {
+                message["tool_calls"] = json!(filled_tools);
             }
 
             let result_json = serde_json::json!({
@@ -1181,10 +1245,7 @@ impl Provider for QoderProvider {
                 "model": req_model,
                 "choices": [{
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": final_text
-                    },
+                    "message": message,
                     "finish_reason": finish_reason_str
                 }],
                 "usage": {
@@ -1213,6 +1274,9 @@ fn extract_user_text(req: &ChatCompletionRequest) -> String {
 }
 
 fn content_to_text(content: &Value) -> String {
+    if content.is_null() {
+        return String::new();
+    }
     if let Some(s) = content.as_str() {
         return s.to_string();
     }
@@ -1221,13 +1285,449 @@ fn content_to_text(content: &Value) -> String {
         for item in arr {
             if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
                 parts.push(t.to_string());
+            } else if item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                || item.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+            {
+                continue;
             } else if let Some(s) = item.as_str() {
                 parts.push(s.to_string());
             }
         }
         return parts.join("\n");
     }
-    content.to_string()
+    String::new()
+}
+
+fn tool_arguments_to_string(args: &Value) -> String {
+    if let Some(s) = args.as_str() {
+        s.to_string()
+    } else if args.is_null() {
+        String::new()
+    } else {
+        serde_json::to_string(args).unwrap_or_default()
+    }
+}
+
+fn normalize_openai_tool_calls(raw: &Value) -> Vec<Value> {
+    let Some(arr) = raw.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|tc| {
+            let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let type_ = tc
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("function")
+                .to_string();
+            let func = tc.get("function")?;
+            let name = func
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let arguments = func
+                .get("arguments")
+                .map(tool_arguments_to_string)
+                .unwrap_or_default();
+            if name.is_empty() && arguments.is_empty() && id.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "id": id,
+                "type": type_,
+                "function": { "name": name, "arguments": arguments }
+            }))
+        })
+        .collect()
+}
+
+fn generate_openai_tool_id() -> String {
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    format!("call_{}", &hex[..24.min(hex.len())])
+}
+
+fn normalize_tool_call_id(id: Option<&str>, _index: usize) -> String {
+    let Some(mut id) = id.filter(|s| !s.is_empty()).map(|s| s.to_string()) else {
+        return generate_openai_tool_id();
+    };
+    if let Some(rest) = id.strip_prefix("toolu_") {
+        id = rest.to_string();
+    }
+    if id.len() < 20 {
+        return generate_openai_tool_id();
+    }
+    id
+}
+
+fn resolve_qoder_finish_reason(
+    upstream: Option<&str>,
+    any_content: bool,
+    any_tool_calls: bool,
+) -> &'static str {
+    match upstream {
+        Some("tool_calls") => "tool_calls",
+        Some("length") => "length",
+        Some("content_filter") => "content_filter",
+        Some("stop") => {
+            if any_tool_calls {
+                "tool_calls"
+            } else if any_content {
+                "stop"
+            } else {
+                "length"
+            }
+        }
+        Some(_) => {
+            if any_tool_calls {
+                "tool_calls"
+            } else if any_content {
+                "stop"
+            } else {
+                "length"
+            }
+        }
+        None => {
+            if any_tool_calls {
+                "tool_calls"
+            } else if any_content {
+                "stop"
+            } else {
+                "length"
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolCallStreamState {
+    index_map: std::collections::HashMap<String, usize>,
+    next_idx: usize,
+    pending: std::collections::HashMap<usize, (String, String, String)>,
+}
+
+impl ToolCallStreamState {
+    fn ingest(&mut self, tcs: &[Value]) -> Vec<Value> {
+        let mut remapped = Vec::new();
+        for tc in tcs {
+            let key = if let Some(i) = tc.get("index").and_then(|v| v.as_u64()) {
+                format!("idx-{i}")
+            } else if let Some(id) = tc.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+            {
+                id.to_string()
+            } else {
+                format!("tool-{}", self.next_idx)
+            };
+            let idx = if let Some(&existing) = self.index_map.get(&key) {
+                existing
+            } else {
+                let i = self.next_idx;
+                self.next_idx += 1;
+                self.index_map.insert(key, i);
+                let stable = normalize_tool_call_id(tc.get("id").and_then(|v| v.as_str()), i);
+                self.pending
+                    .insert(i, (stable, String::new(), String::new()));
+                i
+            };
+            if let Some(entry) = self.pending.get_mut(&idx) {
+                if let Some(name) = tc
+                    .pointer("/function/name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    entry.1 = name.to_string();
+                }
+                if let Some(args) = tc.pointer("/function/arguments") {
+                    entry.2.push_str(&tool_arguments_to_string(args));
+                }
+            }
+            let (stable_id, name, _args) = self
+                .pending
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| (generate_openai_tool_id(), String::new(), String::new()));
+            let type_ = tc
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("function");
+            let chunk_name = tc
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let chunk_args = tc
+                .pointer("/function/arguments")
+                .map(tool_arguments_to_string)
+                .unwrap_or_default();
+            let mut f = serde_json::Map::new();
+            if !chunk_name.is_empty() {
+                f.insert("name".into(), json!(chunk_name));
+            }
+            if tc.pointer("/function/arguments").is_some() {
+                f.insert("arguments".into(), json!(chunk_args));
+            }
+            let mut piece = json!({
+                "index": idx,
+                "id": stable_id,
+                "type": type_,
+            });
+            if !f.is_empty() {
+                piece["function"] = Value::Object(f);
+            } else if !name.is_empty() {
+                piece["function"] = json!({ "name": name, "arguments": "" });
+            }
+            remapped.push(piece);
+        }
+        remapped
+    }
+
+    fn snapshot_filled(&self) -> Vec<Value> {
+        let mut keys: Vec<usize> = self.pending.keys().copied().collect();
+        keys.sort_unstable();
+        keys.into_iter()
+            .filter_map(|idx| {
+                let (id, name, args) = self.pending.get(&idx)?;
+                if id.is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "index": idx,
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args
+                    }
+                }))
+            })
+            .collect()
+    }
+}
+
+fn build_qoder_messages(req: &ChatCompletionRequest) -> Vec<Value> {
+    let has_incoming_tools = req.has_tools();
+    let incoming_has_system = req.messages.iter().any(|m| m.role == "system");
+    let mut result: Vec<Value> = Vec::new();
+
+    if has_incoming_tools && !incoming_has_system {
+        let tools = req.tools.as_ref().and_then(|v| v.as_array());
+        let mut descriptions = Vec::new();
+        let mut names = Vec::new();
+        if let Some(tools) = tools {
+            for t in tools {
+                let name = t
+                    .pointer("/function/name")
+                    .or_else(|| t.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                names.push(name.to_string());
+                let desc = t
+                    .pointer("/function/description")
+                    .or_else(|| t.get("description"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("No description");
+                let param_names: Vec<&str> = t
+                    .pointer("/function/parameters/properties")
+                    .or_else(|| t.pointer("/parameters/properties"))
+                    .and_then(|v| v.as_object())
+                    .map(|o| o.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                let param_info = if param_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Parameters: {}", param_names.join(", "))
+                };
+                descriptions.push(format!("- {name}: {desc}{param_info}"));
+            }
+        }
+        let tool_descriptions = descriptions.join("\n");
+        let tool_names = names.join(", ");
+        let sys = format!(
+            "You are a helpful assistant with access to the following tools:\n\n\
+             {tool_descriptions}\n\n\
+             ## Tool Usage Guidelines:\n\n\
+             1. **When to use tools**: When the user's request requires information retrieval, file operations, code execution, or any action that these tools can perform, you MUST call the appropriate tool. Do not say you cannot help; instead, invoke the tool with the correct arguments.\n\n\
+             2. **Trust tool results**: After calling a tool, you will receive the tool result in the conversation. The tool result contains the actual data or outcome of the tool execution. Use this information to formulate your response. Do not claim you didn't receive file contents or data if the tool result was provided.\n\n\
+             3. **Multi-turn workflows**: For complex tasks requiring multiple tool calls:\n\
+                - Call tools sequentially as needed\n\
+                - Use information from previous tool results to inform subsequent calls\n\
+                - Only respond with your final answer after you have gathered all necessary information\n\n\
+             4. **Error handling**: If a tool returns an error or empty result, acknowledge this to the user and suggest alternatives or next steps.\n\n\
+             5. **Text-only responses**: Only respond with plain text (without tool calls) when:\n\
+                - No available tool can address the user's request\n\
+                - You already have all the information needed from previous tool results\n\
+                - The user is asking for clarification or a simple answer\n\n\
+             Available tools: {tool_names}"
+        );
+        result.push(json!({
+            "role": "system",
+            "content": sys
+        }));
+    } else if !has_incoming_tools && !incoming_has_system {
+        let sys = "You are a helpful AI assistant. Answer the user's questions clearly and concisely. Maintain context from earlier turns in the conversation.";
+        result.push(json!({
+            "role": "system",
+            "content": sys
+        }));
+    }
+
+    for m in &req.messages {
+        if m.role == "assistant" {
+            if let Some(tcs) = m.tool_calls.as_ref() {
+                let tool_calls = normalize_openai_tool_calls(tcs);
+                if !tool_calls.is_empty() {
+                    let content = content_to_text(&m.content);
+                    let contents = if content.is_empty() {
+                        json!([])
+                    } else {
+                        json!([{ "type": "text", "text": content }])
+                    };
+                    result.push(json!({
+                        "role": "assistant",
+                        "content": content,
+                        "contents": contents,
+                        "tool_calls": tool_calls
+                    }));
+                    continue;
+                }
+            }
+        }
+
+        if m.content.is_null() || m.content.as_str().is_some() {
+            let content = content_to_text(&m.content);
+            let mut msg = json!({
+                "role": m.role,
+                "content": content,
+                "contents": [{ "type": "text", "text": content }]
+            });
+            if m.role == "tool" {
+                if let Some(id) = m.tool_call_id.as_ref() {
+                    msg["tool_call_id"] = json!(id);
+                }
+            }
+            result.push(msg);
+            continue;
+        }
+
+        if let Some(blocks) = m.content.as_array() {
+            let mut text_parts = Vec::new();
+            let mut image_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut tool_results: Vec<(String, String)> = Vec::new();
+
+            for b in blocks {
+                let Some(obj) = b.as_object() else { continue };
+                let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match ty {
+                    "text" => {
+                        if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
+                            text_parts.push(t.to_string());
+                        }
+                    }
+                    "image_url" | "image" | "input_image" => {
+                        image_parts.push(b.clone());
+                    }
+                    "tool_use" => {
+                        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let arguments = obj
+                            .get("input")
+                            .map(tool_arguments_to_string)
+                            .unwrap_or_default();
+                        tool_calls.push(json!({
+                            "id": id,
+                            "type": "function",
+                            "function": { "name": name, "arguments": arguments }
+                        }));
+                    }
+                    "tool_result" => {
+                        let tool_use_id = obj
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let mut content = String::new();
+                        if let Some(s) = obj.get("content").and_then(|v| v.as_str()) {
+                            content = s.to_string();
+                        } else if let Some(arr) = obj.get("content").and_then(|v| v.as_array()) {
+                            content = arr
+                                .iter()
+                                .filter_map(|inner| {
+                                    inner.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                        }
+                        if obj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            content = format!("[ERROR] {content}");
+                        }
+                        tool_results.push((tool_use_id, content));
+                    }
+                    _ => {
+                        if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
+                            text_parts.push(t.to_string());
+                        }
+                    }
+                }
+            }
+
+            let text_content = text_parts.join("\n");
+            let mut contents_arr = Vec::new();
+            if !text_content.is_empty() {
+                contents_arr.push(json!({ "type": "text", "text": text_content }));
+            }
+            contents_arr.extend(image_parts);
+
+            if m.role == "assistant" && !tool_calls.is_empty() {
+                result.push(json!({
+                    "role": "assistant",
+                    "content": text_content,
+                    "contents": if text_content.is_empty() {
+                        json!([])
+                    } else {
+                        json!([{ "type": "text", "text": text_content }])
+                    },
+                    "tool_calls": tool_calls
+                }));
+                continue;
+            }
+
+            if m.role == "user" && !tool_results.is_empty() {
+                for (tool_call_id, content) in tool_results {
+                    result.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": content
+                    }));
+                }
+                if !contents_arr.is_empty() {
+                    result.push(json!({
+                        "role": "user",
+                        "content": text_content,
+                        "contents": contents_arr
+                    }));
+                }
+                continue;
+            }
+
+            result.push(json!({
+                "role": m.role,
+                "content": text_content,
+                "contents": contents_arr
+            }));
+            continue;
+        }
+
+        result.push(json!({
+            "role": m.role,
+            "content": "",
+            "contents": []
+        }));
+    }
+
+    result
 }
 
 fn derive_session_id(messages: &[crate::openai::ChatMessage]) -> String {
@@ -1261,7 +1761,18 @@ fn derive_session_id(messages: &[crate::openai::ChatMessage]) -> String {
     )
 }
 
-fn parse_qoder_service_error(line: &str) -> Option<String> {
+/// Qoder-scoped status classification. Unlike Grok, Qoder 403/402 are
+/// treated as TEMPORARY exhaustion (RateLimited -> cooldown), not a permanent cut,
+/// because Qoder free-tier quota surfaces as 403/402 and recovers after cooldown.
+fn classify_qoder_status(status: u16, body: &str) -> ProviderError {
+    match status {
+        403 | 402 => ProviderError::RateLimited { retry_after_secs: None },
+        401 => ProviderError::AuthExpired,
+        _ => classify_http_status(status, body),
+    }
+}
+
+fn parse_qoder_service_error(line: &str) -> Option<(u16, String)> {
     if !line.starts_with("data:") {
         return None;
     }
@@ -1293,13 +1804,16 @@ fn parse_qoder_service_error(line: &str) -> Option<String> {
             }
         }
     }
-    Some(format!(
-        "Qoder HTTP {svc} {err_status}: {}",
-        if err_msg.is_empty() {
-            "rate limited or quota exceeded"
-        } else {
-            &err_msg[..err_msg.len().min(200)]
-        }
+    Some((
+        svc as u16,
+        format!(
+            "Qoder HTTP {svc} {err_status}: {}",
+            if err_msg.is_empty() {
+                "rate limited or quota exceeded"
+            } else {
+                &err_msg[..err_msg.len().min(200)]
+            }
+        ),
     ))
 }
 
@@ -1474,24 +1988,7 @@ fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
     let prompt = extract_user_text(req);
     let mut body = load_chat_template().unwrap_or_else(|| json!({}));
 
-    let mut messages: Vec<Value> = Vec::new();
-    let has_system = req.messages.iter().any(|m| m.role == "system");
-    if !has_system {
-        let sys = "You are a helpful AI assistant. Answer the user's questions clearly and concisely. Maintain context from earlier turns in the conversation.";
-        messages.push(json!({
-            "role": "system",
-            "content": sys,
-            "contents": [{ "type": "text", "text": sys }]
-        }));
-    }
-    for m in &req.messages {
-        let content_str = content_to_text(&m.content);
-        messages.push(json!({
-            "role": m.role,
-            "content": content_str,
-            "contents": [{ "type": "text", "text": content_str }]
-        }));
-    }
+    let messages = build_qoder_messages(req);
     let system_text = messages
         .iter()
         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
@@ -1520,7 +2017,15 @@ fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
     body["aliyun_user_type"] = json!("");
     body["system"] = json!(system_text);
     body["messages"] = json!(messages);
-    body["tools"] = json!([]);
+    if req.has_tools() {
+        body["tools"] = req.tools.clone().unwrap_or_else(|| json!([]));
+    } else {
+        body["tools"] = json!([]);
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("tool_choice");
+        obj.remove("parallel_tool_calls");
+    }
     body["parameters"] = json!({ "max_tokens": max_tokens });
 
     if !body.get("chat_context").map(|v| v.is_object()).unwrap_or(false) {
@@ -1567,4 +2072,67 @@ fn build_chat_body(req: &ChatCompletionRequest, cfg: &ModelCfg) -> Value {
         "stage": "start"
     });
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_qoder_status_403_returns_rate_limited() {
+        let err = classify_qoder_status(403, "");
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "expected RateLimited for 403, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn classify_qoder_status_402_returns_rate_limited() {
+        let err = classify_qoder_status(402, "");
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "expected RateLimited for 402, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn classify_qoder_status_401_returns_auth_expired() {
+        let err = classify_qoder_status(401, "");
+        assert!(
+            matches!(err, ProviderError::AuthExpired),
+            "expected AuthExpired for 401, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn classify_qoder_status_500_returns_upstream() {
+        let err = classify_qoder_status(500, "boom");
+        assert!(
+            matches!(err, ProviderError::Upstream { .. }),
+            "expected Upstream for 500, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_qoder_service_error_403_returns_tuple_with_status() {
+        let line = r#"data: {"statusCodeValue":403,"statusCode":"FORBIDDEN","message":"quota"}"#;
+        let result = parse_qoder_service_error(line);
+        assert!(result.is_some(), "expected Some for 403 error line");
+        let (status, _msg) = result.unwrap();
+        assert_eq!(status, 403, "expected tuple first element == 403");
+    }
+
+    #[test]
+    fn parse_qoder_service_error_500_returns_tuple_with_status() {
+        let line = r#"data: {"statusCodeValue":500,"statusCode":"ERR","message":"x"}"#;
+        let result = parse_qoder_service_error(line);
+        assert!(result.is_some(), "expected Some for 500 error line");
+        let (status, _msg) = result.unwrap();
+        assert_eq!(status, 500, "expected tuple first element == 500");
+    }
 }
