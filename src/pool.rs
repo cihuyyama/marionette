@@ -31,7 +31,7 @@ pub async fn handle_chat(
     let mut last_account: Option<Account> = None;
     let mut tried: Vec<String> = Vec::new();
 
-    for attempt in 0..3 {
+    for attempt in 0..8 {
         let (mut account, strategy) =
             match db::pick_account(&state.pool, provider_id, &tried).await {
                 Ok(v) => v,
@@ -453,14 +453,36 @@ async fn apply_provider_error(
                     Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             }
         }
-        ProviderError::AuthInvalid(_) | ProviderError::PaymentRequired | ProviderError::AccessDenied => {
+        ProviderError::AuthInvalid(_) | ProviderError::AccessDenied => {
             account.is_active = 0;
             info!(account = %account.id, "cut (disabled)");
         }
-        ProviderError::Upstream { status, .. } if *status == 402 || *status == 403 => {
-            account.is_active = 0;
+        ProviderError::PaymentRequired
+        | ProviderError::Upstream { status: 402, .. } => {
+            let hours = config.cooldown_hours as i64;
+            let until = Utc::now() + Duration::hours(hours);
+            account.cooldown_until =
+                Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            if account.has_quota_budget() {
+                account.quota_remaining = 0;
+            }
+            info!(
+                account = %account.id,
+                until = ?account.cooldown_until,
+                "sealed (402/payment credit block; quota zeroed, not cut)"
+            );
         }
-        _ => {}
+        ProviderError::Upstream { status, .. } if *status == 403 => {
+            account.is_active = 0;
+            info!(account = %account.id, "cut (403 access denied)");
+        }
+        other => {
+            info!(
+                account = %account.id,
+                error = %other,
+                "fallen (unclassified provider error; last_error kept)"
+            );
+        }
     }
 
     db::update_account(pool, account).await?;

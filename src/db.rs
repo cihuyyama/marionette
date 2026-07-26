@@ -599,11 +599,7 @@ impl Account {
         if self
             .last_error
             .as_deref()
-            .map(|e| {
-                e.contains("invalid_grant")
-                    || e.contains("AuthInvalid")
-                    || e.contains("dead")
-            })
+            .map(|e| !e.trim().is_empty())
             .unwrap_or(false)
         {
             return "fallen";
@@ -825,6 +821,32 @@ pub async fn list_eligible_accounts(
     provider: &str,
 ) -> AppResult<Vec<Account>> {
     let now = now_rfc3339();
+    let _ = sqlx::query(
+        r#"
+        UPDATE accounts
+        SET quota_remaining = quota_limit,
+            updated_at = ?
+        WHERE provider = ?
+          AND is_active = 1
+          AND quota_limit > 0
+          AND quota_remaining = 0
+          AND cooldown_until IS NOT NULL
+          AND cooldown_until < ?
+          AND (
+            last_error LIKE '%payment required%'
+            OR last_error LIKE '%PaymentRequired%'
+            OR last_error LIKE '%402%'
+            OR last_error LIKE '%spending-limit%'
+            OR last_error LIKE '%credit block%'
+          )
+        "#,
+    )
+    .bind(&now)
+    .bind(provider)
+    .bind(&now)
+    .execute(pool)
+    .await;
+
     let rows = sqlx::query_as::<_, Account>(
         r#"
         SELECT * FROM accounts
@@ -971,4 +993,65 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
 
 pub fn new_account_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_account() -> Account {
+        Account {
+            id: "a1".into(),
+            provider: "grok-cli".into(),
+            email: Some("x@y.z".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: "{}".into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: GROK_TOKEN_QUOTA,
+        }
+    }
+
+    #[test]
+    fn status_bound_when_healthy() {
+        assert_eq!(sample_account().status_label(), "bound");
+    }
+
+    #[test]
+    fn status_cut_when_inactive() {
+        let mut a = sample_account();
+        a.is_active = 0;
+        a.last_error = Some("anything".into());
+        assert_eq!(a.status_label(), "cut");
+    }
+
+    #[test]
+    fn status_sealed_cooldown_beats_error() {
+        let mut a = sample_account();
+        a.cooldown_until = Some("2099-01-01T00:00:00.000Z".into());
+        a.last_error = Some("upstream 500: boom".into());
+        assert_eq!(a.status_label(), "sealed");
+    }
+
+    #[test]
+    fn status_fallen_on_any_residual_error() {
+        let mut a = sample_account();
+        a.last_error = Some("transport: connection reset".into());
+        assert_eq!(a.status_label(), "fallen");
+    }
+
+    #[test]
+    fn status_fallen_not_only_invalid_grant() {
+        let mut a = sample_account();
+        a.last_error = Some("upstream 500: internal".into());
+        assert_eq!(a.status_label(), "fallen");
+        a.last_error = Some("other: weird".into());
+        assert_eq!(a.status_label(), "fallen");
+    }
 }
