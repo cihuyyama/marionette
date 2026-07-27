@@ -156,6 +156,10 @@ impl Provider for GrokCliProvider {
         Ok(())
     }
 
+    async fn force_refresh(&self, account: &mut Account) -> Result<(), ProviderError> {
+        self.refresh(account).await
+    }
+
     async fn chat(
         &self,
         account: &Account,

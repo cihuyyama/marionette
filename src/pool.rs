@@ -94,7 +94,7 @@ pub async fn handle_chat(
             }
             Err(e) => {
                 if should_retry_same_account(provider_id, &e, false) {
-                    warn!(account = %account.id, error = %e, "qoder auth expired; forcing jobToken refresh + retry");
+                    warn!(account = %account.id, provider = provider_id, error = %e, "auth expired; force_refresh + retry");
                     match provider.force_refresh(&mut account).await {
                         Ok(()) => {
                             account.updated_at = db::now_rfc3339();
@@ -115,7 +115,7 @@ pub async fn handle_chat(
                                     .await;
                                 }
                                 Err(e2) => {
-                                    warn!(account = %account.id, error = %e2, "qoder retry after refresh still failed");
+                                    warn!(account = %account.id, provider = provider_id, error = %e2, "retry after force_refresh still failed");
                                     apply_provider_error(&state.pool, &state.config, &mut account, &e2).await?;
                                     let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                                     last_account = Some(account);
@@ -125,11 +125,11 @@ pub async fn handle_chat(
                             }
                         }
                         Err(re) => {
-                            warn!(account = %account.id, error = %re, "qoder force_refresh failed");
-                            apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                            warn!(account = %account.id, provider = provider_id, error = %re, "force_refresh failed");
+                            apply_provider_error(&state.pool, &state.config, &mut account, &re).await?;
                             let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                             last_account = Some(account);
-                            last_err = Some(e.into());
+                            last_err = Some(re.into());
                             continue;
                         }
                     }
@@ -169,7 +169,9 @@ fn should_retry_same_account(
     err: &ProviderError,
     already_retried: bool,
 ) -> bool {
-    provider_id == "qoder" && matches!(err, ProviderError::AuthExpired) && !already_retried
+    matches!(provider_id, "grok-cli" | "qoder")
+        && matches!(err, ProviderError::AuthExpired)
+        && !already_retried
 }
 
 async fn handle_chat_success(
@@ -425,7 +427,6 @@ async fn apply_provider_error(
     account: &mut Account,
     err: &ProviderError,
 ) -> AppResult<()> {
-    let prev_error = account.last_error.clone();
     account.updated_at = db::now_rfc3339();
     account.last_error = Some(err.to_string().chars().take(500).collect());
 
@@ -442,16 +443,11 @@ async fn apply_provider_error(
             info!(account = %account.id, until = ?account.cooldown_until, "sealed (429 cooldown)");
         }
         ProviderError::AuthExpired => {
-            let prev = prev_error.as_deref().unwrap_or("").to_lowercase();
-            let repeated = prev.contains("auth expired") || prev.contains("auth invalid");
-            if repeated {
-                account.is_active = 0;
-                info!(account = %account.id, "cut (repeated auth expired)");
-            } else {
-                let until = Utc::now() + Duration::minutes(5);
-                account.cooldown_until =
-                    Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            }
+            let hours = config.auth_cooldown_hours as i64;
+            let until = Utc::now() + Duration::hours(hours);
+            account.cooldown_until =
+                Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            info!(account = %account.id, until = ?account.cooldown_until, "sealed (auth expired)");
         }
         ProviderError::AuthInvalid(_) | ProviderError::AccessDenied => {
             account.is_active = 0;
@@ -499,8 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn no_retry_grok_authexpired() {
-        assert!(!should_retry_same_account("grok-cli", &ProviderError::AuthExpired, false));
+    fn retry_grok_authexpired_first_time() {
+        assert!(should_retry_same_account("grok-cli", &ProviderError::AuthExpired, false));
+    }
+
+    #[test]
+    fn no_retry_grok_already_retried() {
+        assert!(!should_retry_same_account("grok-cli", &ProviderError::AuthExpired, true));
     }
 
     #[test]

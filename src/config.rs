@@ -10,6 +10,7 @@ pub struct Config {
     pub admin_key: String,
     pub cors_origin: String,
     pub cooldown_hours: u64,
+    pub auth_cooldown_hours: u64,
     pub grok_client_id: String,
     pub refresh_lead_secs: i64,
     pub refresh_interval_secs: u64,
@@ -47,6 +48,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(25),
+            auth_cooldown_hours: env::var("MARIONETTE_AUTH_COOLDOWN_HOURS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
             grok_client_id: env::var("MARIONETTE_GROK_CLIENT_ID").unwrap_or_else(|_| {
                 "b1a00492-073a-47ea-816f-4c329264a828".into()
             }),
