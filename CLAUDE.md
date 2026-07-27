@@ -31,9 +31,11 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 4. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
 5. **Mask tokens** in every admin JSON response (`db::mask_token` / `mask_secrets`).
 6. **Grok vs Qoder error policy is different:**
-   - Global `classify_http_status` (`src/providers/mod.rs`): 402/403 → permanent cut path for Grok.
+   - Global `classify_http_status` still maps HTTP codes; **pool effects** live in `apply_provider_error`.
+   - Grok **402 / PaymentRequired** (spending-limit / fleet credit) → **sealed** cooldown + `quota_remaining=0` (not cut). Auto-restores quota when cooldown ends.
+   - Grok **403 / AccessDenied** and **AuthInvalid** (`invalid_grant`) → **cut**.
    - Qoder uses **local** `classify_qoder_status`: 402/403 → `RateLimited` (cooldown), **not** cut.
-   - **Never change global `classify_http_status` to “fix” Qoder** — that regresses Grok.
+   - **Never change global `classify_http_status` to “fix” Qoder** — keep Qoder classification local.
 7. Dashboard: **React + Vite SPA only** — not Next, TanStack Start, or SSR.
 8. UI: `docs/DESIGN.md` — dark-only, English ops nav, soft LoTM on chips/empty/brand only.
 9. Prefer mirroring verified behavior from 9Router grok-cli + etteeum `qoder.ts` — do not invent Qoder auth.
@@ -242,7 +244,7 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 ## 10. Pool flow (`src/pool.rs::handle_chat`)
 
 1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok` or `qoder`).
-2. Loop **up to 3** picks: `db::pick_account(pool, provider_id, &tried)`.
+2. Loop **up to 8** picks: `db::pick_account(pool, provider_id, &tried)`.
 3. Push account id to `tried`.
 4. `provider.ensure_fresh_auth(&mut account)` — on fail → `apply_provider_error` + next account.
 5. Persist account; `provider.chat(&account, &req)`.
@@ -258,20 +260,21 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 
 | ProviderError | Account effect |
 |---------------|----------------|
-| `RateLimited { … }` | `cooldown_until = now + MARIONETTE_COOLDOWN_HOURS` (or retry_after) — status **sealed** |
+| `RateLimited { … }` | `cooldown_until = now + MARIONETTE_COOLDOWN_HOURS` (or retry_after) — **sealed** |
+| `PaymentRequired` / `Upstream` **402** | **sealed** (same cooldown hours) + `quota_remaining=0` (Grok credit/spending-limit recovers) |
 | `AuthExpired` | first: 5 min cooldown; if last_error already auth-ish: **cut** (`is_active=0`) |
-| `AuthInvalid` / `PaymentRequired` / `AccessDenied` | **cut** |
-| `Upstream` status 402/403 | **cut** |
+| `AuthInvalid` / `AccessDenied` | **cut** |
+| `Upstream` status **403** | **cut** |
 | other | record `last_error` only |
 
 ### Status labels (`Account::status_label`)
 
 | Label | Meaning |
 |-------|---------|
-| `bound` | active, not cooling, quota ok |
-| `sealed` | cooldown or quota exhausted |
-| `cut` | `is_active=0` |
-| `fallen` | last_error looks dead (`invalid_grant`, etc.) |
+| `bound` | active, not cooling, quota ok, **no** `last_error` |
+| `sealed` | cooldown or quota exhausted (takes priority over fallen) |
+| `cut` | `is_active=0` (takes priority; hard auth death / 403) |
+| `fallen` | active + not sealed, but **any** residual `last_error` (unclassified upstream/transport/other). Cleared on next successful chat. Error text always stored in `last_error` and shown in admin UI. |
 
 LoTM UI chips map these (Bound/Sealed/Cut/Fallen) — see DESIGN.md.
 
