@@ -44,8 +44,13 @@ export type ModelObject = {
   id: string;
   object: string;
   owned_by: string;
+  model_key?: string | null;
   display_name?: string | null;
   credit_usage_rate?: string | null;
+  max_input?: string | null;
+  reasoning?: boolean;
+  vision?: boolean;
+  is_default?: boolean;
 };
 
 export class ApiError extends Error {

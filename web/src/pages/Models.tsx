@@ -3,6 +3,17 @@ import { ApiError, listAdminModels, type ModelObject } from "../lib/api";
 import { labelProvider } from "../lib/providers";
 import { Link } from "react-router-dom";
 
+function FlagCell({ on, label }: { on: boolean; label: string }) {
+  return on ? (
+    <span className="chip chip-bound" title={label}>
+      <span className="chip-dot" />
+      {label}
+    </span>
+  ) : (
+    <span className="muted">—</span>
+  );
+}
+
 export function ModelsPage() {
   const [models, setModels] = useState<ModelObject[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -54,8 +65,10 @@ export function ModelsPage() {
       return (
         m.id.toLowerCase().includes(q) ||
         m.owned_by.toLowerCase().includes(q) ||
+        (m.model_key ?? "").toLowerCase().includes(q) ||
         (m.display_name ?? "").toLowerCase().includes(q) ||
-        (m.credit_usage_rate ?? "").toLowerCase().includes(q)
+        (m.credit_usage_rate ?? "").toLowerCase().includes(q) ||
+        (m.max_input ?? "").toLowerCase().includes(q)
       );
     });
   }, [models, search, owner]);
@@ -76,7 +89,8 @@ export function ModelsPage() {
           <div>
             <h1>Models</h1>
             <p className="subtitle">
-              {models.length} models · display names · Qoder credit rates
+              {models.length} models · key · display · price · max input ·
+              reasoning / vision
             </p>
           </div>
           <button
@@ -109,7 +123,7 @@ export function ModelsPage() {
           <input
             type="search"
             className="input"
-            placeholder="Search id, name, rate…"
+            placeholder="Search id, key, name, rate…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search models"
@@ -142,8 +156,13 @@ export function ModelsPage() {
             <thead>
               <tr>
                 <th>Model id</th>
+                <th>Key</th>
                 <th>Display name</th>
-                <th>Credit rate</th>
+                <th>Price</th>
+                <th>Max input</th>
+                <th>Reasoning</th>
+                <th>Vision</th>
+                <th>Default</th>
                 <th>Provider</th>
                 <th></th>
               </tr>
@@ -152,9 +171,26 @@ export function ModelsPage() {
               {filtered.map((m) => (
                 <tr key={m.id}>
                   <td className="mono">{m.id}</td>
+                  <td className="mono muted">{m.model_key || "—"}</td>
                   <td>{m.display_name || "—"}</td>
                   <td className="mono muted">
                     {m.credit_usage_rate || "—"}
+                  </td>
+                  <td className="mono">{m.max_input || "—"}</td>
+                  <td>
+                    <FlagCell on={!!m.reasoning} label="R" />
+                  </td>
+                  <td>
+                    <FlagCell on={!!m.vision} label="VL" />
+                  </td>
+                  <td>
+                    {m.is_default ? (
+                      <span className="chip chip-bound" title="Default">
+                        <span className="chip-dot" />D
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
                   </td>
                   <td className="muted">{labelProvider(m.owned_by)}</td>
                   <td>
