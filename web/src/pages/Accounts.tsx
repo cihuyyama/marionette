@@ -5,6 +5,7 @@ import {
   listAccounts,
   listProviderSettings,
   patchProviderLoadBalance,
+  warmupQoderAccounts,
   type Account,
   type LoadBalanceOption,
   type ProviderSetting,
@@ -48,19 +49,26 @@ function countFor(accounts: Account[]): ProviderCounts {
     else if (s === "cut") c.cut += 1;
     else if (s === "fallen") c.fallen += 1;
     else c.bound += 1;
-    if (a.quota_kind === "tokens" || a.quota_limit > 0) {
+    if (a.quota_kind === "credits") {
+      if (c.quotaKind !== "tokens") c.quotaKind = "credits";
+      c.quotaLimit += a.quota_limit || 0;
+      c.quotaRemaining += a.quota_remaining || 0;
+    } else if (a.quota_kind === "tokens" || a.quota_limit > 0) {
       c.quotaKind = "tokens";
       c.quotaLimit += a.quota_limit || 0;
       c.quotaRemaining += a.quota_remaining || 0;
     }
   }
-  if (accounts.length > 0 && accounts.every((a) => a.quota_kind === "none" || !a.quota_limit)) {
-    c.quotaKind = "none";
-  }
   return c;
 }
 
 function fmtPoolCredits(c: ProviderCounts): string {
+  if (c.quotaKind === "credits") {
+    if (c.quotaLimit <= 0) return "Credits not synced";
+    const rem = new Intl.NumberFormat().format(c.quotaRemaining);
+    const lim = new Intl.NumberFormat().format(c.quotaLimit);
+    return `${rem} / ${lim} cr`;
+  }
   if (c.quotaKind !== "tokens" || c.quotaLimit <= 0) return "RPM / no credits";
   const rem = new Intl.NumberFormat().format(c.quotaRemaining);
   const lim = new Intl.NumberFormat().format(c.quotaLimit);
@@ -68,7 +76,12 @@ function fmtPoolCredits(c: ProviderCounts): string {
 }
 
 function poolCreditPct(c: ProviderCounts): number | null {
-  if (c.quotaKind !== "tokens" || c.quotaLimit <= 0) return null;
+  if (
+    (c.quotaKind !== "tokens" && c.quotaKind !== "credits") ||
+    c.quotaLimit <= 0
+  ) {
+    return null;
+  }
   return Math.max(
     0,
     Math.min(100, Math.round((c.quotaRemaining / c.quotaLimit) * 100)),
@@ -84,16 +97,20 @@ function creditTone(pct: number): "ok" | "warn" | "crit" {
 function ProviderCreditBar({ counts }: { counts: ProviderCounts }) {
   const pct = poolCreditPct(counts);
   if (pct === null) {
+    const emptyLabel =
+      counts.quotaKind === "credits"
+        ? "Credits not synced"
+        : "No local token budget";
     return (
       <div className="provider-credit-bar provider-credit-bar-none">
-        <span className="health-meta mono muted">No local token budget</span>
+        <span className="health-meta mono muted">{emptyLabel}</span>
       </div>
     );
   }
   return (
     <div
       className="provider-credit-bar"
-      title={`Pool token budget ${fmtPoolCredits(counts)}`}
+      title={`Pool budget ${fmtPoolCredits(counts)}`}
     >
       <div
         className="health-track"
@@ -124,6 +141,7 @@ export function Accounts() {
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingProvider, setSavingProvider] = useState<string | null>(null);
+  const [warmupBusy, setWarmupBusy] = useState(false);
   const [addProvider, setAddProvider] = useState<ProviderId | null>(null);
 
   const load = useCallback(async () => {
@@ -178,6 +196,30 @@ export function Accounts() {
 
   const total = accounts.length;
 
+  async function onWarmupQoder() {
+    const n = byProvider.qoder.total - byProvider.qoder.inactive;
+    if (n <= 0) return;
+    setWarmupBusy(true);
+    setError(null);
+    try {
+      const res = await warmupQoderAccounts();
+      setMessage(
+        `Qoder warmup: ${res.ok} ok · ${res.failed} failed · ${res.cut} cut (of ${res.total})`,
+      );
+      await load();
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Qoder warmup failed",
+      );
+    } finally {
+      setWarmupBusy(false);
+    }
+  }
+
   async function onLoadBalanceChange(provider: string, value: string) {
     setSavingProvider(provider);
     setError(null);
@@ -213,13 +255,28 @@ export function Accounts() {
               type="button"
               className="btn btn-sm"
               onClick={() => void load()}
-              disabled={loading}
+              disabled={loading || warmupBusy}
             >
               {loading ? <span className="spinner inline-spinner" /> : null}
               Refresh
             </button>
-            <Link to="/import" className="btn btn-sm">
-              9Router backup
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={
+                loading ||
+                warmupBusy ||
+                byProvider.qoder.total - byProvider.qoder.inactive <= 0
+              }
+              title="Refresh auth + OpenAPI credits for all active Qoder accounts"
+              onClick={() => void onWarmupQoder()}
+            >
+              {warmupBusy
+                ? "Warming Qoder…"
+                : `Warmup Qoder (${Math.max(0, byProvider.qoder.total - byProvider.qoder.inactive)})`}
+            </button>
+<Link to="/settings" className="btn btn-sm">
+9Router backup
             </Link>
           </div>
         </div>
@@ -349,8 +406,8 @@ export function Accounts() {
             >
               + Add Qoder
             </button>
-            <Link to="/import" className="btn">
-              9Router backup
+<Link to="/settings" className="btn">
+9Router backup
             </Link>
           </div>
         </div>

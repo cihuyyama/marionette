@@ -44,7 +44,10 @@ OPENAI_API_KEY=${poolKey}`,
       "models": {
         "gcli/grok-build": { "name": "Grok Build" },
         "gcli/grok-4.5": { "name": "Grok 4.5" },
-        "qd/lite": { "name": "Qoder Lite" }
+        "qd/lite": { "name": "Qoder Lite" },
+        "qd/qmodel_preview": { "name": "Qwen3.8-Max-Preview" },
+        "qd/kmodel_latest": { "name": "Kimi-K3" },
+        "qd/gm51model1": { "name": "GLM-5.2" }
       }
     }
   }
@@ -55,7 +58,10 @@ api_key: ${poolKey}
 # example model ids:
 #   gcli/grok-build
 #   gcli/grok-4.5
-#   qd/lite`,
+#   qd/lite
+#   qd/qmodel_preview
+#   qd/kmodel_latest
+#   qd/gm51model1`,
     }),
     [base, poolKey],
   );

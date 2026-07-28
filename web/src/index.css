@@ -394,6 +394,45 @@ button {
   white-space: nowrap;
 }
 
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.plan-chip-compact {
+  padding: 0 6px;
+  font-size: 10.5px;
+}
+
+.plan-chip.plan-ok {
+  color: var(--thread);
+  background: var(--thread-soft);
+  border-color: rgba(196, 163, 90, 0.25);
+}
+
+.plan-chip.plan-warn {
+  color: #9bb8c7;
+  background: var(--fog-soft);
+  border-color: rgba(74, 107, 124, 0.35);
+}
+
+.plan-chip.plan-crit {
+  color: #d47a86;
+  background: var(--blood-soft);
+  border-color: rgba(139, 46, 58, 0.4);
+}
+
 /* ——— Status chips ——— */
 .chip {
   display: inline-flex;
@@ -1237,6 +1276,70 @@ table.data tr.row-inactive td {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--space-3);
   margin-bottom: var(--space-4);
+  transition: opacity 0.2s ease;
+}
+
+.activity-stats-loading {
+  opacity: 0.55;
+}
+
+.activity-range-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: linear-gradient(
+    135deg,
+    rgba(196, 163, 90, 0.06) 0%,
+    rgba(20, 18, 28, 0.9) 48%,
+    rgba(74, 107, 124, 0.08) 100%
+  );
+  border: 1px solid rgba(138, 132, 120, 0.14);
+}
+
+.activity-range-copy {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.activity-range-kicker {
+  margin: 0 0 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.activity-range-desc {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--parchment);
+  line-height: 1.35;
+}
+
+.activity-range-pills {
+  flex: 0 0 auto;
+}
+
+.activity-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.activity-section-head .section-title {
+  margin: 0;
+}
+
+.activity-section-meta {
+  font-size: 12px;
 }
 
 .section-title {
@@ -1389,4 +1492,239 @@ table.data tr.row-click {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+/* --- Farm job form --- */
+.farm-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.farm-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.farm-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.farm-control-title {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.farm-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.farm-num-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.farm-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.check:hover {
+  background: var(--surface-hover);
+  border-color: var(--border);
+}
+
+.check input[type="checkbox"] {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--thread);
+  width: 14px;
+  height: 14px;
+}
+
+.check:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.check:has(input:disabled):hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.check-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.check-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--parchment);
+  line-height: 1.3;
+}
+
+.check-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.field-inline {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: 13px;
+  color: var(--parchment);
+  line-height: 1.4;
+}
+
+.field-inline input[type="checkbox"] {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--thread);
+  width: 14px;
+  height: 14px;
+}
+
+.settings-section {
+  margin-top: var(--space-5);
+}
+
+.settings-section-header {
+  margin-bottom: var(--space-4);
+}
+
+.settings-section-header h2 {
+  margin: 0 0 var(--space-1);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 1.25rem;
+  color: var(--parchment);
+}
+
+.settings-section-header .subtitle {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .farm-num-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .farm-num-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .farm-check-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Automation hub --- */
+.modal-wide {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.method-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+
+.method-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  text-align: left;
+  padding: var(--space-4);
+  background: var(--void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--parchment);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.method-card:hover:not(:disabled) {
+  border-color: var(--thread);
+  box-shadow: 0 0 0 1px rgba(196, 163, 90, 0.25);
+}
+
+.method-card:disabled,
+.method-card-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.method-card-head {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.method-card-title {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.method-card-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  flex: 1;
+}
+
+.breadcrumb {
+  font-size: 12px;
+  margin: 0 0 var(--space-2);
+}
+
+.breadcrumb a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.breadcrumb a:hover {
+  color: var(--thread);
+}
+
+.empty-state {
+  padding: var(--space-5);
 }

@@ -4,11 +4,19 @@ import {
   getUsage,
   listRequests,
   type RequestLog,
+  type UsageRange,
   type UsageSummary,
 } from "../lib/api";
 import { labelProvider } from "../lib/providers";
 
 const PER_PAGE = 25;
+
+const RANGE_PILLS: { id: UsageRange; label: string; hint: string }[] = [
+  { id: "day", label: "24h", hint: "Rolling last 24 hours" },
+  { id: "week", label: "7d", hint: "Rolling last 7 days" },
+  { id: "month", label: "30d", hint: "Rolling last 30 days" },
+  { id: "all", label: "All", hint: "Entire request log history" },
+];
 
 export function ActivityPage() {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -17,6 +25,7 @@ export function ActivityPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("");
+  const [range, setRange] = useState<UsageRange>("week");
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState<RequestLog | null>(null);
 
@@ -25,10 +34,11 @@ export function ActivityPage() {
     setError(null);
     try {
       const [u, r] = await Promise.all([
-        getUsage(),
+        getUsage({ range }),
         listRequests({
           provider: provider || undefined,
           limit: 200,
+          range,
         }),
       ]);
       setUsage(u);
@@ -46,7 +56,7 @@ export function ActivityPage() {
     } finally {
       setLoading(false);
     }
-  }, [provider]);
+  }, [provider, range]);
 
   useEffect(() => {
     void load();
@@ -54,7 +64,7 @@ export function ActivityPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [search, provider]);
+  }, [search, provider, range]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -77,13 +87,21 @@ export function ActivityPage() {
     pageSafe * PER_PAGE,
   );
 
+  const rangeMeta = RANGE_PILLS.find((p) => p.id === range) ?? RANGE_PILLS[1];
+  const successRate =
+    usage && usage.requests > 0
+      ? Math.round((usage.success / usage.requests) * 1000) / 10
+      : null;
+
   return (
     <div>
       <header className="page-header">
         <div className="page-header-row">
           <div>
             <h1>Activity</h1>
-            <p className="subtitle">Usage summary · recent requests (in / out)</p>
+            <p className="subtitle">
+              Usage summary · recent requests (in / out)
+            </p>
           </div>
           <button
             type="button"
@@ -103,18 +121,67 @@ export function ActivityPage() {
         </div>
       )}
 
-      <div className="activity-stats">
+      <div className="activity-range-bar">
+        <div className="activity-range-copy">
+          <p className="activity-range-kicker">Window</p>
+          <p className="activity-range-desc" title={rangeMeta.hint}>
+            {rangeLabelLong(range)}
+            {usage?.since ? (
+              <span className="muted">
+                {" "}
+                · since {formatSince(usage.since)}
+              </span>
+            ) : null}
+            {successRate != null ? (
+              <span className="muted"> · {successRate}% ok</span>
+            ) : null}
+          </p>
+        </div>
+        <div
+          className="status-pills activity-range-pills"
+          role="tablist"
+          aria-label="Usage time range"
+        >
+          {RANGE_PILLS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="tab"
+              aria-selected={range === p.id}
+              title={p.hint}
+              className={`status-pill${range === p.id ? " active" : ""}`}
+              onClick={() => setRange(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        className={`activity-stats${loading ? " activity-stats-loading" : ""}`}
+        aria-busy={loading}
+      >
         <Stat label="Requests" value={usage?.requests} />
         <Stat label="Success" value={usage?.success} tone="thread" />
         <Stat label="Errors" value={usage?.errors} tone="blood" />
         <Stat label="In (prompt)" value={usage?.prompt_tokens} tone="fog" />
-        <Stat label="Out (completion)" value={usage?.completion_tokens} tone="seal" />
+        <Stat
+          label="Out (completion)"
+          value={usage?.completion_tokens}
+          tone="seal"
+        />
         <Stat label="Total tokens" value={usage?.total_tokens} />
       </div>
 
       {usage && usage.by_model.length > 0 && (
         <section className="panel" style={{ marginBottom: "var(--space-4)" }}>
-          <h2 className="section-title">By model</h2>
+          <div className="activity-section-head">
+            <h2 className="section-title">By model</h2>
+            <span className="muted activity-section-meta">
+              Top models in {rangeLabelShort(range)}
+            </span>
+          </div>
           <div className="table-wrap" style={{ border: "none" }}>
             <table className="data">
               <thead>
@@ -134,7 +201,9 @@ export function ActivityPage() {
                     <td className="muted">{labelProvider(m.provider)}</td>
                     <td className="mono">{fmt(m.requests)}</td>
                     <td className="mono token-in">{fmt(m.prompt_tokens)}</td>
-                    <td className="mono token-out">{fmt(m.completion_tokens)}</td>
+                    <td className="mono token-out">
+                      {fmt(m.completion_tokens)}
+                    </td>
                     <td className="mono">{fmt(m.total_tokens)}</td>
                   </tr>
                 ))}
@@ -170,7 +239,12 @@ export function ActivityPage() {
         </div>
       </div>
 
-      <h2 className="section-title">Recent requests</h2>
+      <div className="activity-section-head">
+        <h2 className="section-title">Recent requests</h2>
+        <span className="muted activity-section-meta">
+          Same window as summary · max 200
+        </span>
+      </div>
 
       {filtered.length === 0 && !loading ? (
         <div className="panel empty">
@@ -355,6 +429,47 @@ function Stat({
       <p className="value">{value === undefined ? "—" : fmt(value)}</p>
     </div>
   );
+}
+
+function rangeLabelShort(r: UsageRange): string {
+  switch (r) {
+    case "day":
+      return "24h";
+    case "week":
+      return "7d";
+    case "month":
+      return "30d";
+    default:
+      return "all time";
+  }
+}
+
+function rangeLabelLong(r: UsageRange): string {
+  switch (r) {
+    case "day":
+      return "Last 24 hours";
+    case "week":
+      return "Last 7 days";
+    case "month":
+      return "Last 30 days";
+    default:
+      return "All recorded traffic";
+  }
+}
+
+function formatSince(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
 }
 
 function fmt(n: number | null | undefined): string {

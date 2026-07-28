@@ -52,7 +52,10 @@ export function ModelsPage() {
       if (owner !== "all" && m.owned_by !== owner) return false;
       if (!q) return true;
       return (
-        m.id.toLowerCase().includes(q) || m.owned_by.toLowerCase().includes(q)
+        m.id.toLowerCase().includes(q) ||
+        m.owned_by.toLowerCase().includes(q) ||
+        (m.display_name ?? "").toLowerCase().includes(q) ||
+        (m.credit_usage_rate ?? "").toLowerCase().includes(q)
       );
     });
   }, [models, search, owner]);
@@ -73,7 +76,7 @@ export function ModelsPage() {
           <div>
             <h1>Models</h1>
             <p className="subtitle">
-              {models.length} models · OpenAI-compatible IDs for clients
+              {models.length} models · display names · Qoder credit rates
             </p>
           </div>
           <button
@@ -106,7 +109,7 @@ export function ModelsPage() {
           <input
             type="search"
             className="input"
-            placeholder="Search model id…"
+            placeholder="Search id, name, rate…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search models"
@@ -138,7 +141,9 @@ export function ModelsPage() {
           <table className="data">
             <thead>
               <tr>
-                <th>Model</th>
+                <th>Model id</th>
+                <th>Display name</th>
+                <th>Credit rate</th>
                 <th>Provider</th>
                 <th></th>
               </tr>
@@ -147,6 +152,10 @@ export function ModelsPage() {
               {filtered.map((m) => (
                 <tr key={m.id}>
                   <td className="mono">{m.id}</td>
+                  <td>{m.display_name || "—"}</td>
+                  <td className="mono muted">
+                    {m.credit_usage_rate || "—"}
+                  </td>
                   <td className="muted">{labelProvider(m.owned_by)}</td>
                   <td>
                     <button

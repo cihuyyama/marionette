@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
+  claimProTrial,
   deleteAccount,
   listAccounts,
   patchAccount,
   refreshAccount,
+  warmupQoderAccounts,
   type Account,
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
+import { BulkInjectModal } from "../components/BulkInjectModal";
+import { InjectModal } from "../components/InjectModal";
 import { StatusChip } from "../components/StatusChip";
 import { isProviderId, labelProvider, type ProviderId } from "../lib/providers";
 import { statusTooltip } from "../lib/status";
@@ -47,6 +51,11 @@ export function AccountList() {
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [addOpen, setAddOpen] = useState(false);
+  const [injectTarget, setInjectTarget] = useState<{
+    id: string;
+    email: string | null;
+  } | null>(null);
+  const [bulkInjectOpen, setBulkInjectOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!provider) return;
@@ -209,6 +218,9 @@ export function AccountList() {
 
   const activeCount = accounts.filter((a) => a.is_active).length;
   const inactiveCount = accounts.length - activeCount;
+  const needInjectCount = accounts.filter(
+    (a) => a.is_active && (!a.quota_limit || (a.quota_remaining ?? 0) <= 0),
+  ).length;
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -266,6 +278,38 @@ export function AccountList() {
           : e instanceof Error
             ? e.message
             : "Bulk delete failed",
+      );
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleWarmupQoder() {
+    if (providerId !== "qoder") return;
+    if (accounts.length === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      const res = await warmupQoderAccounts();
+      setMessage(
+        `Warmup: ${res.ok} ok · ${res.failed} failed · ${res.cut} cut (of ${res.total})`,
+      );
+      if (res.failed > 0 || res.cut > 0) {
+        const sample = res.results
+          .filter((r) => !r.ok)
+          .slice(0, 3)
+          .map((r) => r.error || "error")
+          .join("; ");
+        if (sample) setError(`Warmup issues: ${sample}`);
+      }
+      await load();
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Warmup failed",
       );
     } finally {
       setBulkBusy(false);
@@ -330,6 +374,28 @@ export function AccountList() {
               {loading ? <span className="spinner inline-spinner" /> : null}
               Refresh
             </button>
+            {providerId === "qoder" && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  disabled={bulkBusy || needInjectCount === 0}
+                  title="One job: dudul inject all active accounts with no credit / not synced"
+                  onClick={() => setBulkInjectOpen(true)}
+                >
+                  Inject dudul ({needInjectCount})
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={bulkBusy || activeCount === 0}
+                  title="Refresh auth + OpenAPI credits for all active Qoder accounts"
+                  onClick={() => void handleWarmupQoder()}
+                >
+                  {bulkBusy ? "Warming…" : `Warmup credits (${activeCount})`}
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="btn btn-sm"
@@ -438,8 +504,8 @@ export function AccountList() {
               >
                 + Add
               </button>
-              <Link to="/import" className="btn">
-                9Router backup
+<Link to="/settings" className="btn">
+9Router backup
               </Link>
             </div>
           )}
@@ -616,6 +682,53 @@ export function AccountList() {
                         >
                           Auth
                         </button>
+                        {provider === "qoder" && (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              disabled={busy}
+                              title="Self claim Pro Trial (openapi /api/v1/user/trial, qplot-style)"
+                              onClick={() =>
+                                void withBusy(
+                                  a.id,
+                                  async () => {
+                                    const res = await claimProTrial(a.id);
+                                    if (!res.ok) {
+                                      throw new ApiError(
+                                        res.message ||
+                                          `Claim failed (HTTP ${res.http_status})`,
+                                        res.http_status || 400,
+                                        res,
+                                      );
+                                    }
+                                    setMessage(
+                                      res.message ||
+                                        `Trial claimed (HTTP ${res.http_status})`,
+                                    );
+                                  },
+                                  undefined,
+                                )
+                              }
+                            >
+                              Claim
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              disabled={busy}
+                              title="Dudul inject — activate Pro Trial for this PAT"
+                              onClick={() =>
+                                setInjectTarget({
+                                  id: a.id,
+                                  email: a.email,
+                                })
+                              }
+                            >
+                              Inject
+                            </button>
+                          </>
+                        )}
                         {a.cooldown_until && (
                           <button
                             type="button"
@@ -746,6 +859,14 @@ export function AccountList() {
               <dd title={fmtCreditTitle(detail)}>
                 <AccountHealth a={detail} />
               </dd>
+              {detail.provider === "qoder" && readPlan(detail) && (
+                <>
+                  <dt>Plan</dt>
+                  <dd title={fmtPlanTitle(detail)}>
+                    <PlanLabel a={detail} />
+                  </dd>
+                </>
+              )}
               <dt>Cooldown</dt>
               <dd className="mono">{detail.cooldown_until ?? "—"}</dd>
               <dt>Last used</dt>
@@ -818,6 +939,54 @@ export function AccountList() {
               >
                 Refresh auth
               </button>
+              {provider === "qoder" && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busyId === detail.id || bulkBusy}
+                  title="Self claim Pro Trial (openapi user/trial)"
+                  onClick={() =>
+                    void withBusy(
+                      detail.id,
+                      async () => {
+                        const res = await claimProTrial(detail.id);
+                        if (res.account) setDetail(res.account);
+                        if (!res.ok) {
+                          throw new ApiError(
+                            res.message ||
+                              `Claim failed (HTTP ${res.http_status})`,
+                            res.http_status || 400,
+                            res,
+                          );
+                        }
+                        setMessage(
+                          res.message ||
+                            `Trial claimed (HTTP ${res.http_status})`,
+                        );
+                      },
+                      undefined,
+                    )
+                  }
+                >
+                  Claim trial
+                </button>
+              )}
+              {provider === "qoder" && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  disabled={busyId === detail.id || bulkBusy}
+                  title="Dudul inject — activate Pro Trial"
+                  onClick={() =>
+                    setInjectTarget({
+                      id: detail.id,
+                      email: detail.email,
+                    })
+                  }
+                >
+                  Inject dudul
+                </button>
+              )}
               {detail.cooldown_until && (
                 <button
                   type="button"
@@ -856,20 +1025,140 @@ export function AccountList() {
           }}
         />
       )}
+
+      {injectTarget && (
+        <InjectModal
+          open
+          accountId={injectTarget.id}
+          email={injectTarget.email}
+          onClose={() => setInjectTarget(null)}
+          onStarted={(jobId) => {
+            setInjectTarget(null);
+            setMessage(`Inject job ${jobId.slice(0, 8)}… started`);
+            navigate(`/accounts/qoder/inject/${jobId}`);
+          }}
+        />
+      )}
+
+      {providerId === "qoder" && (
+        <BulkInjectModal
+          open={bulkInjectOpen}
+          needCount={needInjectCount}
+          activeCount={activeCount}
+          onClose={() => setBulkInjectOpen(false)}
+          onStarted={(jobId, summary) => {
+            setBulkInjectOpen(false);
+            setMessage(summary);
+            navigate(`/accounts/qoder/inject/${jobId}`);
+          }}
+        />
+      )}
     </div>
   );
 }
 
 function fmtAccountCredit(a: Account): string {
+  if (a.quota_kind === "credits") {
+    if (!a.quota_limit) return "Not synced";
+    const rem = new Intl.NumberFormat().format(a.quota_remaining ?? 0);
+    const lim = new Intl.NumberFormat().format(a.quota_limit);
+    return `${rem}/${lim} cr`;
+  }
   if (a.quota_kind === "none" || !a.quota_limit) return "RPM";
   const rem = new Intl.NumberFormat().format(a.quota_remaining ?? 0);
   const lim = new Intl.NumberFormat().format(a.quota_limit);
   return `${rem}/${lim}`;
 }
 
+type PlanInfo = {
+  name: string;
+  endMs: number | null;
+  endAt: string | null;
+  leftLabel: string | null;
+  expired: boolean;
+  isPaid: boolean;
+};
+
+function readPlan(a: Account): PlanInfo | null {
+  const raw = a.data?.plan_tier_name;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const endMsRaw = a.data?.plan_end_ms;
+  let endMs: number | null = null;
+  if (typeof endMsRaw === "number" && endMsRaw > 0) endMs = endMsRaw;
+  else if (typeof endMsRaw === "string" && Number(endMsRaw) > 0) {
+    endMs = Number(endMsRaw);
+  }
+  const endAtRaw = a.data?.plan_end_at;
+  const endAt =
+    typeof endAtRaw === "string" && endAtRaw ? endAtRaw : null;
+  let leftLabel: string | null = null;
+  let expired = false;
+  if (endMs != null && endMs > 0) {
+    const leftSec = (endMs - Date.now()) / 1000;
+    if (leftSec <= 0) {
+      expired = true;
+      leftLabel = "ended";
+    } else {
+      leftLabel = formatDuration(leftSec);
+    }
+  }
+  return {
+    name: raw.trim(),
+    endMs,
+    endAt,
+    leftLabel,
+    expired,
+    isPaid: a.data?.plan_is_paid === true,
+  };
+}
+
+function fmtPlanTitle(a: Account): string {
+  const p = readPlan(a);
+  if (!p) return "Plan not synced — refresh account";
+  const bits = [p.name];
+  if (p.isPaid) bits.push("paid");
+  if (p.endMs == null) bits.push("no end date (Free-style)");
+  else if (p.expired) bits.push(`ended ${p.endAt ?? ""}`.trim());
+  else bits.push(`ends in ~${p.leftLabel} (${p.endAt ?? p.endMs})`);
+  return bits.join(" · ");
+}
+
+function PlanLabel({ a, compact = false }: { a: Account; compact?: boolean }) {
+  const p = readPlan(a);
+  if (!p) return null;
+  const tone =
+    p.name.toLowerCase().includes("free") || p.expired
+      ? "crit"
+      : p.name.toLowerCase().includes("trial")
+        ? "warn"
+        : "ok";
+  return (
+    <span
+      className={`plan-chip plan-${tone}${compact ? " plan-chip-compact" : ""}`}
+      title={fmtPlanTitle(a)}
+    >
+      {p.name}
+      {p.leftLabel
+        ? p.expired
+          ? " · ended"
+          : ` · ${p.leftLabel}`
+        : ""}
+    </span>
+  );
+}
+
 function fmtCreditTitle(a: Account): string {
+  if (a.quota_kind === "credits") {
+    if (!a.quota_limit) {
+      return "Qoder credits not synced yet — refresh account or run a chat";
+    }
+    const parts = [`Qoder credits ${fmtAccountCredit(a)} (OpenAPI)`];
+    const plan = readPlan(a);
+    if (plan) parts.push(fmtPlanTitle(a));
+    return parts.join(" · ");
+  }
   if (a.quota_kind === "none" || !a.quota_limit) {
-    return "Qoder uses upstream RPM — no local token credits";
+    return "No local quota budget";
   }
   const parts = [
     `Quota ${fmtAccountCredit(a)} (local budget, default 1M for grok-cli)`,
@@ -912,7 +1201,12 @@ function readTtl(a: Account): TtlInfo | null {
 }
 
 function quotaPct(a: Account): number | null {
-  if (a.quota_kind === "none" || !a.quota_limit || a.quota_limit <= 0) {
+  if (
+    a.quota_kind === "none" ||
+    (a.quota_kind !== "tokens" && a.quota_kind !== "credits") ||
+    !a.quota_limit ||
+    a.quota_limit <= 0
+  ) {
     return null;
   }
   return Math.max(
@@ -952,8 +1246,9 @@ function AccountHealth({
 }) {
   const qPct = quotaPct(a);
   const ttl = readTtl(a);
+  const plan = a.provider === "qoder" ? readPlan(a) : null;
 
-  if (qPct === null && !ttl) {
+  if (qPct === null && !ttl && !plan) {
     return (
       <span className="mono muted nowrap">{fmtAccountCredit(a)}</span>
     );
@@ -964,6 +1259,19 @@ function AccountHealth({
       className={`health-stack${compact ? " health-stack-compact" : ""}`}
       title={fmtCreditTitle(a)}
     >
+      {plan && (
+        <div
+          className="health-row"
+          style={
+            compact
+              ? { gridTemplateColumns: "1fr" }
+              : { gridTemplateColumns: "auto 1fr" }
+          }
+        >
+          {!compact && <span className="health-tag">Plan</span>}
+          <PlanLabel a={a} compact={compact} />
+        </div>
+      )}
       {qPct !== null && (
         <div className="health-row">
           {!compact && <span className="health-tag">Quota</span>}
