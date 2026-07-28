@@ -92,8 +92,8 @@ cd web && npm run build
 
 | Id examples | Provider |
 |-------------|----------|
-| `gcli/grok-4.5`, `gcli/grok-build`, `gcli/grok-code-fast-1`, … | grok-cli |
-| `qd/auto`, `qd/ultimate`, `qd/lite`, `qd/qmodel_latest`, `qd/kmodel1`, … | qoder |
+| `gcli/grok-4.5`, `gcli/grok-build`, `gcli/grok-code-fast-1`, … | grok-cli (max input 256K) |
+| `qd/auto`, `qd/ultimate`, `qd/lite`, `qd/qmodel_latest`, `qd/kmodel1`, … | qoder (price · max input · R/VL on **Models**) |
 
 Bare names that start with / contain `grok` → grok-cli; `qoder` / `qd/` → qoder. Full list: `GET /v1/models` or dashboard **Models**.
 
