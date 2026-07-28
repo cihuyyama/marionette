@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 from typing import Any
 
@@ -19,7 +20,7 @@ async def dismiss_cookie_banner(page: Any) -> None:
         try:
             btn = page.locator(sel).first
             if await btn.count() > 0 and await btn.is_visible():
-                await btn.click(timeout=2000)
+                await _hard_click_locator(page, btn)
                 await asyncio.sleep(0.4)
                 return
         except Exception:
@@ -28,6 +29,73 @@ async def dismiss_cookie_banner(page: Any) -> None:
         await click_text_button(page, ["Accept All Cookies", "Reject All", "Allow All"])
     except Exception:
         pass
+
+
+async def _hard_click_locator(page: Any, loc: Any, *, double: bool = False) -> bool:
+    try:
+        target = loc.first if hasattr(loc, "first") else loc
+        try:
+            if await target.count() == 0:
+                return False
+        except Exception:
+            pass
+        try:
+            await target.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
+        box = None
+        try:
+            box = await target.bounding_box()
+        except Exception:
+            box = None
+        try:
+            await target.click(timeout=4000, delay=80)
+            if double:
+                await asyncio.sleep(0.15)
+                await target.click(timeout=3000, delay=60)
+            return True
+        except Exception:
+            pass
+        if box:
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            try:
+                await page.mouse.move(x - random.uniform(12, 36), y - random.uniform(8, 22), steps=6)
+                await asyncio.sleep(random.uniform(0.05, 0.12))
+                await page.mouse.move(x, y, steps=8)
+                await asyncio.sleep(random.uniform(0.06, 0.14))
+                await page.mouse.down()
+                await asyncio.sleep(random.uniform(0.04, 0.08))
+                await page.mouse.up()
+                if double:
+                    await asyncio.sleep(0.12)
+                    await page.mouse.down()
+                    await asyncio.sleep(0.04)
+                    await page.mouse.up()
+                return True
+            except Exception:
+                pass
+        try:
+            await target.click(timeout=2000, force=True)
+            return True
+        except Exception:
+            pass
+        try:
+            await target.evaluate(
+                """(el) => {
+                    el.focus();
+                    for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {
+                        el.dispatchEvent(new MouseEvent(type, {
+                            bubbles: true, cancelable: true, view: window
+                        }));
+                    }
+                }"""
+            )
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
 
 
 async def click_text_button(
@@ -43,8 +111,8 @@ async def click_text_button(
                 txt = (await loc.first.inner_text()).strip()
                 if exclude and any(e.lower() in txt.lower() for e in exclude):
                     continue
-                await loc.first.click()
-                return txt
+                if await _hard_click_locator(page, loc):
+                    return txt
         except Exception:
             pass
         try:
@@ -53,14 +121,14 @@ async def click_text_button(
                 txt = (await loc.first.inner_text()).strip()
                 if exclude and any(e.lower() in txt.lower() for e in exclude):
                     continue
-                await loc.first.click()
-                return txt
+                if await _hard_click_locator(page, loc):
+                    return txt
         except Exception:
             pass
 
     exclude_re = re.compile("|".join(re.escape(e) for e in exclude), re.I) if exclude else None
     try:
-        return await page.evaluate(
+        handle = await page.evaluate(
             """({keywords, exclude}) => {
                 const den = exclude ? new RegExp(exclude, 'i') : null;
                 const btns = [...document.querySelectorAll(
@@ -80,8 +148,7 @@ async def click_text_button(
                         const k = kw.toLowerCase();
                         const hit = preferExact ? (low === k) : (low === k || low.includes(k));
                         if (hit) {
-                            b.click();
-                            return txt;
+                            return { txt, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
                         }
                     }
                   }
@@ -90,6 +157,16 @@ async def click_text_button(
             }""",
             {"keywords": keywords, "exclude": exclude_re.pattern if exclude_re else ""},
         )
+        if handle and isinstance(handle, dict) and "x" in handle:
+            x = float(handle["x"])
+            y = float(handle["y"])
+            await page.mouse.move(x - 20, y - 12, steps=6)
+            await asyncio.sleep(random.uniform(0.05, 0.12))
+            await page.mouse.move(x, y, steps=8)
+            await asyncio.sleep(random.uniform(0.05, 0.12))
+            await page.mouse.click(x, y)
+            return str(handle.get("txt") or "")
+        return None
     except Exception:
         return None
 
@@ -208,21 +285,199 @@ async def turnstile_visible(page: Any) -> bool:
         return False
 
 
+async def try_click_turnstile(page: Any, attempt: int = 0) -> bool:
+    try:
+        for sel in (
+            'text=Verify you are human',
+            'label:has-text("Verify you are human")',
+            '[aria-label*="Verify you are human" i]',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    box = await loc.bounding_box(timeout=2000)
+                    if box:
+                        x = box["x"] + min(18, box["width"] * 0.15)
+                        y = box["y"] + box["height"] / 2
+                        await page.mouse.move(x - 40, y - 20, steps=8)
+                        await asyncio.sleep(random.uniform(0.15, 0.4))
+                        jx = random.uniform(-3, 3)
+                        jy = random.uniform(-2, 2)
+                        await page.mouse.move(x + jx, y + jy, steps=10)
+                        await asyncio.sleep(random.uniform(0.12, 0.35))
+                        await page.mouse.move(x, y, steps=4)
+                        await asyncio.sleep(random.uniform(0.15, 0.4))
+                        await page.mouse.click(x, y, delay=random.randint(40, 90))
+                        return True
+            except Exception:
+                continue
+
+        for sel in (
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="turnstile"]',
+            "[data-sitekey]",
+            ".cf-turnstile",
+            'div:has(iframe[src*="challenges.cloudflare"])',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                box = await loc.bounding_box(timeout=2000)
+                if not box:
+                    continue
+                x = box["x"] + min(28, max(12, box["width"] * 0.12))
+                y = box["y"] + box["height"] / 2
+                await page.mouse.move(x - 50, y - 25, steps=8)
+                await asyncio.sleep(random.uniform(0.15, 0.4))
+                await page.mouse.move(
+                    x + random.uniform(-2, 2),
+                    y + random.uniform(-2, 2),
+                    steps=12,
+                )
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await page.mouse.move(x, y, steps=3)
+                await asyncio.sleep(random.uniform(0.1, 0.25))
+                await page.mouse.click(x, y, delay=random.randint(50, 100))
+                return True
+            except Exception:
+                continue
+
+        for f in page.frames:
+            url = f.url or ""
+            if "challenges.cloudflare.com" not in url and "turnstile" not in url:
+                continue
+            for sel in (
+                'input[type="checkbox"]',
+                "label.cb-lb input",
+                'label input[type="checkbox"]',
+                '[role="checkbox"]',
+                "body",
+            ):
+                try:
+                    loc = f.locator(sel).first
+                    if await loc.count() == 0:
+                        continue
+                    box = await loc.bounding_box(timeout=2000)
+                    if not box:
+                        continue
+                    tx = box["x"] + min(20, box["width"] * 0.2)
+                    ty = box["y"] + box["height"] / 2
+                    await page.mouse.move(tx - 30, ty - 15, steps=8)
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                    await page.mouse.move(tx, ty, steps=12)
+                    await asyncio.sleep(random.uniform(0.15, 0.4))
+                    await page.mouse.click(tx, ty, delay=random.randint(40, 90))
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        return False
+    return False
+
+
+async def _turnstile_verification_failed(page: Any) -> bool:
+    try:
+        if await page.locator("text=/Verification failed/i").count() > 0:
+            return True
+        if await page.locator("text=/Troubleshoot/i").count() > 0:
+            body = (await page.inner_text("body"))[:2500]
+            if re.search(r"Verification failed|CLOUDFLARE", body, re.I):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def _soft_turnstile_remount(page: Any) -> None:
+    try:
+        if await page.locator("text=/Verification failed/i").count() > 0:
+            for sel in (
+                "text=Troubleshoot",
+                'a:has-text("Troubleshoot")',
+                "text=/try again/i",
+            ):
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        await _hard_click_locator(page, loc)
+                        await asyncio.sleep(1.2)
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        await page.evaluate(
+            """() => {
+                try {
+                    if (window.turnstile && typeof window.turnstile.reset === 'function') {
+                        window.turnstile.reset();
+                    }
+                } catch (e) {}
+            }"""
+        )
+    except Exception:
+        pass
+    await asyncio.sleep(random.uniform(0.6, 1.2))
+
+
 async def wait_turnstile_passive(page: Any, *, max_wait: float = 12.0) -> bool:
-    """
-    Thin Turnstile wait — Camoufox humanize often solves it passively.
-    Full vision/click solvers from the monolit kit are NOT ported (TODO if needed).
-    """
+    return await wait_turnstile_active(page, max_wait=max_wait, prog=None, label="")
+
+
+async def wait_turnstile_active(
+    page: Any,
+    *,
+    max_wait: float = 22.0,
+    prog: Progress | None = None,
+    label: str = "",
+) -> bool:
     deadline = asyncio.get_event_loop().time() + max_wait
+    clicks = 0
+    max_clicks = 6
+    remounts = 0
+
     while asyncio.get_event_loop().time() < deadline:
         if await turnstile_token_len(page) > 20:
             return True
-        if not await turnstile_visible(page):
-            # No widget — ok to proceed
-            if await page.locator("text=Verify you are human").count() == 0:
+        visible = await turnstile_visible(page)
+        if not visible and await page.locator("text=Verify you are human").count() == 0:
+            return True
+
+        if await _turnstile_verification_failed(page) and remounts < 3:
+            if prog:
+                prog.log(
+                    f"turnstile verification failed — remount {remounts + 1}",
+                    "WAIT",
+                    email=label or None,
+                    step="login",
+                )
+            await _soft_turnstile_remount(page)
+            remounts += 1
+            continue
+
+        if visible and clicks < max_clicks:
+            if prog and clicks == 0:
+                prog.log("turnstile mouse click", "WAIT", email=label or None, step="login")
+            if clicks == 0:
+                await asyncio.sleep(random.uniform(0.8, 1.6))
+            clicked = await try_click_turnstile(page, clicks)
+            clicks += 1
+            if clicked:
+                await asyncio.sleep(random.uniform(1.0, 2.2))
+            else:
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+            if await turnstile_token_len(page) > 20:
                 return True
+            continue
+
         await asyncio.sleep(0.6)
-    return await turnstile_token_len(page) > 20 or not await turnstile_visible(page)
+
+    tok = await turnstile_token_len(page)
+    if tok > 20:
+        return True
+    return not await turnstile_visible(page)
 
 
 async def click_login_with_email(page: Any) -> bool:
@@ -241,10 +496,10 @@ async def click_login_with_email(page: Any) -> bool:
     if clicked:
         return True
     try:
-        await page.get_by_role(
+        loc = page.get_by_role(
             "button", name=re.compile(r"(log\s*in|sign\s*in)\s+with\s+email", re.I)
-        ).click(timeout=4000)
-        return True
+        )
+        return await _hard_click_locator(page, loc)
     except Exception:
         return False
 
@@ -257,10 +512,9 @@ async def drive_email_password_login(
     label: str,
 ) -> bool:
     """
-    Drive accounts.x.ai email login form (Next → password → Turnstile wait → Login).
+    Drive accounts.x.ai email login form (Next → password → Turnstile → Login).
 
-    Thin port of kit drive_email_password_login — no vision Turnstile solver.
-    Always re-fill password after CF may remount the form.
+    Active Turnstile mouse path + hard Login click. Always re-fill password after CF remount.
     """
     await dismiss_cookie_banner(page)
     await recover_page_load_error(page)
@@ -270,7 +524,6 @@ async def drive_email_password_login(
             await click_login_with_email(page)
             await asyncio.sleep(1.0)
 
-    # Email step
     if await page.locator('input[type="email"], input[name="email"]').count() > 0:
         await fill_input(
             page,
@@ -280,7 +533,9 @@ async def drive_email_password_login(
         await asyncio.sleep(0.3)
         if await page.locator('input[type="password"]').count() == 0:
             try:
-                await page.get_by_role("button", name=re.compile(r"^next$", re.I)).click(timeout=4000)
+                loc = page.get_by_role("button", name=re.compile(r"^next$", re.I))
+                if not await _hard_click_locator(page, loc):
+                    await click_text_button(page, ["Next", "Continue"], exclude=["Google", "Apple"])
             except Exception:
                 await click_text_button(page, ["Next", "Continue"], exclude=["Google", "Apple"])
             for _ in range(20):
@@ -312,8 +567,22 @@ async def drive_email_password_login(
             or await page.locator("text=Verify you are human").count() > 0
         )
         if needs_ts:
-            prog.log(f"waiting turnstile (round {round_i + 1})", "WAIT", email=label, step="login")
-            await wait_turnstile_passive(page, max_wait=18.0)
+            prog.log(
+                f"solving turnstile (round {round_i + 1})",
+                "WAIT",
+                email=label,
+                step="login",
+            )
+            ok_ts = await wait_turnstile_active(
+                page, max_wait=22.0, prog=prog, label=label
+            )
+            if not ok_ts and await turnstile_token_len(page) <= 20:
+                prog.log(
+                    f"turnstile still unsolved (round {round_i + 1})",
+                    "WAIT",
+                    email=label,
+                    step="login",
+                )
 
         if not await _ensure_password_filled(page, password):
             prog.log(f"password empty after turnstile (round {round_i + 1})", "WAIT", email=label)
@@ -322,19 +591,32 @@ async def drive_email_password_login(
 
         pw_now = await _password_field_value(page)
         tok_now = await turnstile_token_len(page)
+        still_needs = (
+            await turnstile_visible(page)
+            or await page.locator("text=Verify you are human").count() > 0
+        )
         if not pw_now:
             continue
-        if tok_now <= 20 and needs_ts:
-            prog.log(f"login: waiting turnstile token (round {round_i + 1})", "WAIT", email=label)
-            await asyncio.sleep(1.0)
+        if tok_now <= 20 and still_needs:
+            prog.log(
+                f"login: turnstile token missing — click again (round {round_i + 1})",
+                "WAIT",
+                email=label,
+            )
+            await try_click_turnstile(page, round_i)
+            await asyncio.sleep(1.2)
             continue
 
         prog.log(f"login submit round {round_i + 1}", "DBG", email=label)
+        submitted = False
         try:
-            await page.get_by_role(
+            loc = page.get_by_role(
                 "button", name=re.compile(r"^(login|log in|sign in)$", re.I)
-            ).click(timeout=4000)
+            )
+            submitted = await _hard_click_locator(page, loc)
         except Exception:
+            submitted = False
+        if not submitted:
             await click_text_button(page, ["Login", "Log in", "Sign in", "Continue"])
         await asyncio.sleep(2.5)
 
