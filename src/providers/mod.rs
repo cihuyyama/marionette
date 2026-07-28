@@ -58,6 +58,10 @@ pub trait Provider: Send + Sync {
     async fn force_refresh(&self, account: &mut Account) -> Result<(), ProviderError> {
         self.ensure_fresh_auth(account).await
     }
+
+    async fn sync_quota(&self, _account: &mut Account) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 pub fn classify_http_status(status: u16, body: &str) -> ProviderError {

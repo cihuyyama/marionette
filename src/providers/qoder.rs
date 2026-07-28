@@ -21,6 +21,9 @@ const APPCODE: &str = "cosy";
 const SIG_SECRET: &str = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw==";
 const JOB_TOKEN_URL: &str = "https://center.qoder.sh/algo/api/v3/user/jobToken?Encode=1";
 const CHAT_URL: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+const QUOTA_USAGE_URL: &str = "https://openapi.qoder.sh/api/v2/quota/usage";
+const USER_PLAN_URL: &str = "https://openapi.qoder.sh/api/v2/user/plan";
+const TRIAL_URL: &str = "https://openapi.qoder.sh/api/v3/user/trial";
 
 const SERVER_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
@@ -132,6 +135,13 @@ fn model_cfg(name: &str) -> ModelCfg {
             is_vl: true,
             is_reasoning: false,
         },
+        "qmodel_preview" | "qwen3.8-max-preview" | "qwen3.8-preview" => ModelCfg {
+            key: "qmodel_preview",
+            display_name: "Qwen3.8-Max-Preview",
+            max_input_tokens: 1_000_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
         "qmodel_latest" | "qwen3.7-max" => ModelCfg {
             key: "qmodel_latest",
             display_name: "Qwen3.7-Max",
@@ -139,45 +149,52 @@ fn model_cfg(name: &str) -> ModelCfg {
             is_vl: true,
             is_reasoning: false,
         },
-        "qmodel" | "qwen3.6-plus" => ModelCfg {
-            key: "qmodel",
-            display_name: "Qwen3.6-Plus",
+        "qmodel1" | "qmodel" | "qwen3.6-plus" | "qwen3.7-plus" => ModelCfg {
+            key: "qmodel1",
+            display_name: "Qwen3.7-Plus",
             max_input_tokens: 180_000,
             is_vl: true,
             is_reasoning: false,
         },
-        "dmodel" | "deepseek-v4-pro" => ModelCfg {
-            key: "dmodel",
+        "kmodel_latest" | "kimi-k3" | "kimi_k3" => ModelCfg {
+            key: "kmodel_latest",
+            display_name: "Kimi-K3",
+            max_input_tokens: 256_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "kmodel1" | "kmodel" | "kimi-k2.7-code" | "kimi-k2.6" | "kimi-k2.7" => ModelCfg {
+            key: "kmodel1",
+            display_name: "Kimi-K2.7-Code",
+            max_input_tokens: 256_000,
+            is_vl: true,
+            is_reasoning: false,
+        },
+        "gm51model1" | "gm51model" | "glm-5.2" | "glm-5.1" | "glm5.2" => ModelCfg {
+            key: "gm51model1",
+            display_name: "GLM-5.2",
+            max_input_tokens: 180_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
+        "dmodel1" | "dmodel" | "deepseek-v4-pro" => ModelCfg {
+            key: "dmodel1",
             display_name: "DeepSeek-V4-Pro",
             max_input_tokens: 180_000,
             is_vl: true,
             is_reasoning: true,
         },
-        "dfmodel" | "deepseek-v4-flash" => ModelCfg {
-            key: "dfmodel",
+        "dfmodel1" | "dfmodel" | "deepseek-v4-flash" => ModelCfg {
+            key: "dfmodel1",
             display_name: "DeepSeek-V4-Flash",
             max_input_tokens: 180_000,
             is_vl: true,
             is_reasoning: true,
         },
-        "gm51model" | "glm-5.1" => ModelCfg {
-            key: "gm51model",
-            display_name: "GLM-5.1",
-            max_input_tokens: 180_000,
-            is_vl: true,
-            is_reasoning: true,
-        },
-        "kmodel" | "kimi-k2.6" => ModelCfg {
-            key: "kmodel",
-            display_name: "Kimi-K2.6",
-            max_input_tokens: 256_000,
-            is_vl: true,
-            is_reasoning: false,
-        },
-        "mmodel" | "minimax-m2.7" => ModelCfg {
+        "mmodel" | "minimax-m3" | "minimax-m2.7" => ModelCfg {
             key: "mmodel",
-            display_name: "MiniMax-M2.7",
-            max_input_tokens: 180_000,
+            display_name: "MiniMax-M3",
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: false,
         },
@@ -185,7 +202,7 @@ fn model_cfg(name: &str) -> ModelCfg {
             key: "lite",
             display_name: "Lite",
             max_input_tokens: 180_000,
-            is_vl: false,
+            is_vl: true,
             is_reasoning: false,
         },
     }
@@ -452,6 +469,36 @@ impl QoderProvider {
         Self { client, client_h1 }
     }
 
+    pub async fn claim_pro_trial(
+        &self,
+        personal_token: &str,
+    ) -> Result<(u16, Value), ProviderError> {
+        let pat = personal_token.trim();
+        if pat.is_empty() {
+            return Err(ProviderError::AuthInvalid("empty personalToken".into()));
+        }
+        let resp = self
+            .client
+            .post(TRIAL_URL)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {pat}"),
+            )
+            .header(reqwest::header::USER_AGENT, "QoderCLI/1.0")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+            json!({ "raw": text.chars().take(2000).collect::<String>() })
+        });
+        Ok((status, body))
+    }
+
     fn format_reqwest_err(e: &reqwest::Error) -> String {
         let mut parts = vec![format!("{e}")];
         let mut src = std::error::Error::source(e);
@@ -532,6 +579,202 @@ impl QoderProvider {
         }
         Ok(())
     }
+
+    fn quota_headers(sot: &str) -> reqwest::header::HeaderMap {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {sot}").parse().unwrap(),
+        );
+        h.insert("cosy-clienttype", "5".parse().unwrap());
+        h.insert("cosy-version", COSY_VERSION.parse().unwrap());
+        h.insert(
+            reqwest::header::USER_AGENT,
+            format!("qodercli/{COSY_VERSION}").parse().unwrap(),
+        );
+        h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
+        h
+    }
+
+    async fn fetch_quota_usage(&self, sot: &str) -> Result<(i64, i64), ProviderError> {
+        let resp = self
+            .client
+            .get(QUOTA_USAGE_URL)
+            .headers(Self::quota_headers(sot))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(classify_qoder_status(status, &text));
+        }
+        parse_quota_usage(&text)
+    }
+
+    async fn fetch_user_plan(&self, sot: &str) -> Result<UserPlanInfo, ProviderError> {
+        let resp = self
+            .client
+            .get(USER_PLAN_URL)
+            .headers(Self::quota_headers(sot))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(classify_qoder_status(status, &text));
+        }
+        parse_user_plan(&text)
+    }
+}
+
+fn floor_credit(v: f64) -> i64 {
+    if !v.is_finite() || v <= 0.0 {
+        0
+    } else {
+        v.floor() as i64
+    }
+}
+
+fn parse_quota_usage(body: &str) -> Result<(i64, i64), ProviderError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Transport(format!("quota usage parse: {e}")))?;
+    let uq = v
+        .get("userQuota")
+        .ok_or_else(|| ProviderError::Transport("quota usage missing userQuota".into()))?;
+    let total = uq
+        .get("total")
+        .and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|n| n as f64)))
+        .unwrap_or(0.0);
+    let remaining = uq
+        .get("remaining")
+        .and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|n| n as f64)))
+        .unwrap_or(0.0);
+    let mut limit = floor_credit(total);
+    let mut rem = floor_credit(remaining);
+    if v.get("isQuotaExceeded")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
+        rem = 0;
+    }
+    if rem > limit && limit > 0 {
+        rem = limit;
+    }
+    if limit < 0 {
+        limit = 0;
+    }
+    if rem < 0 {
+        rem = 0;
+    }
+    Ok((limit, rem))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UserPlanInfo {
+    plan_tier_name: String,
+    user_type: String,
+    is_paid_plan: bool,
+    is_highest_tier: bool,
+    start_date_ms: i64,
+    end_date_ms: i64,
+    feature_allowed: Value,
+}
+
+fn json_i64_ms(v: &Value) -> i64 {
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|n| n as i64))
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .unwrap_or(0)
+}
+
+fn parse_user_plan(body: &str) -> Result<UserPlanInfo, ProviderError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Transport(format!("user plan parse: {e}")))?;
+    let plan_tier_name = v
+        .get("plan_tier_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if plan_tier_name.is_empty() {
+        return Err(ProviderError::Transport(
+            "user plan missing plan_tier_name".into(),
+        ));
+    }
+    let user_type = v
+        .get("user_type")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_paid_plan = v
+        .get("is_paid_plan")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let is_highest_tier = v
+        .get("is_highest_tier")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let start_date_ms = v.get("start_date").map(json_i64_ms).unwrap_or(0);
+    let end_date_ms = v.get("end_date").map(json_i64_ms).unwrap_or(0);
+    let feature_allowed = v
+        .get("feature_allowed")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    Ok(UserPlanInfo {
+        plan_tier_name,
+        user_type,
+        is_paid_plan,
+        is_highest_tier,
+        start_date_ms,
+        end_date_ms,
+        feature_allowed,
+    })
+}
+
+fn ms_to_rfc3339(ms: i64) -> Option<String> {
+    if ms <= 0 {
+        return None;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn apply_user_plan_to_account(account: &mut Account, plan: &UserPlanInfo) {
+    let mut data = account.data_json();
+    let obj = match data.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    obj.insert(
+        "plan_tier_name".into(),
+        Value::String(plan.plan_tier_name.clone()),
+    );
+    obj.insert("plan_user_type".into(), Value::String(plan.user_type.clone()));
+    obj.insert("plan_is_paid".into(), Value::Bool(plan.is_paid_plan));
+    obj.insert(
+        "plan_is_highest_tier".into(),
+        Value::Bool(plan.is_highest_tier),
+    );
+    obj.insert("plan_start_ms".into(), json!(plan.start_date_ms));
+    obj.insert("plan_end_ms".into(), json!(plan.end_date_ms));
+    if let Some(s) = ms_to_rfc3339(plan.start_date_ms) {
+        obj.insert("plan_start_at".into(), Value::String(s));
+    } else {
+        obj.insert("plan_start_at".into(), Value::Null);
+    }
+    if let Some(s) = ms_to_rfc3339(plan.end_date_ms) {
+        obj.insert("plan_end_at".into(), Value::String(s));
+    } else {
+        obj.insert("plan_end_at".into(), Value::Null);
+    }
+    obj.insert("plan_feature_allowed".into(), plan.feature_allowed.clone());
+    obj.insert(
+        "plan_synced_at".into(),
+        Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    );
+    account.set_data_json(&data);
 }
 
 #[async_trait]
@@ -574,6 +817,42 @@ impl Provider for QoderProvider {
         tokens.user_id = None;
         self.apply_job_token(&mut tokens).await?;
         account.data = tokens.to_data().to_string();
+        Ok(())
+    }
+
+    async fn sync_quota(&self, account: &mut Account) -> Result<(), ProviderError> {
+        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let mut tokens = QoderTokens::from_data(&data)?;
+        let sot = match tokens
+            .security_oauth_token
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) => s.to_string(),
+            None => {
+                self.apply_job_token(&mut tokens).await?;
+                account.data = tokens.to_data().to_string();
+                tokens
+                    .security_oauth_token
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .ok_or(ProviderError::AuthExpired)?
+            }
+        };
+        let (limit, remaining) = self.fetch_quota_usage(&sot).await?;
+        account.quota_limit = limit;
+        account.quota_remaining = remaining;
+
+        match self.fetch_user_plan(&sot).await {
+            Ok(plan) => apply_user_plan_to_account(account, &plan),
+            Err(e) => {
+                tracing::warn!(
+                    account = %account.id,
+                    error = %e,
+                    "qoder user/plan sync failed (credits still updated)"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2079,6 +2358,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_cfg_qmodel_preview_maps_qwen38() {
+        let cfg = model_cfg("qmodel_preview");
+        assert_eq!(cfg.key, "qmodel_preview");
+        assert_eq!(cfg.display_name, "Qwen3.8-Max-Preview");
+        assert_eq!(cfg.max_input_tokens, 1_000_000);
+        assert!(cfg.is_reasoning);
+        assert!(cfg.is_vl);
+
+        let alias = model_cfg("qwen3.8-max-preview");
+        assert_eq!(alias.key, "qmodel_preview");
+        let alias2 = model_cfg("qwen3.8-preview");
+        assert_eq!(alias2.key, "qmodel_preview");
+    }
+
+    #[test]
+    fn model_cfg_live_upstream_keys_and_legacy_aliases() {
+        assert_eq!(model_cfg("qmodel1").key, "qmodel1");
+        assert_eq!(model_cfg("qmodel").key, "qmodel1");
+        assert_eq!(model_cfg("qwen3.7-plus").key, "qmodel1");
+
+        assert_eq!(model_cfg("kmodel_latest").key, "kmodel_latest");
+        assert_eq!(model_cfg("kimi-k3").display_name, "Kimi-K3");
+
+        assert_eq!(model_cfg("kmodel1").key, "kmodel1");
+        assert_eq!(model_cfg("kmodel").key, "kmodel1");
+        assert_eq!(model_cfg("kimi-k2.7-code").display_name, "Kimi-K2.7-Code");
+
+        assert_eq!(model_cfg("gm51model1").key, "gm51model1");
+        assert_eq!(model_cfg("gm51model").key, "gm51model1");
+        assert_eq!(model_cfg("glm-5.2").display_name, "GLM-5.2");
+        assert!(model_cfg("gm51model1").is_reasoning);
+
+        assert_eq!(model_cfg("dmodel1").key, "dmodel1");
+        assert_eq!(model_cfg("dmodel").key, "dmodel1");
+        assert_eq!(model_cfg("dfmodel1").key, "dfmodel1");
+        assert_eq!(model_cfg("dfmodel").key, "dfmodel1");
+
+        assert_eq!(model_cfg("mmodel").display_name, "MiniMax-M3");
+        assert_eq!(model_cfg("minimax-m3").key, "mmodel");
+
+        assert_eq!(model_cfg("lite").key, "lite");
+        assert!(model_cfg("lite").is_vl);
+    }
+
+    #[test]
     fn classify_qoder_status_403_returns_rate_limited() {
         let err = classify_qoder_status(403, "");
         assert!(
@@ -2134,5 +2458,163 @@ mod tests {
         assert!(result.is_some(), "expected Some for 500 error line");
         let (status, _msg) = result.unwrap();
         assert_eq!(status, 500, "expected tuple first element == 500");
+    }
+
+    #[test]
+    fn parse_quota_usage_happy_path() {
+        let body = r#"{
+          "userId": "u1",
+          "userType": "personal_professional_trial",
+          "usageType": "credits",
+          "isQuotaExceeded": false,
+          "expiresAt": 1786332776366,
+          "userQuota": {
+            "total": 300.0,
+            "used": 0.0,
+            "remaining": 300.0,
+            "percentage": 0.0,
+            "unit": "credits"
+          }
+        }"#;
+        let (limit, rem) = parse_quota_usage(body).unwrap();
+        assert_eq!(limit, 300);
+        assert_eq!(rem, 300);
+    }
+
+    #[test]
+    fn parse_quota_usage_floors_floats() {
+        let body = r#"{"userQuota":{"total":300.9,"remaining":12.9,"used":1.0,"unit":"credits"}}"#;
+        let (limit, rem) = parse_quota_usage(body).unwrap();
+        assert_eq!(limit, 300);
+        assert_eq!(rem, 12);
+    }
+
+    #[test]
+    fn parse_quota_usage_exceeded_zeros_remaining() {
+        let body = r#"{"isQuotaExceeded":true,"userQuota":{"total":300.0,"remaining":5.0,"used":295.0,"unit":"credits"}}"#;
+        let (limit, rem) = parse_quota_usage(body).unwrap();
+        assert_eq!(limit, 300);
+        assert_eq!(rem, 0);
+    }
+
+    #[test]
+    fn parse_quota_usage_missing_user_quota_errors() {
+        let err = parse_quota_usage(r#"{"userId":"x"}"#).unwrap_err();
+        assert!(matches!(err, ProviderError::Transport(_)));
+    }
+
+    #[test]
+    fn quota_usage_url_is_openapi() {
+        assert_eq!(
+            QUOTA_USAGE_URL,
+            "https://openapi.qoder.sh/api/v2/quota/usage"
+        );
+    }
+
+    #[test]
+    fn parse_user_plan_pro_trial() {
+        let body = r#"{
+          "user_type": "personal_professional_trial",
+          "plan_tier_name": "Pro Trial",
+          "is_personal_version": true,
+          "is_paid_plan": false,
+          "is_highest_tier": false,
+          "feature_allowed": {
+            "wiki": true,
+            "quest": true,
+            "code_review": true,
+            "commit_indexing": true
+          },
+          "start_date": 1785223050869,
+          "end_date": 1786432650869
+        }"#;
+        let p = parse_user_plan(body).unwrap();
+        assert_eq!(p.plan_tier_name, "Pro Trial");
+        assert_eq!(p.user_type, "personal_professional_trial");
+        assert!(!p.is_paid_plan);
+        assert_eq!(p.start_date_ms, 1785223050869);
+        assert_eq!(p.end_date_ms, 1786432650869);
+        assert_eq!(p.feature_allowed["wiki"], true);
+        let iso = ms_to_rfc3339(p.end_date_ms).unwrap();
+        assert!(iso.starts_with("20"));
+    }
+
+    #[test]
+    fn parse_user_plan_free_zero_end() {
+        let body = r#"{
+          "user_type": "personal_standard",
+          "plan_tier_name": "Free",
+          "is_personal_version": true,
+          "is_paid_plan": false,
+          "is_highest_tier": false,
+          "feature_allowed": {"wiki": false, "quest": true},
+          "start_date": 1785195612646,
+          "end_date": 0
+        }"#;
+        let p = parse_user_plan(body).unwrap();
+        assert_eq!(p.plan_tier_name, "Free");
+        assert_eq!(p.end_date_ms, 0);
+        assert!(ms_to_rfc3339(p.end_date_ms).is_none());
+    }
+
+    #[test]
+    fn parse_user_plan_missing_tier_errors() {
+        let err = parse_user_plan(r#"{"user_type":"x"}"#).unwrap_err();
+        assert!(matches!(err, ProviderError::Transport(_)));
+    }
+
+    #[test]
+    fn apply_user_plan_writes_data_fields() {
+        let mut acc = Account {
+            id: "a1".into(),
+            provider: "qoder".into(),
+            email: Some("t@example.com".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"personalToken":"pt"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            quota_limit: 0,
+            quota_remaining: 0,
+        };
+        let plan = UserPlanInfo {
+            plan_tier_name: "Pro Trial".into(),
+            user_type: "personal_professional_trial".into(),
+            is_paid_plan: false,
+            is_highest_tier: false,
+            start_date_ms: 1785223050869,
+            end_date_ms: 1786432650869,
+            feature_allowed: json!({"wiki": true}),
+        };
+        apply_user_plan_to_account(&mut acc, &plan);
+        let d = acc.data_json();
+        assert_eq!(d["plan_tier_name"], "Pro Trial");
+        assert_eq!(d["plan_end_ms"], 1786432650869_i64);
+        assert!(d["plan_end_at"].as_str().unwrap().len() > 10);
+        assert_eq!(d["personalToken"], "pt");
+
+        let free = UserPlanInfo {
+            plan_tier_name: "Free".into(),
+            user_type: "personal_standard".into(),
+            is_paid_plan: false,
+            is_highest_tier: false,
+            start_date_ms: 1,
+            end_date_ms: 0,
+            feature_allowed: json!({}),
+        };
+        apply_user_plan_to_account(&mut acc, &free);
+        let d2 = acc.data_json();
+        assert_eq!(d2["plan_tier_name"], "Free");
+        assert!(d2["plan_end_at"].is_null());
+        assert_eq!(d2["plan_end_ms"], 0);
+    }
+
+    #[test]
+    fn user_plan_url_is_openapi() {
+        assert_eq!(USER_PLAN_URL, "https://openapi.qoder.sh/api/v2/user/plan");
     }
 }
