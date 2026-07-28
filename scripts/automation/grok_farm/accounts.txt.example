@@ -1,0 +1,5 @@
+# Grok accounts: email|password  (or email:password)
+# Also accepts JSONL: {"email":"...","password":"..."}
+# One account per line. # comments ok.
+
+# user@example.com|YourPassword
