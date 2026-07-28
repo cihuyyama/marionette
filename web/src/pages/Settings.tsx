@@ -6,6 +6,7 @@ import {
   saveSettings,
   type Settings,
 } from "../lib/settings";
+import { NineRouterImport } from "../components/NineRouterImport";
 
 export function SettingsPage() {
   const [form, setForm] = useState<Settings>(() => loadSettings());
@@ -247,6 +248,8 @@ export function SettingsPage() {
           )}
         </section>
       )}
+
+      <NineRouterImport />
     </div>
   );
 }
