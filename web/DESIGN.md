@@ -6,7 +6,9 @@ Pinned from `docs/DESIGN.md` (2026-07-25). Soft LoTM, dark-only control room.
 **Operate** — scanability first; brand in chrome, chips, empty states only.
 
 ## Nav (exact)
-Overview · Accounts · Import · Smoke test · Settings
+Overview · Accounts · Models · Activity · Setup · Automation · Smoke test · Settings
+
+9Router import lives under **Settings** (not top-level nav).
 
 ## Palette
 | Token | Hex | Use |

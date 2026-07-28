@@ -35,10 +35,12 @@ Accounts
 Models
 Activity
 Setup
-Import
+Automation
 Smoke test
 Settings
 ```
+
+9Router import lives under **Settings** (not top-level nav).
 
 Do **not** rename nav to Spirit Vision / Marionettes / Whisper / etc.
 

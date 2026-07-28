@@ -235,7 +235,7 @@ Error JSON shape:
 
 **Grok:** `gcli/grok-build`, `gcli/grok-4.5`, `-high/-medium/-low`, `gcli/grok-4`, `gcli/grok-4-fast-reasoning`, `gcli/grok-code-fast-1`, `gcli/grok-3`
 
-**Qoder:** `qd/lite`, `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/qmodel_latest`, `qd/qwen3.7-max`, `qd/qmodel`, `qd/qwen3.6-plus`, `qd/dmodel`, `qd/deepseek-v4-pro`, `qd/dfmodel`, `qd/deepseek-v4-flash`, `qd/gm51model`, `qd/glm-5.1`, `qd/kmodel`, `qd/kimi-k2.6`, `qd/mmodel`, `qd/minimax-m2.7`
+**Qoder:** `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/lite`, `qd/qmodel_preview` (Qwen3.8-Max-Preview), `qd/qmodel_latest`, `qd/qmodel1`, `qd/kmodel_latest` (Kimi-K3), `qd/kmodel1` (Kimi-K2.7-Code), `qd/gm51model1` (GLM-5.2), `qd/dmodel1`, `qd/dfmodel1`, `qd/mmodel` (MiniMax-M3) — one listed id per live upstream; legacy aliases (`qmodel`, `kmodel`, `gm51model`, …) still route in `model_cfg`
 
 OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_tool_calls` and message `tool_calls` / `tool_call_id`.
 
@@ -383,7 +383,7 @@ Always use `Account::data_json()` / `set_data_json` for new token JSON I/O.
 UI split:
 
 - **+ Add** modal per provider (`AddAccountModal`) — single/bulk tokens
-- **/import** page — 9Router backup file only (nav label “9Router import”)
+- **Settings → 9Router import** — backup file only (`NineRouterImport`; `/import` redirects to `/settings`)
 
 ---
 
@@ -392,8 +392,8 @@ UI split:
 | Item | Value |
 |------|--------|
 | Stack | React 19, Vite 6, TS, react-router-dom 7 — **no** component library |
-| Routes | `/` Overview, `/accounts`, `/accounts/:provider`, `/models`, `/activity`, `/setup`, `/import`, `/smoke`, `/settings` |
-| Nav (English ops) | Overview · Accounts · Models · Activity · Setup · 9Router import · Smoke test · Settings |
+| Routes | `/` Overview, `/accounts`, `/accounts/:provider`, `/models`, `/activity`, `/setup`, `/automation`, `/smoke`, `/settings` (`/import` → Settings) |
+| Nav (English ops) | Overview · Accounts · Models · Activity · Setup · Automation · Smoke test · Settings |
 | Design | `docs/DESIGN.md` / `web/DESIGN.md` — void/ink/parchment/thread gold; dark only |
 | API client | `web/src/lib/api.ts` — `auth: "admin" \| "pool" \| "none"` |
 | Auth gate | `AuthGate` + `marionette-unauthorized` event on 401 |
