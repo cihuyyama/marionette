@@ -28,7 +28,7 @@ export type Account = {
   status: string;
   quota_limit: number;
   quota_remaining: number;
-  quota_kind: "tokens" | "none" | string;
+  quota_kind: "tokens" | "credits" | "none" | string;
 };
 
 export type ImportResult = {
@@ -44,6 +44,8 @@ export type ModelObject = {
   id: string;
   object: string;
   owned_by: string;
+  display_name?: string | null;
+  credit_usage_rate?: string | null;
 };
 
 export class ApiError extends Error {
@@ -202,6 +204,201 @@ export function refreshAccount(id: string, settings?: Settings) {
   );
 }
 
+export type ClaimTrialResult = {
+  ok: boolean;
+  http_status: number;
+  message: string;
+  upstream?: Record<string, unknown> | unknown;
+  quota_synced?: boolean;
+  sync_error?: string | null;
+  account?: Account;
+  account_id?: string;
+  path?: string;
+};
+
+export function claimProTrial(id: string, settings?: Settings) {
+  return request<ClaimTrialResult>(
+    `/admin/accounts/${encodeURIComponent(id)}/claim-trial`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export type InjectJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | string;
+
+export type InjectJob = {
+  id: string;
+  kind: string;
+  status: string;
+  created_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  error?: string | null;
+  account_id: string;
+  account_ids?: string[];
+  bulk?: boolean;
+  bulk_total?: number;
+  bulk_ok?: number;
+  bulk_fail?: number;
+  email?: string | null;
+  headless: boolean;
+  refresh: boolean;
+  work_dir?: string;
+  log_path?: string;
+  current_step?: string | null;
+  inject_result?: Record<string, unknown> | null;
+  log_count: number;
+};
+
+export type InjectEvent = {
+  seq: number;
+  ts: string;
+  line: string;
+  parsed?: Record<string, unknown> | null;
+};
+
+export type InjectStartResult = {
+  ok: boolean;
+  job: InjectJob;
+};
+
+export type InjectRefreshResult = {
+  ok: boolean;
+  refreshed: boolean;
+  refresh_error?: string | null;
+  account: Account;
+  skipped?: boolean;
+  accounts_refreshed?: number;
+  accounts_failed?: number;
+  accounts_targeted?: number;
+};
+
+export function startInjectJob(
+  accountId: string,
+  opts?: { headless?: boolean; refresh?: boolean },
+  settings?: Settings,
+) {
+  const qs = new URLSearchParams();
+  if (opts?.headless === false) qs.set("headless", "false");
+  if (opts?.headless === true) qs.set("headless", "true");
+  if (opts?.refresh === false) qs.set("refresh", "false");
+  if (opts?.refresh === true) qs.set("refresh", "true");
+  const q = qs.toString();
+  return request<InjectStartResult>(
+    `/admin/accounts/${encodeURIComponent(accountId)}/inject${q ? `?${q}` : ""}`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export type BulkInjectStartResult = InjectStartResult & {
+  total?: number;
+  only_no_credit?: boolean;
+  skipped_no_pat?: number;
+  skipped_inactive?: number;
+  skipped_has_credit?: number;
+};
+
+export function startBulkInjectJob(
+  opts?: {
+    accountIds?: string[];
+    includeInactive?: boolean;
+    onlyNoCredit?: boolean;
+    headless?: boolean;
+    refresh?: boolean;
+  },
+  settings?: Settings,
+) {
+  return request<BulkInjectStartResult>(
+    `/admin/providers/qoder/inject`,
+    {
+      method: "POST",
+      auth: "admin",
+      body: JSON.stringify({
+        account_ids: opts?.accountIds,
+        include_inactive: opts?.includeInactive ?? false,
+        only_no_credit: opts?.onlyNoCredit ?? true,
+        headless: opts?.headless ?? true,
+        refresh: opts?.refresh ?? true,
+      }),
+    },
+    settings,
+  );
+}
+
+export function getInjectJob(id: string, settings?: Settings) {
+  return request<{ job: InjectJob; events: InjectEvent[] }>(
+    `/admin/inject/jobs/${encodeURIComponent(id)}`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function getInjectEvents(id: string, after = 0, settings?: Settings) {
+  return request<{ job: InjectJob; events: InjectEvent[]; after: number }>(
+    `/admin/inject/jobs/${encodeURIComponent(id)}/events?after=${after}`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function cancelInjectJob(id: string, settings?: Settings) {
+  return request<{ ok: boolean; job: InjectJob }>(
+    `/admin/inject/jobs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export function refreshAfterInject(id: string, settings?: Settings) {
+  return request<InjectRefreshResult>(
+    `/admin/inject/jobs/${encodeURIComponent(id)}/refresh`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export type WarmupResultRow = {
+  id: string;
+  email?: string | null;
+  ok: boolean;
+  cut?: boolean;
+  error?: string;
+  quota_limit?: number;
+  quota_remaining?: number;
+};
+
+export type WarmupResult = {
+  provider: string;
+  total: number;
+  ok: number;
+  failed: number;
+  cut: number;
+  results: WarmupResultRow[];
+};
+
+export function warmupQoderAccounts(
+  opts?: { include_inactive?: boolean; concurrency?: number },
+  settings?: Settings,
+) {
+  const qs = new URLSearchParams();
+  if (opts?.include_inactive) qs.set("include_inactive", "true");
+  if (opts?.concurrency != null) qs.set("concurrency", String(opts.concurrency));
+  const q = qs.toString();
+  return request<WarmupResult>(
+    `/admin/providers/qoder/warmup${q ? `?${q}` : ""}`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
 export function importAccounts(body: unknown, replace = false, settings?: Settings) {
   const qs = replace ? "?replace=true" : "";
   return request<ImportResult>(
@@ -268,6 +465,8 @@ export type RequestLog = {
   error_message: string | null;
 };
 
+export type UsageRange = "day" | "week" | "month" | "all";
+
 export type UsageSummary = {
   requests: number;
   success: number;
@@ -275,6 +474,8 @@ export type UsageSummary = {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  range?: UsageRange | string;
+  since?: string | null;
   by_model: {
     model: string;
     provider: string;
@@ -286,22 +487,33 @@ export type UsageSummary = {
 };
 
 export function listRequests(
-  params?: { provider?: string; limit?: number },
+  params?: { provider?: string; limit?: number; range?: UsageRange | string },
   settings?: Settings,
 ) {
   const q = new URLSearchParams();
   if (params?.provider) q.set("provider", params.provider);
   if (params?.limit != null) q.set("limit", String(params.limit));
+  if (params?.range && params.range !== "all") q.set("range", params.range);
   const qs = q.toString();
-  return request<{ requests: RequestLog[] }>(
-    `/admin/requests${qs ? `?${qs}` : ""}`,
+  return request<{
+    requests: RequestLog[];
+    range?: string;
+    since?: string | null;
+  }>(`/admin/requests${qs ? `?${qs}` : ""}`, { auth: "admin" }, settings);
+}
+
+export function getUsage(
+  params?: { range?: UsageRange | string },
+  settings?: Settings,
+) {
+  const q = new URLSearchParams();
+  if (params?.range && params.range !== "all") q.set("range", params.range);
+  const qs = q.toString();
+  return request<UsageSummary>(
+    `/admin/usage${qs ? `?${qs}` : ""}`,
     { auth: "admin" },
     settings,
   );
-}
-
-export function getUsage(settings?: Settings) {
-  return request<UsageSummary>("/admin/usage", { auth: "admin" }, settings);
 }
 
 export type LoadBalanceStrategy =
@@ -364,6 +576,179 @@ export function chatCompletion(
       body: JSON.stringify({ ...body, stream: false }),
       auth: "pool",
     },
+    settings,
+  );
+}
+
+export type FarmJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | string;
+
+export type FarmJob = {
+  id: string;
+  provider?: string;
+  status: FarmJobStatus;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  error?: string | null;
+  accounts_count: number;
+  inject: boolean;
+  headless: boolean;
+  device_auth: boolean;
+  concurrency?: number;
+  settle_secs?: number | null;
+  auto_import: boolean;
+  skip_existing?: boolean;
+  account_delay?: number;
+  output_path: string;
+  work_dir: string;
+  ok: number;
+  fail: number;
+  total: number;
+  current_step?: string | null;
+  current_email?: string | null;
+  import_result?: Record<string, unknown> | null;
+  log_count: number;
+};
+
+export type FarmEvent = {
+  seq: number;
+  ts: string;
+  line: string;
+  parsed?: Record<string, unknown> | null;
+};
+
+export type FarmPackageInfo = {
+  package_dir: string;
+  package_parent: string;
+  package_present: boolean;
+  module?: string;
+  run_hint?: string;
+};
+
+export type FarmInfo = {
+  provider: string;
+  package_dir: string;
+  package_parent: string;
+  python: string;
+  data_dir: string;
+  package_present: boolean;
+  max_concurrency?: number;
+  run_hint: string;
+  packages?: {
+    qoder?: FarmPackageInfo;
+    "grok-cli"?: FarmPackageInfo;
+  };
+};
+
+export type FarmStatus = {
+  info: FarmInfo;
+  current: FarmJob | null;
+  history: FarmJob[];
+  busy: boolean;
+};
+
+export function getFarmStatus(settings?: Settings) {
+  return request<FarmStatus>("/admin/farm", { auth: "admin" }, settings);
+}
+
+export function startFarmJob(
+  body: {
+    accounts: string;
+    provider?: string;
+    inject?: boolean;
+    headless?: boolean;
+    device_auth?: boolean;
+    skip_exchange?: boolean;
+    settle_secs?: number | null;
+    auto_import?: boolean;
+    concurrency?: number;
+    account_retries?: number;
+    skip_existing?: boolean;
+    account_delay?: number;
+    proxy_file?: string | null;
+  },
+  settings?: Settings,
+) {
+  return request<{ ok: boolean; job: FarmJob }>(
+    "/admin/farm/start",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+      auth: "admin",
+    },
+    settings,
+  );
+}
+
+export function retryFailedFarmJob(
+  id: string,
+  body?: {
+    provider?: string;
+    inject?: boolean;
+    headless?: boolean;
+    device_auth?: boolean;
+    skip_exchange?: boolean;
+    settle_secs?: number | null;
+    auto_import?: boolean;
+    concurrency?: number;
+    account_retries?: number;
+    skip_existing?: boolean;
+    account_delay?: number;
+    proxy_file?: string | null;
+  },
+  settings?: Settings,
+) {
+  return request<{
+    ok: boolean;
+    job: FarmJob;
+    retried_from?: string;
+    failed_count?: number;
+  }>(
+    `/admin/farm/jobs/${encodeURIComponent(id)}/retry-failed`,
+    {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+      auth: "admin",
+    },
+    settings,
+  );
+}
+
+export function getFarmJob(id: string, settings?: Settings) {
+  return request<{ job: FarmJob; events: FarmEvent[] }>(
+    `/admin/farm/jobs/${encodeURIComponent(id)}`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function getFarmEvents(id: string, after = 0, settings?: Settings) {
+  return request<{ job: FarmJob; events: FarmEvent[]; after: number }>(
+    `/admin/farm/jobs/${encodeURIComponent(id)}/events?after=${after}`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function cancelFarmJob(id: string, settings?: Settings) {
+  return request<{ ok: boolean; job: FarmJob }>(
+    `/admin/farm/jobs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export function importFarmJob(id: string, settings?: Settings) {
+  return request<ImportResult & { ok?: boolean; path?: string; source?: string }>(
+    `/admin/farm/jobs/${encodeURIComponent(id)}/import`,
+    { method: "POST", auth: "admin" },
     settings,
   );
 }
