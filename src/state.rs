@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::farm::FarmManager;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
 use sqlx::SqlitePool;
@@ -11,10 +12,12 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub grok: Arc<GrokCliProvider>,
     pub qoder: Arc<QoderProvider>,
+    pub farm: FarmManager,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, config: Config) -> Self {
+        let farm = FarmManager::from_env(&config.db_path);
         let config = Arc::new(config);
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -28,6 +31,7 @@ impl AppState {
             http,
             grok,
             qoder,
+            farm,
         }
     }
 }
