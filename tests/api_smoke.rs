@@ -11,7 +11,7 @@ use tower::ServiceExt;
 async fn test_app() -> (axum::Router, PathBuf) {
     let dir = std::env::temp_dir().join(format!("marionette-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let db_path = dir.join("t.sqlite");
+    let db_path = dir.join("test.sqlite");
     let mut cfg = Config::from_env();
     cfg.db_path = db_path.clone();
     cfg.api_key = "test-pool-key".into();

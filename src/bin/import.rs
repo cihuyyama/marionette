@@ -98,7 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for acc in accounts {
             let id = acc.id.clone();
             match db::upsert_account(&pool, &acc).await {
-                Ok(()) => inserted += 1,
+                Ok(db::UpsertKind::Inserted) => inserted += 1,
+                Ok(db::UpsertKind::Updated) => updated += 1,
                 Err(e) => {
                     eprintln!("skip {id}: {e}");
                     skipped += 1;
@@ -107,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!(
-            "9router-backup import done: parsed={total_parsed} inserted={inserted} skipped={skipped} deleted={deleted} db={}",
+            "9router-backup import done: parsed={total_parsed} inserted={inserted} updated={updated} skipped={skipped} deleted={deleted} db={}",
             cfg.db_path.display()
         );
         return Ok(());
@@ -132,7 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for acc in accounts {
                 let id = acc.id.clone();
                 match db::upsert_account(&pool, &acc).await {
-                    Ok(()) => inserted += 1,
+                    Ok(db::UpsertKind::Inserted) => inserted += 1,
+                    Ok(db::UpsertKind::Updated) => updated += 1,
                     Err(e) => {
                         eprintln!("skip {id}: {e}");
                         skipped += 1;
@@ -140,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             println!(
-                "9router-backup import done: parsed={total_parsed} inserted={inserted} skipped={skipped} deleted={deleted} db={}",
+                "9router-backup import done: parsed={total_parsed} inserted={inserted} updated={updated} skipped={skipped} deleted={deleted} db={}",
                 cfg.db_path.display()
             );
             return Ok(());
@@ -158,8 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else if let Some(path) = from_9router {
-        let url = format!("sqlite:{}?mode=ro", path.display());
-        let src = sqlx::SqlitePool::connect(&url).await?;
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .read_only(true);
+        let src = sqlx::SqlitePool::connect_with(opts).await?;
         let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<i64>, String)>(
             r#"SELECT id, email, name, isActive, data FROM providerConnections WHERE provider = ?"#,
         )
@@ -188,12 +192,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         quota_limit: q_lim,
                         quota_remaining: q_rem,
                     };
-                    let exists = db::get_account(&pool, &acc.id).await.is_ok();
-                    db::upsert_account(&pool, &acc).await?;
-                    if exists {
-                        updated += 1;
-                    } else {
-                        inserted += 1;
+                    match db::upsert_account(&pool, &acc).await? {
+                        db::UpsertKind::Inserted => inserted += 1,
+                        db::UpsertKind::Updated => updated += 1,
                     }
                 }
             }
@@ -248,48 +249,32 @@ async fn import_one(
         normalize_map(item)
     };
 
-    let existing = if let Some(ref e) = email {
-        let rows = db::list_accounts(pool, Some(provider), None).await?;
-        rows.into_iter()
-            .find(|a| a.email.as_deref() == Some(e.as_str()))
-    } else {
-        None
-    };
-
     let now = db::now_rfc3339();
-    if let Some(mut acc) = existing {
-        acc.data = data_val.to_string();
-        if name.is_some() {
-            acc.name = name;
-        }
-        acc.updated_at = now;
-        db::update_account(pool, &acc).await?;
-        Ok(false)
-    } else {
-        let id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let (q_lim, q_rem) = db::default_quota_for_provider(provider);
-        let acc = Account {
-            id,
-            provider: provider.to_string(),
-            email,
-            name,
-            is_active: 1,
-            priority: 0,
-            data: data_val.to_string(),
-            cooldown_until: None,
-            last_error: None,
-            last_used_at: None,
-            created_at: now.clone(),
-            updated_at: now,
-            quota_limit: q_lim,
-            quota_remaining: q_rem,
-        };
-        db::upsert_account(pool, &acc).await?;
-        Ok(true)
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (q_lim, q_rem) = db::default_quota_for_provider(provider);
+    let acc = Account {
+        id,
+        provider: provider.to_string(),
+        email,
+        name,
+        is_active: 1,
+        priority: 0,
+        data: data_val.to_string(),
+        cooldown_until: None,
+        last_error: None,
+        last_used_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+        quota_limit: q_lim,
+        quota_remaining: q_rem,
+    };
+    match db::upsert_account(pool, &acc).await? {
+        db::UpsertKind::Inserted => Ok(true),
+        db::UpsertKind::Updated => Ok(false),
     }
 }
 
