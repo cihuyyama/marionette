@@ -117,14 +117,14 @@ fn model_cfg(name: &str) -> ModelCfg {
         "ultimate" => ModelCfg {
             key: "ultimate",
             display_name: "Ultimate",
-            max_input_tokens: 180_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: true,
         },
         "performance" => ModelCfg {
             key: "performance",
             display_name: "Performance",
-            max_input_tokens: 272_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: false,
         },
@@ -138,7 +138,7 @@ fn model_cfg(name: &str) -> ModelCfg {
         "qmodel_preview" | "qwen3.8-max-preview" | "qwen3.8-preview" => ModelCfg {
             key: "qmodel_preview",
             display_name: "Qwen3.8-Max-Preview",
-            max_input_tokens: 1_000_000,
+            max_input_tokens: 180_000,
             is_vl: true,
             is_reasoning: true,
         },
@@ -152,14 +152,14 @@ fn model_cfg(name: &str) -> ModelCfg {
         "qmodel1" | "qmodel" | "qwen3.6-plus" | "qwen3.7-plus" => ModelCfg {
             key: "qmodel1",
             display_name: "Qwen3.7-Plus",
-            max_input_tokens: 180_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: false,
         },
         "kmodel_latest" | "kimi-k3" | "kimi_k3" => ModelCfg {
             key: "kmodel_latest",
             display_name: "Kimi-K3",
-            max_input_tokens: 256_000,
+            max_input_tokens: 180_000,
             is_vl: true,
             is_reasoning: false,
         },
@@ -173,21 +173,21 @@ fn model_cfg(name: &str) -> ModelCfg {
         "gm51model1" | "gm51model" | "glm-5.2" | "glm-5.1" | "glm5.2" => ModelCfg {
             key: "gm51model1",
             display_name: "GLM-5.2",
-            max_input_tokens: 180_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: true,
         },
         "dmodel1" | "dmodel" | "deepseek-v4-pro" => ModelCfg {
             key: "dmodel1",
             display_name: "DeepSeek-V4-Pro",
-            max_input_tokens: 180_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: true,
         },
         "dfmodel1" | "dfmodel" | "deepseek-v4-flash" => ModelCfg {
             key: "dfmodel1",
             display_name: "DeepSeek-V4-Flash",
-            max_input_tokens: 180_000,
+            max_input_tokens: 1_000_000,
             is_vl: true,
             is_reasoning: true,
         },
@@ -198,11 +198,18 @@ fn model_cfg(name: &str) -> ModelCfg {
             is_vl: true,
             is_reasoning: false,
         },
+        "lite" => ModelCfg {
+            key: "lite",
+            display_name: "Lite",
+            max_input_tokens: 180_000,
+            is_vl: false,
+            is_reasoning: false,
+        },
         _ => ModelCfg {
             key: "lite",
             display_name: "Lite",
             max_input_tokens: 180_000,
-            is_vl: true,
+            is_vl: false,
             is_reasoning: false,
         },
     }
@@ -2362,7 +2369,7 @@ mod tests {
         let cfg = model_cfg("qmodel_preview");
         assert_eq!(cfg.key, "qmodel_preview");
         assert_eq!(cfg.display_name, "Qwen3.8-Max-Preview");
-        assert_eq!(cfg.max_input_tokens, 1_000_000);
+        assert_eq!(cfg.max_input_tokens, 180_000);
         assert!(cfg.is_reasoning);
         assert!(cfg.is_vl);
 
@@ -2377,29 +2384,37 @@ mod tests {
         assert_eq!(model_cfg("qmodel1").key, "qmodel1");
         assert_eq!(model_cfg("qmodel").key, "qmodel1");
         assert_eq!(model_cfg("qwen3.7-plus").key, "qmodel1");
+        assert_eq!(model_cfg("qmodel1").max_input_tokens, 1_000_000);
 
         assert_eq!(model_cfg("kmodel_latest").key, "kmodel_latest");
         assert_eq!(model_cfg("kimi-k3").display_name, "Kimi-K3");
+        assert_eq!(model_cfg("kmodel_latest").max_input_tokens, 180_000);
 
         assert_eq!(model_cfg("kmodel1").key, "kmodel1");
         assert_eq!(model_cfg("kmodel").key, "kmodel1");
         assert_eq!(model_cfg("kimi-k2.7-code").display_name, "Kimi-K2.7-Code");
+        assert_eq!(model_cfg("kmodel1").max_input_tokens, 256_000);
 
         assert_eq!(model_cfg("gm51model1").key, "gm51model1");
         assert_eq!(model_cfg("gm51model").key, "gm51model1");
         assert_eq!(model_cfg("glm-5.2").display_name, "GLM-5.2");
         assert!(model_cfg("gm51model1").is_reasoning);
+        assert_eq!(model_cfg("gm51model1").max_input_tokens, 1_000_000);
 
         assert_eq!(model_cfg("dmodel1").key, "dmodel1");
         assert_eq!(model_cfg("dmodel").key, "dmodel1");
         assert_eq!(model_cfg("dfmodel1").key, "dfmodel1");
         assert_eq!(model_cfg("dfmodel").key, "dfmodel1");
+        assert_eq!(model_cfg("dmodel1").max_input_tokens, 1_000_000);
 
         assert_eq!(model_cfg("mmodel").display_name, "MiniMax-M3");
         assert_eq!(model_cfg("minimax-m3").key, "mmodel");
 
+        assert_eq!(model_cfg("ultimate").max_input_tokens, 1_000_000);
+        assert_eq!(model_cfg("performance").max_input_tokens, 1_000_000);
+
         assert_eq!(model_cfg("lite").key, "lite");
-        assert!(model_cfg("lite").is_vl);
+        assert!(!model_cfg("lite").is_vl);
     }
 
     #[test]
