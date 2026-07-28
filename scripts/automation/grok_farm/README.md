@@ -18,8 +18,8 @@ Python package for **Grok CLI manual thin/mass relogin** inside Marionette.
 
 ```
 email|password
-  -> Camoufox (humanize 0.5 headed / 0.8 headless)
-  -> accounts.x.ai email login (optional warm)
+  -> Camoufox (humanize 0.8 headed / 1.0 headless)
+  -> accounts.x.ai email login (Turnstile mouse path + hard Login click)
   -> auth.x.ai OAuth PKCE (redirect 127.0.0.1:56121 captured via route)
   -> exchange code → accessToken + refreshToken
   -> POST cli-chat-proxy.grok.com  "Reply with exactly ACTIVE"
@@ -113,9 +113,31 @@ If xAI shows an OTP form:
 - IMAP configured (`GROK_IMAP_*`): thin inbox scan for a code
 - Headless + no IMAP: clear error (no silent hang)
 
-## TODO stubs (from kit, not ported)
+## Turnstile (login)
 
-- Full vision/click Turnstile solver (`handle_turnstile` monolit)
+Active path (ported from monolit, Camoufox only for now):
+
+- Detect widget / “Verify you are human”
+- Humanized `mouse.move` approach + jiggle + click (host text / iframe / CF frame)
+- Soft remount on “Verification failed” (`turnstile.reset`)
+- Re-fill password after CF remounts the form
+- Hard pointer click on **Login** (not bare JS `el.click()`)
+
+Still not ported: vision CAPTCHA for interactive puzzles; CloakBrowser engine (phase 2).
+
+Ops tips when CF still fails:
+
+```powershell
+# concurrency 1, headed, residual proxy
+$env:GROK_HUMANIZE="true"
+$env:GROK_HUMANIZE_HEADED="1.0"
+python -m grok_farm -f grok_farm\accounts.txt --concurrency 1 --no-headless --debug
+```
+
+## TODO stubs
+
+- Optional CloakBrowser engine fallback
+- Vision Turnstile solver for interactive puzzles
 - Signup / mass create farm
 - grok.com first-login “activate API” step (may help 403 accounts)
 - Richer IMAP xAI subject parsers
@@ -123,5 +145,5 @@ If xAI shows an OTP form:
 ## Notes
 
 - Secrets: never commit `.env`, `accounts.txt`, `results/`, screenshots.
-- Humanize default **on** (`GROK_HUMANIZE=true`).
+- Humanize default **on** (`GROK_HUMANIZE=true`); headed default **0.8**.
 - Independent of `qoder_farm` (duplicated progress helpers on purpose).
