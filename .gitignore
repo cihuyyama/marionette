@@ -12,6 +12,10 @@ data/
 **/*token*
 **/*secret*
 **/accounts*.json
+# Qoder farm credentials (scripts/automation/qoder_farm)
+scripts/automation/**/accounts.txt
+scripts/automation/**/accounts*.txt
+!scripts/automation/**/accounts.txt.example
 !docs/**
 # HANDOFF holds VPS host/user/key path + infra layout — local only.
 # MUST stay below `!docs/**`: last matching rule wins.
