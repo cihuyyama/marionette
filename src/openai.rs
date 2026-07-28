@@ -75,6 +75,10 @@ pub struct ModelObject {
     pub id: String,
     pub object: &'static str,
     pub owned_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credit_usage_rate: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,47 +87,59 @@ pub struct ModelsResponse {
     pub data: Vec<ModelObject>,
 }
 
+fn model(
+    id: &'static str,
+    owned_by: &'static str,
+    display_name: Option<&'static str>,
+    credit_usage_rate: Option<&'static str>,
+) -> ModelObject {
+    ModelObject {
+        id: id.into(),
+        object: "model",
+        owned_by,
+        display_name,
+        credit_usage_rate,
+    }
+}
+
 pub fn default_models() -> ModelsResponse {
-    let ids = [
-        ("gcli/grok-build", "grok-cli"),
-        ("gcli/grok-4.5", "grok-cli"),
-        ("gcli/grok-4.5-xhigh", "grok-cli"),
-        ("gcli/grok-4.5-high", "grok-cli"),
-        ("gcli/grok-4.5-medium", "grok-cli"),
-        ("gcli/grok-4.5-low", "grok-cli"),
-        ("gcli/grok-4", "grok-cli"),
-        ("gcli/grok-4-fast-reasoning", "grok-cli"),
-        ("gcli/grok-code-fast-1", "grok-cli"),
-        ("gcli/grok-3", "grok-cli"),
-        ("qd/lite", "qoder"),
-        ("qd/auto", "qoder"),
-        ("qd/ultimate", "qoder"),
-        ("qd/performance", "qoder"),
-        ("qd/efficient", "qoder"),
-        ("qd/qmodel_latest", "qoder"),
-        ("qd/qwen3.7-max", "qoder"),
-        ("qd/qmodel", "qoder"),
-        ("qd/qwen3.6-plus", "qoder"),
-        ("qd/dmodel", "qoder"),
-        ("qd/deepseek-v4-pro", "qoder"),
-        ("qd/dfmodel", "qoder"),
-        ("qd/deepseek-v4-flash", "qoder"),
-        ("qd/gm51model", "qoder"),
-        ("qd/glm-5.1", "qoder"),
-        ("qd/kmodel", "qoder"),
-        ("qd/kimi-k2.6", "qoder"),
-        ("qd/mmodel", "qoder"),
-        ("qd/minimax-m2.7", "qoder"),
-    ];
     ModelsResponse {
         object: "list",
-        data: ids
-            .into_iter()
-            .map(|(id, owner)| ModelObject {
-                id: id.into(),
-                object: "model",
-                owned_by: owner,
-            })
-            .collect(),
+        data: vec![
+            model("gcli/grok-build", "grok-cli", Some("Grok Build"), None),
+            model("gcli/grok-4.5", "grok-cli", Some("Grok 4.5"), None),
+            model("gcli/grok-4.5-xhigh", "grok-cli", Some("Grok 4.5 xHigh"), None),
+            model("gcli/grok-4.5-high", "grok-cli", Some("Grok 4.5 High"), None),
+            model("gcli/grok-4.5-medium", "grok-cli", Some("Grok 4.5 Medium"), None),
+            model("gcli/grok-4.5-low", "grok-cli", Some("Grok 4.5 Low"), None),
+            model("gcli/grok-4", "grok-cli", Some("Grok 4"), None),
+            model(
+                "gcli/grok-4-fast-reasoning",
+                "grok-cli",
+                Some("Grok 4 Fast Reasoning"),
+                None,
+            ),
+            model("gcli/grok-code-fast-1", "grok-cli", Some("Grok Code Fast 1"), None),
+            model("gcli/grok-3", "grok-cli", Some("Grok 3"), None),
+            model("qd/auto", "qoder", Some("Auto"), Some("~1.0x")),
+            model("qd/ultimate", "qoder", Some("Ultimate"), Some("~1.6x")),
+            model("qd/performance", "qoder", Some("Performance"), Some("~1.1x")),
+            model("qd/efficient", "qoder", Some("Efficient"), Some("~0.3x")),
+            model("qd/lite", "qoder", Some("Lite"), Some("Free")),
+            model(
+                "qd/qmodel_preview",
+                "qoder",
+                Some("Qwen3.8-Max-Preview"),
+                Some("0.5x"),
+            ),
+            model("qd/qmodel_latest", "qoder", Some("Qwen3.7-Max"), Some("0.5x")),
+            model("qd/qmodel1", "qoder", Some("Qwen3.7-Plus"), Some("0.1x")),
+            model("qd/kmodel_latest", "qoder", Some("Kimi-K3"), Some("0.8x")),
+            model("qd/kmodel1", "qoder", Some("Kimi-K2.7-Code"), Some("0.3x")),
+            model("qd/gm51model1", "qoder", Some("GLM-5.2"), Some("0.6x")),
+            model("qd/dmodel1", "qoder", Some("DeepSeek-V4-Pro"), Some("0.5x")),
+            model("qd/dfmodel1", "qoder", Some("DeepSeek-V4-Flash"), Some("0.1x")),
+            model("qd/mmodel", "qoder", Some("MiniMax-M3"), Some("0.2x")),
+        ],
     }
 }
