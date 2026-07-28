@@ -7,9 +7,7 @@
 | **grok-cli** | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | **qoder** | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` |
 
-Named after *Lord of the Mysteries* marionettes: **one controller, many puppet accounts**.
-
-> Not a full etteeum-pool rewrite. No multi-provider zoo. No Playwright in the Rust binary.
+**One controller, many puppet accounts** — a focused pool, not a multi-provider zoo. No browser automation in the Rust binary.
 
 ```
 Client (OpenCode / curl)   Bearer pool key  →  /v1/*     →  pool  →  grok-cli | qoder
@@ -153,7 +151,7 @@ Dashboard: **Settings → 9Router import**, or **Accounts → + Add** for single
 | Smoke test | Pool chat probe |
 | Settings | Keys (localStorage), 9Router import |
 
-Stack: React 19 + Vite 6 + TS SPA only — dark LoTM tokens in [`docs/DESIGN.md`](docs/DESIGN.md).
+Stack: React 19 + Vite 6 + TS SPA only — dark UI tokens in [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ---
 
@@ -215,18 +213,6 @@ Read in order:
 4. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design
 5. [`docs/DESIGN.md`](docs/DESIGN.md) — UI brief
 6. [`docs/PROVIDER_CHECKLIST.md`](docs/PROVIDER_CHECKLIST.md) — provider port notes
-
----
-
-## Related systems (reference only)
-
-| System | Role |
-|--------|------|
-| `grok-farm` (sibling / VPS) | Farm Grok OAuth tokens |
-| `etteum-pool` | Bun multi-provider; **Qoder reference** |
-| 9Router DB | Token store to import from — not a runtime dep |
-
-Do not invent Qoder auth; mirror etteeum when unsure.
 
 ---
 
