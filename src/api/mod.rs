@@ -33,7 +33,43 @@ pub fn router(state: AppState) -> Router {
                 .patch(admin::patch_account)
                 .delete(admin::delete_account),
         )
-        .route("/admin/accounts/{id}/refresh", post(admin::refresh_account));
+        .route("/admin/accounts/{id}/refresh", post(admin::refresh_account))
+        .route("/admin/accounts/{id}/inject", post(admin::inject_account))
+        .route(
+            "/admin/accounts/{id}/claim-trial",
+            post(admin::claim_trial_account),
+        )
+        .route(
+            "/admin/providers/qoder/warmup",
+            post(admin::warmup_qoder_accounts),
+        )
+        .route(
+            "/admin/providers/qoder/inject",
+            post(admin::inject_bulk),
+        )
+        .route("/admin/inject/jobs/{id}", get(admin::inject_get_job))
+        .route(
+            "/admin/inject/jobs/{id}/events",
+            get(admin::inject_events),
+        )
+        .route(
+            "/admin/inject/jobs/{id}/cancel",
+            post(admin::inject_cancel),
+        )
+        .route(
+            "/admin/inject/jobs/{id}/refresh",
+            post(admin::inject_finish_refresh),
+        )
+        .route("/admin/farm", get(admin::farm_status))
+        .route("/admin/farm/start", post(admin::farm_start))
+        .route("/admin/farm/jobs/{id}", get(admin::farm_get_job))
+        .route("/admin/farm/jobs/{id}/events", get(admin::farm_events))
+        .route("/admin/farm/jobs/{id}/cancel", post(admin::farm_cancel))
+        .route("/admin/farm/jobs/{id}/import", post(admin::farm_import))
+        .route(
+            "/admin/farm/jobs/{id}/retry-failed",
+            post(admin::farm_retry_failed),
+        );
 
     Router::new()
         .merge(public)
