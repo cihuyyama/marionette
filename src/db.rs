@@ -2,7 +2,10 @@ use crate::error::{AppError, AppResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -59,14 +62,23 @@ pub async fn connect(db_path: &Path) -> AppResult<SqlitePool> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let url = format!("sqlite:{}?mode=rwc", db_path.display());
+    let opts = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect(&url)
+        .max_connections(5)
+        .connect_with(opts)
         .await?;
     migrate(&pool).await?;
     Ok(pool)
 }
+
+const ACCOUNT_COLUMNS: &str = r#"
+    id, provider, email, name, is_active, priority, data,
+    cooldown_until, last_error, last_used_at, created_at, updated_at,
+    quota_limit, quota_remaining
+"#;
 
 async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     sqlx::query(
@@ -83,7 +95,9 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           last_error TEXT,
           last_used_at TEXT,
           created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+          updated_at TEXT NOT NULL,
+          quota_limit INTEGER NOT NULL DEFAULT 0,
+          quota_remaining INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_accounts_provider_active
           ON accounts(provider, is_active);
@@ -164,6 +178,7 @@ async fn migrate_quota_columns(pool: &SqlitePool) -> AppResult<()> {
 pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
     match provider {
         "grok-cli" => (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA),
+        "qoder" => (0, 0),
         _ => (0, 0),
     }
 }
@@ -171,8 +186,31 @@ pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
 pub fn quota_kind_for_provider(provider: &str) -> &'static str {
     match provider {
         "grok-cli" => "tokens",
+        "qoder" => "credits",
         _ => "none",
     }
+}
+
+pub fn is_qoder_free_tier_model(model: &str) -> bool {
+    let m = model.rsplit('/').next().unwrap_or(model).trim();
+    m.eq_ignore_ascii_case("lite")
+}
+
+pub fn quota_blocks_pick(account: &Account, model: Option<&str>) -> bool {
+    if !account.has_quota_budget() {
+        return false;
+    }
+    if account.quota_remaining > 0 {
+        return false;
+    }
+    if account.provider == "qoder" {
+        if let Some(m) = model {
+            if is_qoder_free_tier_model(m) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,70 +508,149 @@ pub async fn list_request_logs(
     pool: &SqlitePool,
     provider: Option<&str>,
     limit: i64,
+    since: Option<&str>,
 ) -> AppResult<Vec<RequestLog>> {
     let limit = limit.clamp(1, 500);
-    if let Some(p) = provider {
-        let rows = sqlx::query_as::<_, RequestLog>(
-            r#"
-            SELECT * FROM request_logs
-            WHERE provider = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            "#,
-        )
-        .bind(p)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-        Ok(rows)
-    } else {
-        let rows = sqlx::query_as::<_, RequestLog>(
-            r#"
-            SELECT * FROM request_logs
-            ORDER BY created_at DESC
-            LIMIT ?
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-        Ok(rows)
+    match (provider, since) {
+        (Some(p), Some(s)) => {
+            let rows = sqlx::query_as::<_, RequestLog>(
+                r#"
+                SELECT * FROM request_logs
+                WHERE provider = ? AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(p)
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(rows)
+        }
+        (Some(p), None) => {
+            let rows = sqlx::query_as::<_, RequestLog>(
+                r#"
+                SELECT * FROM request_logs
+                WHERE provider = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(p)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(rows)
+        }
+        (None, Some(s)) => {
+            let rows = sqlx::query_as::<_, RequestLog>(
+                r#"
+                SELECT * FROM request_logs
+                WHERE created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(rows)
+        }
+        (None, None) => {
+            let rows = sqlx::query_as::<_, RequestLog>(
+                r#"
+                SELECT * FROM request_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(rows)
+        }
     }
 }
 
-pub async fn usage_summary(pool: &SqlitePool) -> AppResult<serde_json::Value> {
-    let totals = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
-        r#"
-        SELECT
-          COUNT(*) as requests,
-          COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as success,
-          COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as errors,
-          COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-          COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-          COALESCE(SUM(total_tokens), 0) as total_tokens
-        FROM request_logs
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
+pub async fn usage_summary(
+    pool: &SqlitePool,
+    since: Option<&str>,
+) -> AppResult<serde_json::Value> {
+    let totals = if let Some(s) = since {
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+            r#"
+            SELECT
+              COUNT(*) as requests,
+              COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as success,
+              COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as errors,
+              COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+              COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+              COALESCE(SUM(total_tokens), 0) as total_tokens
+            FROM request_logs
+            WHERE created_at >= ?
+            "#,
+        )
+        .bind(s)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
+            r#"
+            SELECT
+              COUNT(*) as requests,
+              COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) as success,
+              COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as errors,
+              COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+              COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+              COALESCE(SUM(total_tokens), 0) as total_tokens
+            FROM request_logs
+            "#,
+        )
+        .fetch_one(pool)
+        .await?
+    };
 
-    let by_model = sqlx::query_as::<_, (Option<String>, String, i64, i64, i64, i64)>(
-        r#"
-        SELECT
-          model,
-          provider,
-          COUNT(*) as requests,
-          COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-          COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-          COALESCE(SUM(total_tokens), 0) as total_tokens
-        FROM request_logs
-        GROUP BY model, provider
-        ORDER BY total_tokens DESC, requests DESC
-        LIMIT 50
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+    let by_model = if let Some(s) = since {
+        sqlx::query_as::<_, (Option<String>, String, i64, i64, i64, i64)>(
+            r#"
+            SELECT
+              model,
+              provider,
+              COUNT(*) as requests,
+              COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+              COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+              COALESCE(SUM(total_tokens), 0) as total_tokens
+            FROM request_logs
+            WHERE created_at >= ?
+            GROUP BY model, provider
+            ORDER BY total_tokens DESC, requests DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(s)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, (Option<String>, String, i64, i64, i64, i64)>(
+            r#"
+            SELECT
+              model,
+              provider,
+              COUNT(*) as requests,
+              COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+              COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+              COALESCE(SUM(total_tokens), 0) as total_tokens
+            FROM request_logs
+            GROUP BY model, provider
+            ORDER BY total_tokens DESC, requests DESC
+            LIMIT 50
+            "#,
+        )
+        .fetch_all(pool)
+        .await?
+    };
 
     let models: Vec<serde_json::Value> = by_model
         .into_iter()
@@ -557,6 +674,7 @@ pub async fn usage_summary(pool: &SqlitePool) -> AppResult<serde_json::Value> {
         "completion_tokens": totals.4,
         "total_tokens": totals.5,
         "by_model": models,
+        "since": since,
     }))
 }
 
@@ -673,14 +791,18 @@ pub async fn list_accounts(
     status: Option<&str>,
 ) -> AppResult<Vec<Account>> {
     let rows = if let Some(p) = provider {
-        sqlx::query_as::<_, Account>(
-            "SELECT * FROM accounts WHERE provider = ? ORDER BY priority ASC, created_at ASC",
-        )
-        .bind(p)
-        .fetch_all(pool)
-        .await?
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE provider = ? ORDER BY priority ASC, created_at ASC"
+        );
+        sqlx::query_as::<_, Account>(&sql)
+            .bind(p)
+            .fetch_all(pool)
+            .await?
     } else {
-        sqlx::query_as::<_, Account>("SELECT * FROM accounts ORDER BY provider, priority ASC, created_at ASC")
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY provider, priority ASC, created_at ASC"
+        );
+        sqlx::query_as::<_, Account>(&sql)
             .fetch_all(pool)
             .await?
     };
@@ -696,14 +818,103 @@ pub async fn list_accounts(
 }
 
 pub async fn get_account(pool: &SqlitePool, id: &str) -> AppResult<Account> {
-    sqlx::query_as::<_, Account>("SELECT * FROM accounts WHERE id = ?")
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE id = ?");
+    sqlx::query_as::<_, Account>(&sql)
         .bind(id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("account {id}")))
 }
 
-pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertKind {
+    Inserted,
+    Updated,
+}
+
+pub async fn find_account_by_provider_email(
+    pool: &SqlitePool,
+    provider: &str,
+    email: &str,
+) -> AppResult<Option<Account>> {
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Ok(None);
+    }
+    let sql = format!(
+        r#"
+        SELECT {ACCOUNT_COLUMNS} FROM accounts
+        WHERE provider = ?
+          AND email IS NOT NULL
+          AND lower(trim(email)) = lower(trim(?))
+        ORDER BY created_at ASC, id ASC
+        "#
+    );
+    let rows = sqlx::query_as::<_, Account>(&sql)
+        .bind(provider)
+        .bind(email)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().next())
+}
+
+fn merge_import_into_existing(existing: &Account, incoming: &Account) -> Account {
+    let now = now_rfc3339();
+    Account {
+        id: existing.id.clone(),
+        provider: incoming.provider.clone(),
+        email: incoming
+            .email
+            .clone()
+            .or_else(|| existing.email.clone()),
+        name: incoming.name.clone().or_else(|| existing.name.clone()),
+        is_active: if incoming.is_active != 0 { 1 } else { 0 },
+        priority: existing.priority,
+        data: incoming.data.clone(),
+        cooldown_until: None,
+        last_error: None,
+        last_used_at: existing.last_used_at.clone(),
+        created_at: existing.created_at.clone(),
+        updated_at: now,
+        quota_limit: existing.quota_limit,
+        quota_remaining: existing.quota_remaining,
+    }
+}
+
+async fn deactivate_email_duplicates(
+    pool: &SqlitePool,
+    provider: &str,
+    email: &str,
+    keep_id: &str,
+) -> AppResult<u64> {
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Ok(0);
+    }
+    let now = now_rfc3339();
+    let res = sqlx::query(
+        r#"
+        UPDATE accounts
+        SET is_active = 0,
+            last_error = 'duplicate: superseded by same email import',
+            updated_at = ?
+        WHERE provider = ?
+          AND id != ?
+          AND email IS NOT NULL
+          AND lower(trim(email)) = lower(trim(?))
+          AND is_active != 0
+        "#,
+    )
+    .bind(&now)
+    .bind(provider)
+    .bind(keep_id)
+    .bind(email)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+async fn write_account_row(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
     sqlx::query(
         r#"
         INSERT INTO accounts (
@@ -743,6 +954,59 @@ pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn upsert_account(pool: &SqlitePool, acc: &Account) -> AppResult<UpsertKind> {
+    let (kind, _) = upsert_account_returning(pool, acc).await?;
+    Ok(kind)
+}
+
+pub async fn upsert_account_returning(
+    pool: &SqlitePool,
+    acc: &Account,
+) -> AppResult<(UpsertKind, Account)> {
+    if let Some(email) = acc
+        .email
+        .as_ref()
+        .map(|e| e.trim())
+        .filter(|e| !e.is_empty() && e.contains('@'))
+    {
+        if let Some(existing) = find_account_by_provider_email(pool, &acc.provider, email).await? {
+            let merged = merge_import_into_existing(&existing, acc);
+            write_account_row(pool, &merged).await?;
+            let _ = deactivate_email_duplicates(pool, &merged.provider, email, &merged.id).await?;
+            return Ok((UpsertKind::Updated, merged));
+        }
+    }
+
+    if let Ok(by_id) = get_account(pool, &acc.id).await {
+        let mut row = acc.clone();
+        row.created_at = by_id.created_at;
+        if row.email.as_ref().map(|e| e.trim().is_empty()).unwrap_or(true) {
+            row.email = by_id.email;
+        }
+        write_account_row(pool, &row).await?;
+        if let Some(email) = row
+            .email
+            .as_ref()
+            .map(|e| e.trim())
+            .filter(|e| !e.is_empty() && e.contains('@'))
+        {
+            let _ = deactivate_email_duplicates(pool, &row.provider, email, &row.id).await?;
+        }
+        return Ok((UpsertKind::Updated, row));
+    }
+
+    write_account_row(pool, acc).await?;
+    if let Some(email) = acc
+        .email
+        .as_ref()
+        .map(|e| e.trim())
+        .filter(|e| !e.is_empty() && e.contains('@'))
+    {
+        let _ = deactivate_email_duplicates(pool, &acc.provider, email, &acc.id).await?;
+    }
+    Ok((UpsertKind::Inserted, acc.clone()))
 }
 
 pub async fn update_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
@@ -819,6 +1083,7 @@ pub async fn delete_accounts_by_providers(
 pub async fn list_eligible_accounts(
     pool: &SqlitePool,
     provider: &str,
+    model: Option<&str>,
 ) -> AppResult<Vec<Account>> {
     let now = now_rfc3339();
     let _ = sqlx::query(
@@ -847,32 +1112,38 @@ pub async fn list_eligible_accounts(
     .execute(pool)
     .await;
 
-    let rows = sqlx::query_as::<_, Account>(
+    let sql = format!(
         r#"
-        SELECT * FROM accounts
+        SELECT {ACCOUNT_COLUMNS} FROM accounts
         WHERE provider = ?
           AND is_active = 1
           AND (cooldown_until IS NULL OR cooldown_until < ?)
-          AND (quota_limit <= 0 OR quota_remaining > 0)
         ORDER BY priority ASC, last_used_at IS NOT NULL, last_used_at ASC, created_at ASC
-        "#,
-    )
-    .bind(provider)
-    .bind(&now)
-    .fetch_all(pool)
+        "#
+    );
+    let rows = sqlx::query_as::<_, Account>(&sql)
+        .bind(provider)
+        .bind(&now)
+        .fetch_all(pool)
     .await?;
-    Ok(rows)
+
+    let eligible: Vec<Account> = rows
+        .into_iter()
+        .filter(|a| !quota_blocks_pick(a, model))
+        .collect();
+    Ok(eligible)
 }
 
 pub async fn pick_account(
     pool: &SqlitePool,
     provider: &str,
     exclude_ids: &[String],
+    model: Option<&str>,
 ) -> AppResult<(Account, LoadBalance)> {
     let settings = get_provider_settings(pool, provider).await?;
     let strategy =
         LoadBalance::parse(&settings.load_balance).unwrap_or_default();
-    let mut eligible = list_eligible_accounts(pool, provider).await?;
+    let mut eligible = list_eligible_accounts(pool, provider, model).await?;
     if !exclude_ids.is_empty() {
         eligible.retain(|a| !exclude_ids.iter().any(|id| id == &a.id));
     }
@@ -1053,5 +1324,261 @@ mod tests {
         assert_eq!(a.status_label(), "fallen");
         a.last_error = Some("other: weird".into());
         assert_eq!(a.status_label(), "fallen");
+    }
+
+    #[test]
+    fn quota_kind_qoder_is_credits() {
+        assert_eq!(quota_kind_for_provider("qoder"), "credits");
+        assert_eq!(quota_kind_for_provider("grok-cli"), "tokens");
+        assert_eq!(quota_kind_for_provider("other"), "none");
+    }
+
+    #[test]
+    fn default_quota_qoder_stays_zero() {
+        assert_eq!(default_quota_for_provider("qoder"), (0, 0));
+        assert_eq!(
+            default_quota_for_provider("grok-cli"),
+            (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA)
+        );
+    }
+
+    #[test]
+    fn free_tier_model_only_lite() {
+        assert!(is_qoder_free_tier_model("lite"));
+        assert!(is_qoder_free_tier_model("qd/lite"));
+        assert!(is_qoder_free_tier_model("QD/Lite"));
+        assert!(!is_qoder_free_tier_model("auto"));
+        assert!(!is_qoder_free_tier_model("qd/auto"));
+        assert!(!is_qoder_free_tier_model("ultimate"));
+        assert!(!is_qoder_free_tier_model(""));
+        assert!(!is_qoder_free_tier_model("gcli/grok-4"));
+    }
+
+    fn qoder_exhausted() -> Account {
+        Account {
+            id: "q1".into(),
+            provider: "qoder".into(),
+            email: Some("q@x.y".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: "{}".into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            quota_limit: 300,
+            quota_remaining: 0,
+        }
+    }
+
+    #[test]
+    fn quota_blocks_paid_when_exhausted() {
+        let a = qoder_exhausted();
+        assert!(quota_blocks_pick(&a, Some("qd/auto")));
+        assert!(quota_blocks_pick(&a, Some("auto")));
+        assert!(quota_blocks_pick(&a, None), "None is strict (paid)");
+    }
+
+    #[test]
+    fn quota_allows_lite_when_exhausted() {
+        let a = qoder_exhausted();
+        assert!(!quota_blocks_pick(&a, Some("qd/lite")));
+        assert!(!quota_blocks_pick(&a, Some("lite")));
+    }
+
+    #[test]
+    fn quota_allows_unsynced_qoder() {
+        let mut a = qoder_exhausted();
+        a.quota_limit = 0;
+        a.quota_remaining = 0;
+        assert!(!quota_blocks_pick(&a, Some("qd/auto")));
+        assert!(!quota_blocks_pick(&a, Some("qd/lite")));
+        assert!(!quota_blocks_pick(&a, None));
+    }
+
+    #[test]
+    fn quota_blocks_grok_when_exhausted() {
+        let mut a = sample_account();
+        a.quota_remaining = 0;
+        assert!(quota_blocks_pick(&a, Some("gcli/grok-4")));
+        assert!(quota_blocks_pick(&a, None));
+    }
+
+    #[tokio::test]
+    async fn list_eligible_qoder_free_vs_paid() {
+        let dir = std::env::temp_dir().join(format!("marionette-db-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+        let mut acc = qoder_exhausted();
+        acc.created_at = now_rfc3339();
+        acc.updated_at = now_rfc3339();
+        upsert_account(&pool, &acc).await.unwrap();
+
+        let paid = list_eligible_accounts(&pool, "qoder", Some("qd/auto"))
+            .await
+            .unwrap();
+        assert!(
+            paid.is_empty(),
+            "exhausted qoder must not be eligible for paid models"
+        );
+
+        let free = list_eligible_accounts(&pool, "qoder", Some("qd/lite"))
+            .await
+            .unwrap();
+        assert_eq!(free.len(), 1);
+        assert_eq!(free[0].id, "q1");
+
+        let strict = list_eligible_accounts(&pool, "qoder", None).await.unwrap();
+        assert!(
+            strict.is_empty(),
+            "model=None must be strict and exclude exhausted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upsert_merges_same_provider_email_keeps_id() {
+        let dir = std::env::temp_dir().join(format!("marionette-db-merge-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+
+        let now = now_rfc3339();
+        let first = Account {
+            id: "keep-me".into(),
+            provider: "grok-cli".into(),
+            email: Some("a@x.ai".into()),
+            name: Some("A".into()),
+            is_active: 1,
+            priority: 3,
+            data: r#"{"accessToken":"old-access","refreshToken":"old-rt"}"#.into(),
+            cooldown_until: Some("2099-01-01T00:00:00.000Z".into()),
+            last_error: Some("rate limited".into()),
+            last_used_at: Some("2026-01-01T00:00:00.000Z".into()),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: 42,
+        };
+        assert_eq!(
+            upsert_account(&pool, &first).await.unwrap(),
+            UpsertKind::Inserted
+        );
+
+        let second = Account {
+            id: "new-uuid-from-farm".into(),
+            provider: "grok-cli".into(),
+            email: Some("A@x.ai".into()),
+            name: Some("A relog".into()),
+            is_active: 1,
+            priority: 0,
+            data: r#"{"accessToken":"new-access","refreshToken":"new-rt"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: GROK_TOKEN_QUOTA,
+        };
+        let (kind, saved) = upsert_account_returning(&pool, &second).await.unwrap();
+        assert_eq!(kind, UpsertKind::Updated);
+        assert_eq!(saved.id, "keep-me");
+        assert!(saved.data.contains("new-access"));
+        assert!(saved.data.contains("new-rt"));
+        assert_eq!(saved.priority, 3);
+        assert_eq!(saved.quota_remaining, 42);
+        assert!(saved.cooldown_until.is_none());
+        assert!(saved.last_error.is_none());
+        assert_eq!(
+            saved.last_used_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
+
+        let all = list_accounts(&pool, Some("grok-cli"), None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1, "must not create duplicate row");
+        assert_eq!(all[0].id, "keep-me");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upsert_deactivates_extra_same_email_rows() {
+        let dir = std::env::temp_dir().join(format!("marionette-db-dup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+        let now = now_rfc3339();
+
+        let a1 = Account {
+            id: "row-1".into(),
+            provider: "grok-cli".into(),
+            email: Some("dup@x.ai".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"accessToken":"t1"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: GROK_TOKEN_QUOTA,
+        };
+        write_account_row(&pool, &a1).await.unwrap();
+        let a2 = Account {
+            id: "row-2".into(),
+            provider: "grok-cli".into(),
+            email: Some("dup@x.ai".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"accessToken":"t2"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: GROK_TOKEN_QUOTA,
+        };
+        write_account_row(&pool, &a2).await.unwrap();
+
+        let fresh = Account {
+            id: "farm-new".into(),
+            provider: "grok-cli".into(),
+            email: Some("dup@x.ai".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"accessToken":"t3","refreshToken":"r3"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            quota_limit: GROK_TOKEN_QUOTA,
+            quota_remaining: GROK_TOKEN_QUOTA,
+        };
+        let (kind, saved) = upsert_account_returning(&pool, &fresh).await.unwrap();
+        assert_eq!(kind, UpsertKind::Updated);
+        assert_eq!(saved.id, "row-1");
+        assert!(saved.data.contains("t3"));
+
+        let all = list_accounts(&pool, Some("grok-cli"), None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        let active: Vec<_> = all.iter().filter(|a| a.is_active != 0).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "row-1");
+        let cut = all.iter().find(|a| a.id == "row-2").unwrap();
+        assert_eq!(cut.is_active, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
