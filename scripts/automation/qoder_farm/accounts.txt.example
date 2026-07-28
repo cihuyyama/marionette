@@ -1,0 +1,4 @@
+# GSuite: email|password  (or email:password)
+# One account per line. # comments ok.
+
+# user@your-gsuite.com|YourPassword
