@@ -33,7 +33,7 @@ pub async fn handle_chat(
 
     for attempt in 0..8 {
         let (mut account, strategy) =
-            match db::pick_account(&state.pool, provider_id, &tried).await {
+            match db::pick_account(&state.pool, provider_id, &tried, Some(model.as_str())).await {
                 Ok(v) => v,
                 Err(e) => {
                     if attempt == 0 {
@@ -76,6 +76,11 @@ pub async fn handle_chat(
             last_err = Some(e.into());
             continue;
         }
+        if should_server_resync_quota(provider_id) && account.quota_limit == 0 {
+            if let Err(e) = provider.sync_quota(&mut account).await {
+                warn!(account = %account.id, error = %e, "pre-chat quota sync failed");
+            }
+        }
         account.updated_at = db::now_rfc3339();
         db::update_account(&state.pool, &account).await?;
 
@@ -83,6 +88,7 @@ pub async fn handle_chat(
             Ok(outcome) => {
                 return handle_chat_success(
                     state,
+                    provider.clone(),
                     provider_id,
                     &model,
                     strategy,
@@ -105,6 +111,7 @@ pub async fn handle_chat(
                                 Ok(outcome) => {
                                     return handle_chat_success(
                                         state,
+                                        provider.clone(),
                                         provider_id,
                                         &model,
                                         strategy,
@@ -174,8 +181,17 @@ fn should_retry_same_account(
         && !already_retried
 }
 
+fn should_local_token_decrement(provider_id: &str) -> bool {
+    provider_id == "grok-cli"
+}
+
+fn should_server_resync_quota(provider_id: &str) -> bool {
+    provider_id == "qoder"
+}
+
 async fn handle_chat_success(
     state: &AppState,
+    provider: Arc<dyn Provider>,
     provider_id: &str,
     model: &str,
     strategy: db::LoadBalance,
@@ -187,26 +203,20 @@ async fn handle_chat_success(
     match outcome {
         ChatOutcome::Json(v) => {
             let (prompt, completion, total) = extract_usage(&v);
-            let credits = if account.has_quota_budget() {
-                total.or_else(|| match (prompt, completion) {
-                    (Some(p), Some(c)) => Some(p + c),
-                    (Some(p), None) => Some(p),
-                    (None, Some(c)) => Some(c),
-                    _ => None,
-                })
-            } else {
-                None
-            };
-            let (q_before, q_after, used) = if let Some(c) = credits.filter(|c| *c > 0) {
-                db::decrement_quota(&state.pool, &account.id, c)
-                    .await
-                    .unwrap_or((account.quota_remaining, account.quota_remaining, 0))
-            } else {
-                (account.quota_remaining, account.quota_remaining, 0)
-            };
-            if used > 0 {
-                account.quota_remaining = q_after;
-            }
+            let token_spend = total.or_else(|| match (prompt, completion) {
+                (Some(p), Some(c)) => Some(p + c),
+                (Some(p), None) => Some(p),
+                (None, Some(c)) => Some(c),
+                _ => None,
+            });
+            let (q_before, q_after, used) = apply_success_quota(
+                state,
+                provider.as_ref(),
+                provider_id,
+                &mut account,
+                token_spend,
+            )
+            .await;
             let _ = log_request(
                 &state.pool,
                 provider_id,
@@ -218,12 +228,12 @@ async fn handle_chat_success(
                 completion,
                 total,
                 if used > 0 { Some(used) } else { None },
-                if account.has_quota_budget() {
+                if account.has_quota_budget() || q_before != q_after {
                     Some(q_before)
                 } else {
                     None
                 },
-                if account.has_quota_budget() {
+                if account.has_quota_budget() || q_before != q_after {
                     Some(q_after)
                 } else {
                     None
@@ -275,14 +285,27 @@ async fn handle_chat_success(
 
             let pool = state.pool.clone();
             let account_id = account.id.clone();
-            let has_quota = account.has_quota_budget();
+            let local_decr = should_local_token_decrement(provider_id);
+            let server_sync = should_server_resync_quota(provider_id);
             let started_at = started;
             tokio::spawn(async move {
                 let usage = match usage_rx.await {
                     Ok(Some(u)) => u.normalized(),
-                    Ok(None) | Err(_) => return,
+                    Ok(None) | Err(_) => {
+                        if server_sync {
+                            if let Ok(mut acc) = db::get_account(&pool, &account_id).await {
+                                if let Err(e) = provider.sync_quota(&mut acc).await {
+                                    warn!(account = %account_id, error = %e, "stream end quota sync failed");
+                                } else {
+                                    acc.updated_at = db::now_rfc3339();
+                                    let _ = db::update_account(&pool, &acc).await;
+                                }
+                            }
+                        }
+                        return;
+                    }
                 };
-                if usage.is_empty() || log_id.is_empty() {
+                if log_id.is_empty() && !server_sync {
                     return;
                 }
                 let total = if usage.total_tokens > 0 {
@@ -293,7 +316,7 @@ async fn handle_chat_success(
                 let mut credits_used = None;
                 let mut q_before = None;
                 let mut q_after = None;
-                if has_quota && total > 0 {
+                if local_decr && total > 0 {
                     if let Ok((before, after, used)) =
                         db::decrement_quota(&pool, &account_id, total).await
                     {
@@ -303,20 +326,42 @@ async fn handle_chat_success(
                             q_after = Some(after);
                         }
                     }
+                } else if server_sync {
+                    if let Ok(mut acc) = db::get_account(&pool, &account_id).await {
+                        let before = acc.quota_remaining;
+                        match provider.sync_quota(&mut acc).await {
+                            Ok(()) => {
+                                let after = acc.quota_remaining;
+                                let used = (before - after).max(0);
+                                if used > 0 {
+                                    credits_used = Some(used);
+                                }
+                                q_before = Some(before);
+                                q_after = Some(after);
+                                acc.updated_at = db::now_rfc3339();
+                                let _ = db::update_account(&pool, &acc).await;
+                            }
+                            Err(e) => {
+                                warn!(account = %account_id, error = %e, "stream end quota sync failed");
+                            }
+                        }
+                    }
                 }
-                let full_ms = started_at.elapsed().as_millis() as i64;
-                let _ = db::update_request_log_usage(
-                    &pool,
-                    &log_id,
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    total,
-                    credits_used,
-                    q_before,
-                    q_after,
-                    Some(full_ms),
-                )
-                .await;
+                if !log_id.is_empty() && !usage.is_empty() {
+                    let full_ms = started_at.elapsed().as_millis() as i64;
+                    let _ = db::update_request_log_usage(
+                        &pool,
+                        &log_id,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        total,
+                        credits_used,
+                        q_before,
+                        q_after,
+                        Some(full_ms),
+                    )
+                    .await;
+                }
             });
 
             let (_tx, dummy_rx) = tokio::sync::oneshot::channel();
@@ -326,6 +371,51 @@ async fn handle_chat_success(
             })
         }
     }
+}
+
+async fn apply_success_quota(
+    state: &AppState,
+    provider: &dyn Provider,
+    provider_id: &str,
+    account: &mut Account,
+    total_tokens: Option<i64>,
+) -> (i64, i64, i64) {
+    if should_local_token_decrement(provider_id) {
+        let credits = if account.has_quota_budget() {
+            total_tokens
+        } else {
+            None
+        };
+        if let Some(c) = credits.filter(|c| *c > 0) {
+            return db::decrement_quota(&state.pool, &account.id, c)
+                .await
+                .map(|(b, a, u)| {
+                    if u > 0 {
+                        account.quota_remaining = a;
+                    }
+                    (b, a, u)
+                })
+                .unwrap_or((account.quota_remaining, account.quota_remaining, 0));
+        }
+        return (account.quota_remaining, account.quota_remaining, 0);
+    }
+
+    if should_server_resync_quota(provider_id) {
+        let before = account.quota_remaining;
+        match provider.sync_quota(account).await {
+            Ok(()) => {
+                let after = account.quota_remaining;
+                let used = (before - after).max(0);
+                return (before, after, used);
+            }
+            Err(e) => {
+                warn!(account = %account.id, error = %e, "post-chat quota sync failed");
+                return (before, before, 0);
+            }
+        }
+    }
+
+    (account.quota_remaining, account.quota_remaining, 0)
 }
 
 fn extract_usage(v: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
@@ -521,5 +611,13 @@ mod tests {
     #[test]
     fn no_retry_qoder_accessdenied() {
         assert!(!should_retry_same_account("qoder", &ProviderError::AccessDenied, false));
+    }
+
+    #[test]
+    fn grok_local_token_decrement_qoder_server_resync() {
+        assert!(should_local_token_decrement("grok-cli"));
+        assert!(!should_local_token_decrement("qoder"));
+        assert!(should_server_resync_quota("qoder"));
+        assert!(!should_server_resync_quota("grok-cli"));
     }
 }
