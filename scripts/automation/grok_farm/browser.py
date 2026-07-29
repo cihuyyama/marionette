@@ -135,6 +135,9 @@ async def launch_camoufox(cfg: Config, prog: Progress) -> dict[str, Any]:
         "humanize": humanize,
         "locale": "en-US",
         "screen": Screen(max_width=1920, max_height=1080),
+        "geoip": True,
+        "disable_coop": True,
+        "i_know_what_im_doing": True,
     }
 
     proxy_url = await next_proxy_url(cfg)
