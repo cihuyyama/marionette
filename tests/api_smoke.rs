@@ -146,3 +146,101 @@ async fn provider_routing() {
     assert_eq!(req.provider_id(), Some("grok-cli"));
     assert_eq!(req.upstream_model(), "grok-4.5");
 }
+
+#[tokio::test]
+async fn images_generations_requires_key() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"prompt":"a cat"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn images_generations_missing_prompt() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"grok-imagine-image"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn images_edits_requires_image() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/images/edits")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"prompt":"make it blue","model":"grok-imagine-image-edit"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn images_generations_no_accounts() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"prompt":"a cat","model":"grok-imagine-image"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::OK);
+    assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn models_lists_imagine() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    let data = v["data"].as_array().expect("data array");
+    assert!(
+        data.iter().any(|m| m["id"].as_str() == Some("gcli/grok-imagine-image")),
+        "expected gcli/grok-imagine-image in catalog"
+    );
+}
