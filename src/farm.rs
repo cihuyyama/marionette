@@ -87,8 +87,10 @@ pub struct FarmJob {
 
 #[derive(Debug, Deserialize)]
 pub struct StartFarmRequest {
-    /// One account per line: email|password or email:password
+    /// One account per line: email|password, email:password, or bare email (+ default_password).
     pub accounts: String,
+    #[serde(default)]
+    pub default_password: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default = "default_true")]
@@ -1000,10 +1002,16 @@ impl FarmManager {
         let is_grok = provider == "grok-cli";
         let (pkg_dir, pkg_parent, module, output_name) = self.package_paths_for(provider);
 
-        let mut accounts = parse_accounts_text(&req.accounts);
+        let default_pw = req
+            .default_password
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut accounts = parse_accounts_text(&req.accounts, default_pw);
         if accounts.is_empty() {
             return Err(AppError::BadRequest(
-                "no accounts: use email|password lines".into(),
+                "no accounts: use email|password lines (or bare email + default_password)"
+                    .into(),
             ));
         }
 
@@ -1751,7 +1759,7 @@ impl FarmManager {
         let failed_path = work.join("accounts.failed.txt");
         if failed_path.is_file() {
             let text = std::fs::read_to_string(&failed_path).unwrap_or_default();
-            let n = parse_accounts_text(&text).len();
+            let n = parse_accounts_text(&text, None).len();
             if n > 0 {
                 return Ok((text, n));
             }
@@ -1765,6 +1773,7 @@ impl FarmManager {
         }
         let all = parse_accounts_text(
             &std::fs::read_to_string(&accounts_path).unwrap_or_default(),
+            None,
         );
         let qoder_out = work.join("qoder-accounts.json");
         let grok_out = work.join("grok-accounts.json");
@@ -1829,6 +1838,7 @@ impl FarmManager {
         info!(from_job = %job_id, failed = n, "retrying failed farm accounts");
         let req = StartFarmRequest {
             accounts,
+            default_password: None,
             provider,
             inject: opts.inject,
             headless: opts.headless,
@@ -1967,7 +1977,10 @@ fn push_inject_history(history: &mut VecDeque<InjectJob>, mut job: InjectJob) {
     }
 }
 
-fn parse_accounts_text(raw: &str) -> Vec<(String, String)> {
+fn parse_accounts_text(raw: &str, default_password: Option<&str>) -> Vec<(String, String)> {
+    let default_password = default_password
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for line in raw.lines() {
@@ -1976,10 +1989,30 @@ fn parse_accounts_text(raw: &str) -> Vec<(String, String)> {
             continue;
         }
         let (email, pass) = if let Some((e, p)) = line.split_once('|') {
-            (e.trim(), p.trim())
+            let email = e.trim();
+            let pass = p.trim();
+            if pass.is_empty() {
+                match default_password {
+                    Some(dp) => (email, dp),
+                    None => continue,
+                }
+            } else {
+                (email, pass)
+            }
         } else if let Some(at) = line.find('@') {
             if let Some(colon) = line[at..].find(':').map(|i| at + i) {
-                (&line[..colon], &line[colon + 1..])
+                let email = line[..colon].trim();
+                let pass = line[colon + 1..].trim();
+                if pass.is_empty() {
+                    match default_password {
+                        Some(dp) => (email, dp),
+                        None => continue,
+                    }
+                } else {
+                    (email, pass)
+                }
+            } else if let Some(dp) = default_password {
+                (line, dp)
             } else {
                 continue;
             }
@@ -2234,6 +2267,53 @@ mod tests {
         assert_eq!(normalize_farm_provider(Some("grok-cli")), "grok-cli");
         assert_eq!(normalize_farm_provider(Some("grok")), "grok-cli");
         assert_eq!(normalize_farm_provider(Some("GCLI")), "grok-cli");
+    }
+
+    #[test]
+    fn parse_accounts_pipe_and_colon() {
+        let rows = parse_accounts_text(
+            "a@x.com|secret1\nb@y.com:secret2\n# skip\n",
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                ("a@x.com".into(), "secret1".into()),
+                ("b@y.com".into(), "secret2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_accounts_bare_email_needs_default_password() {
+        assert!(parse_accounts_text("only@x.com\n", None).is_empty());
+        let rows = parse_accounts_text("only@x.com\n", Some("shared"));
+        assert_eq!(rows, vec![("only@x.com".into(), "shared".into())]);
+    }
+
+    #[test]
+    fn parse_accounts_per_line_password_wins_over_default() {
+        let rows = parse_accounts_text(
+            "a@x.com|own\nb@y.com\nc@z.com|\n",
+            Some("shared"),
+        );
+        assert_eq!(
+            rows,
+            vec![
+                ("a@x.com".into(), "own".into()),
+                ("b@y.com".into(), "shared".into()),
+                ("c@z.com".into(), "shared".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_accounts_dedupes_case_insensitive() {
+        let rows = parse_accounts_text(
+            "A@x.com|one\na@x.com|two\n",
+            None,
+        );
+        assert_eq!(rows, vec![("A@x.com".into(), "one".into())]);
     }
 
     #[test]
