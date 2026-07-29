@@ -115,24 +115,43 @@ If xAI shows an OTP form:
 
 ## Turnstile (login)
 
-Active path (ported from monolit, Camoufox only for now):
+Managed checkbox **must be clicked until checked** — never wait-only (Camoufox for now):
 
-- Detect widget / “Verify you are human”
-- Humanized `mouse.move` approach + jiggle + click (host text / iframe / CF frame)
-- Soft remount on “Verification failed” (`turnstile.reset`)
+- Locate grey Turnstile bar (between password + Login) / “Verify you are human”
+- Humanized mouse on the **black square (left)** — not the white Login pill
+- **Block Login** while checkbox empty / no token (screenshot-stuck case)
+- Success = token length > 20 **or** checkbox checked; re-click + soft remount if still unchecked
+- Soft remount on “Verification failed” (`turnstile.reset` + clear token fields)
 - Re-fill password after CF remounts the form
-- Hard pointer click on **Login** (not bare JS `el.click()`)
+- Hard pointer click on **Login** only after solved
 
 Still not ported: vision CAPTCHA for interactive puzzles; CloakBrowser engine (phase 2).
 
-Ops tips when CF still fails:
+### Humanize vs Turnstile click
+
+Camoufox `humanize` is **launch-only** (max seconds per mouse move). You **cannot** set humanize=1 for typing then humanize=0.2 for Turnstile mid-session without restarting the browser.
+
+What *does* exist:
+
+| Phase | How motion works |
+|-------|------------------|
+| Email/password | `locator.fill` / keyboard — humanize mostly affects **mouse** to the field, not key delay |
+| Turnstile | We compute checkbox (x,y) → `mouse.move` (curved if humanize on) → `mouse.click` |
+| Login | hard pointer click after token/check |
+
+So the red cursor **is** being aimed at Turnstile; high humanize (0.8–1.5s) makes the path look like orbiting. Monolit/relogin-kit use **0.5** once at launch + short move + click.
+
+Also: launch uses **`disable_coop=True`** (Camoufox official Turnstile note) so cross-origin CF iframe accepts clicks.
 
 ```powershell
-# concurrency 1, headed, residual proxy
+# concurrency 1, headed — humanize 0.5 like monolit
 $env:GROK_HUMANIZE="true"
-$env:GROK_HUMANIZE_HEADED="1.0"
+$env:GROK_HUMANIZE_HEADED="0.5"
 python -m grok_farm -f grok_farm\accounts.txt --concurrency 1 --no-headless --debug
 ```
+
+Still orbits / token_len=0: `$env:GROK_HUMANIZE="false"` once, or residual proxy / Cloak phase 2.  
+Look for: `click turnstile checkbox`, `after click: ok=… token_len=…`.
 
 ## TODO stubs
 
