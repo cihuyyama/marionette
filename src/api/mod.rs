@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod chat;
 pub mod health;
+pub mod images;
 pub mod models;
 
 use crate::state::AppState;
@@ -13,7 +14,14 @@ pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/v1/models", get(models::list_models))
-        .route("/v1/chat/completions", post(chat::chat_completions));
+        .route("/v1/chat/completions", post(chat::chat_completions))
+        .route(
+            "/v1/images/generations",
+            post(images::images_generations),
+        )
+        .route("/images/generations", post(images::images_generations))
+        .route("/v1/images/edits", post(images::images_edits))
+        .route("/images/edits", post(images::images_edits));
 
     let admin = Router::new()
         .route("/admin/stats", get(admin::stats))
