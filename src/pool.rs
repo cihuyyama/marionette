@@ -1,6 +1,9 @@
 use crate::config::Config;
 use crate::db::{self, Account, NewRequestLog};
 use crate::error::{AppError, AppResult, ProviderError};
+use crate::images::{
+    ImageResponseFormat, build_images_response, image_provider_id, imagine_to_responses_model,
+};
 use crate::openai::ChatCompletionRequest;
 use crate::providers::{ChatOutcome, Provider};
 use crate::state::AppState;
@@ -10,6 +13,279 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
+
+/// Pool job for OpenAI Images generations/edits (grok-cli only).
+pub struct ImageJob {
+    pub model: String,
+    pub prompt: String,
+    pub refs: Vec<String>,
+    pub format: ImageResponseFormat,
+    pub n: u32,
+    pub require_refs: bool,
+}
+
+/// Pick grok-cli account, ensure auth, call image generation, apply errors like chat.
+pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
+    let provider_id = image_provider_id(&job.model).ok_or_else(|| {
+        AppError::BadRequest(format!("unknown or unsupported image model: {}", job.model))
+    })?;
+    if provider_id != "grok-cli" {
+        return Err(AppError::NotImplemented(format!(
+            "image generation for provider {provider_id}"
+        )));
+    }
+    if job.require_refs && job.refs.is_empty() {
+        return Err(AppError::BadRequest(
+            "image edits require at least one image".into(),
+        ));
+    }
+
+    let model = job.model.clone();
+    let started = Instant::now();
+    let mut last_err: Option<AppError> = None;
+    let mut last_account: Option<Account> = None;
+    let mut tried: Vec<String> = Vec::new();
+    let responses_model = imagine_to_responses_model(&model);
+
+    for attempt in 0..8 {
+        let (mut account, strategy) =
+            match db::pick_account(&state.pool, provider_id, &tried, Some(model.as_str())).await {
+                Ok(v) => v,
+                Err(e) => {
+                    if attempt == 0 {
+                        let _ = log_request(
+                            &state.pool,
+                            provider_id,
+                            &model,
+                            "error",
+                            false,
+                            started.elapsed().as_millis() as i64,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(e.to_string()),
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    break;
+                }
+            };
+
+        tried.push(account.id.clone());
+        info!(
+            account = %account.id,
+            provider = provider_id,
+            strategy = strategy.as_str(),
+            attempt,
+            "picked account for image"
+        );
+
+        if let Err(e) = state.grok.ensure_fresh_auth(&mut account).await {
+            apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+            let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+            last_account = Some(account);
+            last_err = Some(e.into());
+            continue;
+        }
+        account.updated_at = db::now_rfc3339();
+        db::update_account(&state.pool, &account).await?;
+
+        match state
+            .grok
+            .generate_image(
+                &account,
+                responses_model,
+                &job.prompt,
+                &job.refs,
+                job.n,
+            )
+            .await
+        {
+            Ok(b64_list) => {
+                if b64_list.is_empty() {
+                    let e = ProviderError::Other("no image in upstream response".into());
+                    warn!(account = %account.id, "image generation returned empty");
+                    apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                    let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id)
+                        .await;
+                    last_account = Some(account);
+                    last_err = Some(e.into());
+                    continue;
+                }
+                let duration_ms = started.elapsed().as_millis() as i64;
+                let _ = log_request(
+                    &state.pool,
+                    provider_id,
+                    &model,
+                    "success",
+                    false,
+                    duration_ms,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&account),
+                    None,
+                )
+                .await;
+                let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
+                account.last_used_at = Some(db::now_rfc3339());
+                account.last_error = None;
+                account.updated_at = db::now_rfc3339();
+                db::update_account(&state.pool, &account).await?;
+                let created = Utc::now().timestamp();
+                return Ok(build_images_response(created, &b64_list, job.format));
+            }
+            Err(e) => {
+                if should_retry_same_account(provider_id, &e, false) {
+                    warn!(account = %account.id, error = %e, "image auth expired; force_refresh + retry");
+                    match state.grok.force_refresh(&mut account).await {
+                        Ok(()) => {
+                            account.updated_at = db::now_rfc3339();
+                            let _ = db::update_account(&state.pool, &account).await;
+                            match state
+                                .grok
+                                .generate_image(
+                                    &account,
+                                    responses_model,
+                                    &job.prompt,
+                                    &job.refs,
+                                    job.n,
+                                )
+                                .await
+                            {
+                                Ok(b64_list) if !b64_list.is_empty() => {
+                                    let duration_ms = started.elapsed().as_millis() as i64;
+                                    let _ = log_request(
+                                        &state.pool,
+                                        provider_id,
+                                        &model,
+                                        "success",
+                                        false,
+                                        duration_ms,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        Some(&account),
+                                        None,
+                                    )
+                                    .await;
+                                    let _ = db::note_pick_success(
+                                        &state.pool,
+                                        provider_id,
+                                        strategy,
+                                        &account.id,
+                                    )
+                                    .await;
+                                    account.last_used_at = Some(db::now_rfc3339());
+                                    account.last_error = None;
+                                    account.updated_at = db::now_rfc3339();
+                                    db::update_account(&state.pool, &account).await?;
+                                    let created = Utc::now().timestamp();
+                                    return Ok(build_images_response(
+                                        created,
+                                        &b64_list,
+                                        job.format,
+                                    ));
+                                }
+                                Ok(_) => {
+                                    let e2 = ProviderError::Other(
+                                        "no image in upstream response after refresh".into(),
+                                    );
+                                    apply_provider_error(
+                                        &state.pool,
+                                        &state.config,
+                                        &mut account,
+                                        &e2,
+                                    )
+                                    .await?;
+                                    let _ = db::note_pick_failure(
+                                        &state.pool,
+                                        provider_id,
+                                        strategy,
+                                        &account.id,
+                                    )
+                                    .await;
+                                    last_account = Some(account);
+                                    last_err = Some(e2.into());
+                                    continue;
+                                }
+                                Err(e2) => {
+                                    apply_provider_error(
+                                        &state.pool,
+                                        &state.config,
+                                        &mut account,
+                                        &e2,
+                                    )
+                                    .await?;
+                                    let _ = db::note_pick_failure(
+                                        &state.pool,
+                                        provider_id,
+                                        strategy,
+                                        &account.id,
+                                    )
+                                    .await;
+                                    last_account = Some(account);
+                                    last_err = Some(e2.into());
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(re) => {
+                            apply_provider_error(&state.pool, &state.config, &mut account, &re)
+                                .await?;
+                            let _ = db::note_pick_failure(
+                                &state.pool,
+                                provider_id,
+                                strategy,
+                                &account.id,
+                            )
+                            .await;
+                            last_account = Some(account);
+                            last_err = Some(re.into());
+                            continue;
+                        }
+                    }
+                }
+                warn!(account = %account.id, error = %e, "upstream image failed");
+                apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
+                last_account = Some(account);
+                last_err = Some(e.into());
+            }
+        }
+    }
+
+    let err = last_err.unwrap_or_else(|| AppError::NoAccounts(provider_id.into()));
+    let _ = log_request(
+        &state.pool,
+        provider_id,
+        &model,
+        "error",
+        false,
+        started.elapsed().as_millis() as i64,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        last_account.as_ref(),
+        Some(err.to_string()),
+    )
+    .await;
+    Err(err)
+}
 
 pub async fn handle_chat(
     state: &AppState,
