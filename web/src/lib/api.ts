@@ -666,6 +666,7 @@ export function getFarmStatus(settings?: Settings) {
 export function startFarmJob(
   body: {
     accounts: string;
+    default_password?: string | null;
     provider?: string;
     inject?: boolean;
     headless?: boolean;

@@ -6,8 +6,10 @@ import {
   getFarmEvents,
   getFarmStatus,
   importFarmJob,
+  listAccounts,
   retryFailedFarmJob,
   startFarmJob,
+  type Account,
   type FarmEvent,
   type FarmJob,
   type FarmStatus,
@@ -764,9 +766,29 @@ function QoderGoogleSsoFarm() {
   );
 }
 
+function needsGrokRelogin(acc: Account): boolean {
+  if (!acc.email?.trim()) return false;
+  const status = (acc.status || "").toLowerCase();
+  if (status === "cut") return true;
+  const err = (acc.last_error || "").toLowerCase();
+  if (!err) return false;
+  return (
+    err.includes("invalid_grant") ||
+    err.includes("authinvalid") ||
+    err.includes("auth_invalid") ||
+    err.includes("auth expired") ||
+    err.includes("authexpired") ||
+    err.includes("access denied") ||
+    err.includes("accessdenied") ||
+    err.includes("401") ||
+    err.includes("403")
+  );
+}
+
 function GrokReloginFarm() {
   const [status, setStatus] = useState<FarmStatus | null>(null);
   const [accounts, setAccounts] = useState("");
+  const [sharedPassword, setSharedPassword] = useState("");
   const [headless, setHeadless] = useState(false);
   const [autoImport, setAutoImport] = useState(true);
   const [skipExisting, setSkipExisting] = useState(false);
@@ -776,6 +798,7 @@ function GrokReloginFarm() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [loadingPool, setLoadingPool] = useState(false);
   const [events, setEvents] = useState<FarmEvent[]>([]);
   const [job, setJob] = useState<FarmJob | null>(null);
   const afterRef = useRef(0);
@@ -848,6 +871,45 @@ function GrokReloginFarm() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [events.length]);
 
+  async function onLoadFromPool() {
+    setError(null);
+    setNotice(null);
+    setLoadingPool(true);
+    try {
+      const res = await listAccounts({ provider: "grok-cli" });
+      const emails = res.accounts
+        .filter(needsGrokRelogin)
+        .map((a) => a.email!.trim())
+        .filter(Boolean);
+      const seen = new Set<string>();
+      const unique: string[] = [];
+      for (const e of emails) {
+        const key = e.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(e);
+      }
+      if (unique.length === 0) {
+        setNotice("No cut / invalid_grant / auth-dead grok-cli accounts with email");
+        return;
+      }
+      setAccounts(unique.join("\n"));
+      setNotice(
+        `Loaded ${unique.length} email(s) from pool (cut + auth errors). Use shared password if lines are email-only.`,
+      );
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Failed to load pool accounts",
+      );
+    } finally {
+      setLoadingPool(false);
+    }
+  }
+
   async function onStart(e: FormEvent) {
     e.preventDefault();
     setError(null);
@@ -855,9 +917,11 @@ function GrokReloginFarm() {
     setStarting(true);
     try {
       const workers = Math.max(1, Math.floor(concurrency) || 1);
+      const defaultPw = sharedPassword.trim();
       const res = await startFarmJob({
         provider: "grok-cli",
         accounts,
+        default_password: defaultPw || null,
         inject: false,
         headless,
         device_auth: false,
@@ -1051,21 +1115,61 @@ function GrokReloginFarm() {
       </div>
 
       <form className="panel farm-form" onSubmit={(e) => void onStart(e)}>
-        <div className="field" style={{ marginBottom: 0 }}>
-          <label htmlFor="grok-farm-accounts">
-            Accounts (email|password per line)
-          </label>
+        <div className="field" style={{ marginBottom: "var(--space-3)" }}>
+          <div
+            className="row-fields"
+            style={{
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: "var(--space-3)",
+              marginBottom: "var(--space-2)",
+            }}
+          >
+            <label htmlFor="grok-farm-accounts" style={{ marginBottom: 0 }}>
+              Accounts (email|password, or bare email + shared password)
+            </label>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void onLoadFromPool()}
+              disabled={busy || starting || loadingPool}
+              title="Fill emails from grok-cli pool: cut + invalid_grant / auth death"
+            >
+              {loadingPool ? "Loading…" : "Load from pool"}
+            </button>
+          </div>
           <textarea
             id="grok-farm-accounts"
             className="input mono"
             rows={8}
             value={accounts}
             onChange={(e) => setAccounts(e.target.value)}
-            placeholder={"user@example.com|password\n# comments ok"}
+            placeholder={
+              "user@example.com|password\nuser2@example.com\n# bare email uses shared password"
+            }
             disabled={busy || starting}
             required
             style={{ width: "100%", resize: "vertical" }}
           />
+        </div>
+
+        <div className="field" style={{ marginBottom: "var(--space-3)" }}>
+          <label htmlFor="grok-farm-shared-password">Shared password</label>
+          <input
+            id="grok-farm-shared-password"
+            className="input mono"
+            type="password"
+            autoComplete="off"
+            value={sharedPassword}
+            onChange={(e) => setSharedPassword(e.target.value)}
+            placeholder="Used when a line has no password"
+            disabled={busy || starting}
+            style={{ width: "100%", maxWidth: 420 }}
+          />
+          <span className="hint">
+            Per-line <code className="mono">email|password</code> wins. Bare
+            emails need this field.
+          </span>
         </div>
 
         <div className="farm-controls">
