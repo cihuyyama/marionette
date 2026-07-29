@@ -137,6 +137,112 @@ impl GrokCliProvider {
         Ok(())
     }
 
+    pub async fn generate_image(
+        &self,
+        account: &Account,
+        responses_model: &str,
+        prompt: &str,
+        refs: &[String],
+        n: u32,
+    ) -> Result<Vec<String>, ProviderError> {
+        let data = account.data_json();
+        let token = Self::access_token(&data)
+            .ok_or_else(|| ProviderError::AuthInvalid("missing accessToken".into()))?;
+
+        let (upstream_model_id, effort) = resolve_model_and_effort(responses_model);
+        let content = crate::images::build_imagine_input_content(prompt, refs);
+        let input_items = vec![json!({
+            "role": "user",
+            "content": content
+        })];
+
+        let mut reasoning = json!({ "summary": "concise" });
+        if supports_reasoning_effort(&upstream_model_id) {
+            let e = if effort.is_some() {
+                normalize_effort(effort.as_deref())
+            } else {
+                "low".into()
+            };
+            reasoning["effort"] = json!(e);
+        }
+
+        let body = json!({
+            "model": upstream_model_id,
+            "input": input_items,
+            "stream": true,
+            "store": false,
+            "tools": [{ "type": "image_generation" }],
+            "tool_choice": { "type": "image_generation" },
+            "reasoning": reasoning,
+            "include": ["reasoning.encrypted_content"]
+        });
+
+        let session_id = Uuid::new_v4().to_string();
+        let req_id = Uuid::new_v4().to_string();
+
+        let mut req_builder = self
+            .client
+            .post(RESPONSES_URL)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("x-xai-token-auth", TOKEN_AUTH)
+            .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
+            .header("x-grok-client-version", CLIENT_VERSION)
+            .header("x-authenticateresponse", "authenticate-response")
+            .header("x-compaction-at", COMPACTION_AT)
+            .header("x-grok-session-id", &session_id)
+            .header("x-grok-conv-id", &session_id)
+            .header("x-grok-req-id", &req_id)
+            .header("x-grok-turn-idx", "1")
+            .header("x-grok-model-override", &upstream_model_id);
+
+        if let Some(email) = data.get("email").and_then(|v| v.as_str()) {
+            req_builder = req_builder.header("x-email", email);
+        }
+        if let Some(user_id) = data
+            .get("userId")
+            .or_else(|| data.get("user_id"))
+            .and_then(|v| v.as_str())
+        {
+            req_builder = req_builder.header("x-userid", user_id);
+        }
+
+        let resp = req_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(classify_http_status(status, &text));
+        }
+
+        let mut buffer = String::new();
+        let mut upstream_stream = resp.bytes_stream();
+        while let Some(chunk_res) = upstream_stream.next().await {
+            let chunk = chunk_res.map_err(|e| ProviderError::Transport(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
+        let mut images = crate::images::parse_image_b64_from_sse(&buffer);
+        if images.is_empty() {
+            let snippet: String = buffer.chars().take(240).collect();
+            return Err(ProviderError::Other(format!(
+                "no image_generation_call result in SSE (len={}, head={snippet:?})",
+                buffer.len()
+            )));
+        }
+
+        let cap = n.max(1) as usize;
+        if images.len() > cap {
+            images.truncate(cap);
+        }
+        Ok(images)
+    }
 }
 
 #[async_trait]
@@ -689,6 +795,142 @@ fn content_to_text(content: &Value) -> String {
     }
 }
 
+fn normalize_image_detail(raw: Option<&str>) -> String {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => "auto".into(),
+        Some("auto") | Some("low") | Some("high") => raw.unwrap().trim().to_ascii_lowercase(),
+        Some("original") => "high".into(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn extract_image_url_from_part(part: &Value) -> Option<String> {
+    if let Some(s) = part.get("image_url").and_then(|v| v.as_str()) {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(obj) = part.get("image_url").and_then(|v| v.as_object()) {
+        if let Some(s) = obj.get("url").and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    if let Some(s) = part.get("url").and_then(|v| v.as_str()) {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(s) = part.get("image").and_then(|v| v.as_str()) {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn extract_image_detail_from_part(part: &Value) -> String {
+    if let Some(d) = part.get("detail").and_then(|v| v.as_str()) {
+        return normalize_image_detail(Some(d));
+    }
+    if let Some(obj) = part.get("image_url").and_then(|v| v.as_object()) {
+        if let Some(d) = obj.get("detail").and_then(|v| v.as_str()) {
+            return normalize_image_detail(Some(d));
+        }
+    }
+    normalize_image_detail(None)
+}
+
+fn part_is_image(part: &Value) -> bool {
+    match part.get("type").and_then(|v| v.as_str()) {
+        Some("image_url") | Some("input_image") | Some("image") => true,
+        _ => extract_image_url_from_part(part).is_some()
+            && part.get("text").and_then(|v| v.as_str()).is_none(),
+    }
+}
+
+fn content_array_has_image(parts: &[Value]) -> bool {
+    parts.iter().any(part_is_image)
+}
+
+fn text_part_type_for_role(role: &str) -> &'static str {
+    if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    }
+}
+
+fn part_to_input_image(part: &Value) -> Option<Value> {
+    let url = extract_image_url_from_part(part)?;
+    let detail = extract_image_detail_from_part(part);
+    Some(json!({
+        "type": "input_image",
+        "image_url": url,
+        "detail": detail
+    }))
+}
+
+fn part_text(part: &Value) -> Option<String> {
+    if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(t) = part.get("refusal").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(t) = part.as_str() {
+        return Some(t.to_string());
+    }
+    None
+}
+
+fn content_to_message_content(content: &Value, role: &str) -> Value {
+    match content {
+        Value::String(s) => Value::String(s.clone()),
+        Value::Null => Value::String(String::new()),
+        Value::Array(parts) => {
+            if !content_array_has_image(parts) {
+                return Value::String(content_to_text(content));
+            }
+            let text_ty = text_part_type_for_role(role);
+            let mut out = Vec::new();
+            for p in parts {
+                let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match ty {
+                    "image_url" | "input_image" | "image" => {
+                        if let Some(img) = part_to_input_image(p) {
+                            out.push(img);
+                        }
+                    }
+                    "text" | "input_text" | "output_text" | "refusal" | "" => {
+                        if part_is_image(p) {
+                            if let Some(img) = part_to_input_image(p) {
+                                out.push(img);
+                            }
+                        } else if let Some(t) = part_text(p) {
+                            out.push(json!({ "type": text_ty, "text": t }));
+                        }
+                    }
+                    _ => {
+                        if let Some(img) = part_to_input_image(p) {
+                            out.push(img);
+                        } else if let Some(t) = part_text(p) {
+                            out.push(json!({ "type": text_ty, "text": t }));
+                        }
+                    }
+                }
+            }
+            Value::Array(out)
+        }
+        other => Value::String(other.to_string()),
+    }
+}
+
 fn build_responses_input(messages: &[crate::openai::ChatMessage]) -> Vec<Value> {
     let mut input = Vec::new();
 
@@ -700,22 +942,29 @@ fn build_responses_input(messages: &[crate::openai::ChatMessage]) -> Vec<Value> 
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "call_unknown".into());
+            let output = content_to_message_content(&msg.content, "user");
             input.push(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": content_to_text(&msg.content)
+                "output": output
             }));
             continue;
         }
 
         if role == "assistant" {
             if let Some(tool_calls) = msg.tool_calls.as_ref().and_then(|v| v.as_array()) {
-                let text = content_to_text(&msg.content);
-                if !text.is_empty() {
+                let content = content_to_message_content(&msg.content, role);
+                let empty = match &content {
+                    Value::String(s) => s.is_empty(),
+                    Value::Array(a) => a.is_empty(),
+                    Value::Null => true,
+                    _ => false,
+                };
+                if !empty {
                     input.push(json!({
                         "type": "message",
                         "role": "assistant",
-                        "content": text
+                        "content": content
                     }));
                 }
                 for tc in tool_calls {
@@ -751,11 +1000,11 @@ fn build_responses_input(messages: &[crate::openai::ChatMessage]) -> Vec<Value> 
             }
         }
 
-        let content_str = content_to_text(&msg.content);
+        let content = content_to_message_content(&msg.content, role);
         input.push(json!({
             "type": "message",
             "role": role,
-            "content": content_str
+            "content": content
         }));
     }
 
@@ -1398,6 +1647,161 @@ mod tests {
                 .iter()
                 .any(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
         );
+    }
+
+    #[test]
+    fn build_input_preserves_image_url_parts() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: json!([
+                { "type": "text", "text": "what is this?" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "https://example.com/cat.png" }
+                }
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let input = build_responses_input(&messages);
+        assert_eq!(input.len(), 1);
+        let content = input[0].get("content").unwrap();
+        let parts = content.as_array().expect("multimodal content must be array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "what is this?");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "https://example.com/cat.png");
+        assert_eq!(parts[1]["detail"], "auto");
+    }
+
+    #[test]
+    fn build_input_image_url_string_form() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: json!([
+                { "type": "text", "text": "decode" },
+                {
+                    "type": "image_url",
+                    "image_url": "data:image/png;base64,AA=="
+                }
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let input = build_responses_input(&messages);
+        let parts = input[0]["content"].as_array().unwrap();
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "data:image/png;base64,AA==");
+        assert_eq!(parts[1]["detail"], "auto");
+    }
+
+    #[test]
+    fn build_input_input_image_native() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: json!([
+                { "type": "input_text", "text": "see" },
+                {
+                    "type": "input_image",
+                    "image_url": "https://cdn.example/x.jpg",
+                    "detail": "high"
+                }
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let input = build_responses_input(&messages);
+        let parts = input[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "https://cdn.example/x.jpg");
+        assert_eq!(parts[1]["detail"], "high");
+    }
+
+    #[test]
+    fn build_input_text_only_stays_string() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: json!("hello plain"),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let input = build_responses_input(&messages);
+        assert_eq!(input[0]["content"], "hello plain");
+        assert!(input[0]["content"].is_string());
+    }
+
+    #[test]
+    fn build_input_text_array_no_image_stays_joined_string() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: json!([
+                { "type": "text", "text": "foo" },
+                { "type": "text", "text": "bar" }
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let input = build_responses_input(&messages);
+        assert!(input[0]["content"].is_string());
+        assert_eq!(input[0]["content"], "foobar");
+    }
+
+    #[test]
+    fn build_input_tool_multimodal_output_array() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: json!("go"),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: json!(""),
+                name: None,
+                tool_calls: Some(json!([{
+                    "id": "call_img",
+                    "type": "function",
+                    "function": { "name": "screenshot", "arguments": "{}" }
+                }])),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: json!([
+                    { "type": "text", "text": "captured" },
+                    {
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,BB==", "detail": "low" }
+                    }
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: Some("call_img".into()),
+            },
+        ];
+        let input = build_responses_input(&messages);
+        let output = input
+            .iter()
+            .find(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call_output"))
+            .expect("function_call_output");
+        let parts = output["output"]
+            .as_array()
+            .expect("tool multimodal output must be array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "captured");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "data:image/png;base64,BB==");
+        assert_eq!(parts[1]["detail"], "low");
     }
 
     #[test]

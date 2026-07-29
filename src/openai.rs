@@ -128,7 +128,7 @@ fn gcli(id: &'static str, key: &'static str, display: &'static str) -> ModelObje
         None,
         Some("256K"),
         false,
-        false,
+        true,
         false,
     )
 }
@@ -151,6 +151,27 @@ pub fn default_models() -> ModelsResponse {
             ),
             gcli("gcli/grok-code-fast-1", "grok-code-fast-1", "Grok Code Fast 1"),
             gcli("gcli/grok-3", "grok-3", "Grok 3"),
+            // Imagine (images API) — Responses path uses grok-4.5 + image_generation tool
+            gcli(
+                "gcli/grok-imagine-image",
+                "grok-imagine-image",
+                "Grok Imagine Image",
+            ),
+            gcli(
+                "gcli/grok-imagine-image-quality",
+                "grok-imagine-image-quality",
+                "Grok Imagine Image Quality",
+            ),
+            gcli(
+                "gcli/grok-imagine-image-edit",
+                "grok-imagine-image-edit",
+                "Grok Imagine Image Edit",
+            ),
+            gcli(
+                "grok-imagine-image",
+                "grok-imagine-image",
+                "Grok Imagine Image",
+            ),
             model(
                 "qd/auto",
                 "qoder",
@@ -364,6 +385,7 @@ mod tests {
     fn grok_catalog_max_input_is_256k() {
         for m in default_models().data.iter().filter(|m| m.owned_by == "grok-cli") {
             assert_eq!(m.max_input, Some("256K"), "id={}", m.id);
+            assert!(m.vision, "id={} should advertise vision", m.id);
         }
     }
 }
