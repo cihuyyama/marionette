@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod farm;
+pub mod images;
 pub mod import_util;
 pub mod openai;
 pub mod pool;
