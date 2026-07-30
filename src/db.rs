@@ -1228,16 +1228,38 @@ pub async fn decrement_quota(
     account_id: &str,
     credits_used: i64,
 ) -> AppResult<(i64, i64, i64)> {
-    let mut acc = get_account(pool, account_id).await?;
-    let before = acc.quota_remaining;
-    if !acc.has_quota_budget() || credits_used <= 0 {
-        return Ok((before, before, 0));
-    }
     let used = credits_used.max(0);
-    acc.quota_remaining = (acc.quota_remaining - used).max(0);
-    acc.updated_at = now_rfc3339();
-    update_account(pool, &acc).await?;
-    Ok((before, acc.quota_remaining, used))
+    if used == 0 {
+        let acc = get_account(pool, account_id).await?;
+        return Ok((acc.quota_remaining, acc.quota_remaining, 0));
+    }
+    // The UPDATE below is the atomic guard against overspend: SQLite serializes
+    // writers, so two concurrent requests can't both subtract from the same
+    // baseline. The RETURNING gives the authoritative post-charge remaining.
+    let after: Option<i64> = sqlx::query_scalar(
+        r#"
+        UPDATE accounts
+        SET quota_remaining = MAX(0, quota_remaining - ?),
+            updated_at = ?
+        WHERE id = ? AND quota_limit > 0
+        RETURNING quota_remaining
+        "#,
+    )
+    .bind(used)
+    .bind(now_rfc3339())
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?;
+    match after {
+        Some(after) => {
+            let before = after + used;
+            Ok((before, after, used))
+        }
+        None => {
+            let acc = get_account(pool, account_id).await?;
+            Ok((acc.quota_remaining, acc.quota_remaining, 0))
+        }
+    }
 }
 
 pub async fn delete_account(pool: &SqlitePool, id: &str) -> AppResult<()> {
@@ -1767,6 +1789,53 @@ mod tests {
             normal.iter().any(|a| a.id == "q-credit"),
             "normal mode allows credit-bearing Ultimate"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn decrement_quota_is_atomic_and_never_overspends() {
+        let dir = std::env::temp_dir().join(format!("marionette-dq-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+
+        let now = now_rfc3339();
+        let acc = Account {
+            id: "q-dec".into(),
+            provider: "qoder".into(),
+            email: Some("d@x.y".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"personalToken":"pt"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            quota_limit: 300,
+            quota_remaining: 10,
+        };
+        upsert_account(&pool, &acc).await.unwrap();
+
+        let (a, b, c) = tokio::join!(
+            decrement_quota(&pool, "q-dec", 4),
+            decrement_quota(&pool, "q-dec", 4),
+            decrement_quota(&pool, "q-dec", 4),
+        );
+        a.unwrap();
+        b.unwrap();
+        c.unwrap();
+
+        let final_acc = get_account(&pool, "q-dec").await.unwrap();
+        assert_eq!(
+            final_acc.quota_remaining, 0,
+            "3x4=12 charged against 10 must clamp at 0, never negative"
+        );
+
+        let (before, after, used) = decrement_quota(&pool, "q-dec", 5).await.unwrap();
+        assert_eq!(after, 0, "already exhausted stays at 0");
+        assert_eq!(before, used, "before == after + used bookkeeping holds");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
