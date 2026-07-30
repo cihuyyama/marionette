@@ -1087,6 +1087,24 @@ pre.response {
   padding: 0 2px;
 }
 
+.provider-card-meta-free {
+  border-top: none;
+  padding-top: 0;
+  margin-top: -2px;
+}
+
+.provider-free-bar .health-track {
+  height: 4px;
+  background: rgba(196, 163, 90, 0.12);
+}
+
+.provider-lb-pick-label {
+  display: block;
+  margin-top: var(--space-3);
+  font-size: 0.75rem;
+  color: var(--fog, #9a9488);
+}
+
 .list-toolbar {
   flex-wrap: wrap;
   align-items: center;

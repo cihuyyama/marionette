@@ -5,9 +5,11 @@ import {
   listAccounts,
   listProviderSettings,
   patchProviderLoadBalance,
+  patchProviderPickMode,
   warmupQoderAccounts,
   type Account,
   type LoadBalanceOption,
+  type PickModeOption,
   type ProviderSetting,
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
@@ -23,6 +25,10 @@ type ProviderCounts = {
   quotaLimit: number;
   quotaRemaining: number;
   quotaKind: string;
+  freeLimit: number;
+  freeRemaining: number;
+  freeUsed: number;
+  freeClaimed: number;
 };
 
 function emptyCounts(): ProviderCounts {
@@ -36,7 +42,19 @@ function emptyCounts(): ProviderCounts {
     quotaLimit: 0,
     quotaRemaining: 0,
     quotaKind: "none",
+    freeLimit: 0,
+    freeRemaining: 0,
+    freeUsed: 0,
+    freeClaimed: 0,
   };
+}
+
+function numData(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) {
+    return Number(v);
+  }
+  return 0;
 }
 
 function countFor(accounts: Account[]): ProviderCounts {
@@ -58,8 +76,39 @@ function countFor(accounts: Account[]): ProviderCounts {
       c.quotaLimit += a.quota_limit || 0;
       c.quotaRemaining += a.quota_remaining || 0;
     }
+    if (a.provider === "qoder") {
+      const fl = Math.max(0, numData(a.data?.free_limit));
+      const fr = Math.max(0, numData(a.data?.free_remaining));
+      const fuRaw = numData(a.data?.free_used);
+      const fu =
+        fuRaw > 0 ? fuRaw : fl > 0 ? Math.max(0, fl - fr) : 0;
+      if (fl > 0 || fr > 0) {
+        c.freeClaimed += 1;
+        c.freeLimit += fl;
+        c.freeRemaining += fr;
+        c.freeUsed += fu;
+      }
+    }
   }
   return c;
+}
+
+function fmtPoolFree(c: ProviderCounts): string {
+  if (c.freeLimit <= 0 && c.freeClaimed <= 0) {
+    return "Not claimed / not synced";
+  }
+  const used = new Intl.NumberFormat().format(c.freeUsed);
+  const rem = new Intl.NumberFormat().format(c.freeRemaining);
+  const lim = new Intl.NumberFormat().format(c.freeLimit);
+  return `${used} used · ${rem} / ${lim} left`;
+}
+
+function poolFreePct(c: ProviderCounts): number | null {
+  if (c.freeLimit <= 0) return null;
+  return Math.max(
+    0,
+    Math.min(100, Math.round((c.freeRemaining / c.freeLimit) * 100)),
+  );
 }
 
 function fmtPoolCredits(c: ProviderCounts): string {
@@ -130,6 +179,40 @@ function ProviderCreditBar({ counts }: { counts: ProviderCounts }) {
   );
 }
 
+function ProviderFreeBar({ counts }: { counts: ProviderCounts }) {
+  const pct = poolFreePct(counts);
+  if (pct === null) {
+    return (
+      <div className="provider-credit-bar provider-credit-bar-none">
+        <span className="health-meta mono muted">
+          Free Ultimate not claimed / not synced
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="provider-credit-bar provider-free-bar"
+      title={`Ultimate free pool · ${fmtPoolFree(counts)} · ${counts.freeClaimed} claimed account${counts.freeClaimed === 1 ? "" : "s"}`}
+    >
+      <div
+        className="health-track"
+        role="meter"
+        aria-label="Ultimate free calls remaining"
+        aria-valuemin={0}
+        aria-valuemax={counts.freeLimit}
+        aria-valuenow={counts.freeRemaining}
+      >
+        <div
+          className={`health-fill health-${creditTone(pct)}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="health-meta mono muted">{pct}%</span>
+    </div>
+  );
+}
+
 export function Accounts() {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -137,6 +220,7 @@ export function Accounts() {
     Record<string, ProviderSetting>
   >({});
   const [strategies, setStrategies] = useState<LoadBalanceOption[]>([]);
+  const [pickModes, setPickModes] = useState<PickModeOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -159,6 +243,7 @@ export function Accounts() {
       }
       setLbByProvider(map);
       setStrategies(prov.strategies || []);
+      setPickModes(prov.pick_modes || []);
     } catch (e) {
       setError(
         e instanceof ApiError
@@ -242,6 +327,28 @@ export function Accounts() {
     }
   }
 
+  async function onPickModeChange(provider: string, value: string) {
+    setSavingProvider(provider);
+    setError(null);
+    try {
+      const updated = await patchProviderPickMode(provider, value);
+      setLbByProvider((prev) => ({ ...prev, [provider]: updated }));
+      setMessage(
+        `${labelProvider(provider)}: ${updated.pick_mode_label || value}`,
+      );
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Failed to update Ultimate free pick mode",
+      );
+    } finally {
+      setSavingProvider(null);
+    }
+  }
+
   return (
     <div>
       <header className="page-header">
@@ -268,7 +375,7 @@ export function Accounts() {
                 warmupBusy ||
                 byProvider.qoder.total - byProvider.qoder.inactive <= 0
               }
-              title="Refresh auth + OpenAPI credits for all active Qoder accounts"
+              title="Refresh auth + credits + Ultimate free activity for all active Qoder accounts"
               onClick={() => void onWarmupQoder()}
             >
               {warmupBusy
@@ -336,11 +443,28 @@ export function Accounts() {
 
                 <div className="provider-card-meta">
                   <span className="muted">
-                    Credits: <strong className="mono">{fmtPoolCredits(stat)}</strong>
+                    Credits:{" "}
+                    <strong className="mono">{fmtPoolCredits(stat)}</strong>
                   </span>
                   <span className="provider-card-cta">Open list →</span>
                 </div>
                 <ProviderCreditBar counts={stat} />
+                {provider === "qoder" ? (
+                  <>
+                    <div className="provider-card-meta provider-card-meta-free">
+                      <span className="muted">
+                        Free Ultimate:{" "}
+                        <strong className="mono">{fmtPoolFree(stat)}</strong>
+                      </span>
+                      {stat.freeClaimed > 0 ? (
+                        <span className="muted mono">
+                          {stat.freeClaimed}/{stat.total} claimed
+                        </span>
+                      ) : null}
+                    </div>
+                    <ProviderFreeBar counts={stat} />
+                  </>
+                ) : null}
                 <div className="provider-card-meta">
                   <span className="muted">
                     Inactive: <strong>{stat.inactive}</strong>
@@ -388,6 +512,55 @@ export function Accounts() {
                   ))}
                 </select>
                 {hint ? <p className="provider-lb-hint">{hint}</p> : null}
+                {provider === "qoder" ? (
+                  <>
+                    <label
+                      htmlFor={`pick-${provider}`}
+                      className="provider-lb-pick-label"
+                    >
+                      Ultimate free pick
+                    </label>
+                    <select
+                      id={`pick-${provider}`}
+                      className="select"
+                      value={lb?.pick_mode || "normal"}
+                      disabled={savingProvider === provider || loading}
+                      onChange={(e) =>
+                        void onPickModeChange(provider, e.target.value)
+                      }
+                    >
+                      {(pickModes.length
+                        ? pickModes
+                        : [
+                            {
+                              id: "normal",
+                              label: "Normal (credits + free)",
+                              hint: "",
+                            },
+                            {
+                              id: "ultimate_free",
+                              label: "Ultimate free only",
+                              hint: "",
+                            },
+                          ]
+                      ).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                    {(() => {
+                      const pm = lb?.pick_mode || "normal";
+                      const ph =
+                        pickModes.find((m) => m.id === pm)?.hint ||
+                        lb?.pick_mode_label ||
+                        "";
+                      return ph ? (
+                        <p className="provider-lb-hint">{ph}</p>
+                      ) : null;
+                    })()}
+                  </>
+                ) : null}
               </div>
             </div>
           );
