@@ -465,6 +465,45 @@ fn should_server_resync_quota(provider_id: &str) -> bool {
     provider_id == "qoder"
 }
 
+async fn qoder_should_optimistic_free(
+    state: &AppState,
+    provider_id: &str,
+    account: &Account,
+    model: &str,
+) -> bool {
+    if provider_id != "qoder" {
+        return false;
+    }
+    if !crate::providers::qoder::is_ultimate_free_activity_model(model) {
+        return false;
+    }
+    if crate::providers::qoder::free_remaining_for_account_model(account, model) <= 0 {
+        return false;
+    }
+    if !account.has_quota_budget() || account.quota_remaining <= 0 {
+        return true;
+    }
+    match db::get_provider_settings(&state.pool, "qoder").await {
+        Ok(s) => {
+            db::QoderPickMode::parse(&s.pick_mode).unwrap_or_default()
+                == db::QoderPickMode::UltimateFree
+        }
+        Err(_) => false,
+    }
+}
+
+async fn qoder_free_path_cap(
+    state: &AppState,
+    provider_id: &str,
+    account: &mut Account,
+    model: &str,
+) -> Option<i64> {
+    if !qoder_should_optimistic_free(state, provider_id, account, model).await {
+        return None;
+    }
+    crate::providers::qoder::optimistic_consume_free_call(account, model)
+}
+
 async fn handle_chat_success(
     state: &AppState,
     provider: Arc<dyn Provider>,
@@ -491,6 +530,7 @@ async fn handle_chat_success(
                 provider_id,
                 &mut account,
                 token_spend,
+                model,
             )
             .await;
             let _ = log_request(
@@ -559,8 +599,14 @@ async fn handle_chat_success(
             account.updated_at = db::now_rfc3339();
             db::update_account(&state.pool, &account).await?;
 
+            let free_cap_pre = qoder_free_path_cap(state, provider_id, &mut account, model).await;
+            if free_cap_pre.is_some() {
+                account.updated_at = db::now_rfc3339();
+                let _ = db::update_account(&state.pool, &account).await;
+            }
             let pool = state.pool.clone();
             let account_id = account.id.clone();
+            let stream_model = model.to_string();
             let local_decr = should_local_token_decrement(provider_id);
             let server_sync = should_server_resync_quota(provider_id);
             let started_at = started;
@@ -570,11 +616,21 @@ async fn handle_chat_success(
                     Ok(None) | Err(_) => {
                         if server_sync {
                             if let Ok(mut acc) = db::get_account(&pool, &account_id).await {
-                                if let Err(e) = provider.sync_quota(&mut acc).await {
-                                    warn!(account = %account_id, error = %e, "stream end quota sync failed");
-                                } else {
-                                    acc.updated_at = db::now_rfc3339();
-                                    let _ = db::update_account(&pool, &acc).await;
+                                match provider.sync_quota(&mut acc).await {
+                                    Ok(()) => {
+                                        if let Some(cap) = free_cap_pre {
+                                            crate::providers::qoder::cap_free_remaining_after_sync(
+                                                &mut acc,
+                                                &stream_model,
+                                                cap,
+                                            );
+                                        }
+                                        acc.updated_at = db::now_rfc3339();
+                                        let _ = db::update_account(&pool, &acc).await;
+                                    }
+                                    Err(e) => {
+                                        warn!(account = %account_id, error = %e, "stream end quota sync failed");
+                                    }
                                 }
                             }
                         }
@@ -607,6 +663,13 @@ async fn handle_chat_success(
                         let before = acc.quota_remaining;
                         match provider.sync_quota(&mut acc).await {
                             Ok(()) => {
+                                if let Some(cap) = free_cap_pre {
+                                    crate::providers::qoder::cap_free_remaining_after_sync(
+                                        &mut acc,
+                                        &stream_model,
+                                        cap,
+                                    );
+                                }
                                 let after = acc.quota_remaining;
                                 let used = (before - after).max(0);
                                 if used > 0 {
@@ -655,6 +718,7 @@ async fn apply_success_quota(
     provider_id: &str,
     account: &mut Account,
     total_tokens: Option<i64>,
+    model: &str,
 ) -> (i64, i64, i64) {
     if should_local_token_decrement(provider_id) {
         let credits = if account.has_quota_budget() {
@@ -677,9 +741,13 @@ async fn apply_success_quota(
     }
 
     if should_server_resync_quota(provider_id) {
+        let free_cap = qoder_free_path_cap(state, provider_id, account, model).await;
         let before = account.quota_remaining;
         match provider.sync_quota(account).await {
             Ok(()) => {
+                if let Some(cap) = free_cap {
+                    crate::providers::qoder::cap_free_remaining_after_sync(account, model, cap);
+                }
                 let after = account.quota_remaining;
                 let used = (before - after).max(0);
                 return (before, after, used);
