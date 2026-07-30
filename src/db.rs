@@ -135,6 +135,7 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           load_balance TEXT NOT NULL DEFAULT 'round_robin',
           sticky_account_id TEXT,
           rr_cursor TEXT,
+          pick_mode TEXT NOT NULL DEFAULT 'normal',
           updated_at TEXT NOT NULL
         );
         "#,
@@ -142,6 +143,7 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     .execute(pool)
     .await?;
     migrate_quota_columns(pool).await?;
+    migrate_provider_settings_columns(pool).await?;
     Ok(())
 }
 
@@ -172,6 +174,21 @@ async fn migrate_quota_columns(pool: &SqlitePool) -> AppResult<()> {
     .bind(GROK_TOKEN_QUOTA)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn migrate_provider_settings_columns(pool: &SqlitePool) -> AppResult<()> {
+    if let Err(e) = sqlx::query(
+        "ALTER TABLE provider_settings ADD COLUMN pick_mode TEXT NOT NULL DEFAULT 'normal'",
+    )
+    .execute(pool)
+    .await
+    {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            return Err(e.into());
+        }
+    }
     Ok(())
 }
 
@@ -206,6 +223,9 @@ pub fn quota_blocks_pick(account: &Account, model: Option<&str>) -> bool {
     if account.provider == "qoder" {
         if let Some(m) = model {
             if is_qoder_free_tier_model(m) {
+                return false;
+            }
+            if crate::providers::qoder::model_has_free_activity_path(account, m) {
                 return false;
             }
         }
@@ -262,12 +282,63 @@ impl Default for LoadBalance {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QoderPickMode {
+    Normal,
+    UltimateFree,
+}
+
+impl QoderPickMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::UltimateFree => "ultimate_free",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "normal" | "default" | "credits" | "" => Some(Self::Normal),
+            "ultimate_free" | "ultimate-free" | "ultimate_free_only" | "free_ultimate" => {
+                Some(Self::UltimateFree)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal (credits + free)",
+            Self::UltimateFree => "Ultimate free only",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Normal => {
+                "Use plan credits and Free Ultimate when available (default)"
+            }
+            Self::UltimateFree => {
+                "Only rotate accounts with Free Ultimate left — never spend Pro Trial credits on Ultimate"
+            }
+        }
+    }
+}
+
+impl Default for QoderPickMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProviderSettingsRow {
     pub provider: String,
     pub load_balance: String,
     pub sticky_account_id: Option<String>,
     pub rr_cursor: Option<String>,
+    pub pick_mode: String,
     pub updated_at: String,
 }
 
@@ -290,16 +361,18 @@ pub async fn get_provider_settings(
         load_balance: LoadBalance::default().as_str().into(),
         sticky_account_id: None,
         rr_cursor: None,
+        pick_mode: QoderPickMode::default().as_str().into(),
         updated_at: now.clone(),
     };
     sqlx::query(
         r#"
-        INSERT INTO provider_settings (provider, load_balance, sticky_account_id, rr_cursor, updated_at)
-        VALUES (?, ?, NULL, NULL, ?)
+        INSERT INTO provider_settings (provider, load_balance, sticky_account_id, rr_cursor, pick_mode, updated_at)
+        VALUES (?, ?, NULL, NULL, ?, ?)
         "#,
     )
     .bind(&row.provider)
     .bind(&row.load_balance)
+    .bind(&row.pick_mode)
     .bind(&now)
     .execute(pool)
     .await?;
@@ -330,6 +403,33 @@ pub async fn set_provider_load_balance(
         "#,
     )
     .bind(strategy.as_str())
+    .bind(&now)
+    .bind(provider)
+    .execute(pool)
+    .await?;
+    get_provider_settings(pool, provider).await
+}
+
+pub async fn set_provider_pick_mode(
+    pool: &SqlitePool,
+    provider: &str,
+    mode: QoderPickMode,
+) -> AppResult<ProviderSettingsRow> {
+    if provider != "qoder" {
+        return Err(AppError::BadRequest(
+            "pick_mode is only supported for provider qoder".into(),
+        ));
+    }
+    let _ = get_provider_settings(pool, provider).await?;
+    let now = now_rfc3339();
+    sqlx::query(
+        r#"
+        UPDATE provider_settings
+        SET pick_mode = ?, updated_at = ?
+        WHERE provider = ?
+        "#,
+    )
+    .bind(mode.as_str())
     .bind(&now)
     .bind(provider)
     .execute(pool)
@@ -1127,10 +1227,25 @@ pub async fn list_eligible_accounts(
         .fetch_all(pool)
     .await?;
 
-    let eligible: Vec<Account> = rows
+    let mut eligible: Vec<Account> = rows
         .into_iter()
         .filter(|a| !quota_blocks_pick(a, model))
         .collect();
+
+    if provider == "qoder" {
+        let settings = get_provider_settings(pool, provider).await?;
+        let mode = QoderPickMode::parse(&settings.pick_mode).unwrap_or_default();
+        if mode == QoderPickMode::UltimateFree {
+            if let Some(m) = model {
+                if crate::providers::qoder::is_ultimate_free_activity_model(m) {
+                    eligible.retain(|a| {
+                        crate::providers::qoder::model_has_free_activity_path(a, m)
+                    });
+                }
+            }
+        }
+    }
+
     Ok(eligible)
 }
 
@@ -1389,6 +1504,34 @@ mod tests {
     }
 
     #[test]
+    fn quota_allows_ultimate_when_free_activity_remaining() {
+        let mut a = qoder_exhausted();
+        a.data = r#"{
+          "personalToken":"pt",
+          "free_limit":200,
+          "free_remaining":50,
+          "free_model_keys":["ultimate","quest-ultimate","experts-ultimate"]
+        }"#
+        .into();
+        assert!(!quota_blocks_pick(&a, Some("qd/ultimate")));
+        assert!(!quota_blocks_pick(&a, Some("ultimate")));
+        assert!(quota_blocks_pick(&a, Some("qd/auto")));
+    }
+
+    #[test]
+    fn quota_blocks_ultimate_when_free_activity_empty() {
+        let mut a = qoder_exhausted();
+        a.data = r#"{
+          "personalToken":"pt",
+          "free_limit":200,
+          "free_remaining":0,
+          "free_model_keys":["ultimate"]
+        }"#
+        .into();
+        assert!(quota_blocks_pick(&a, Some("qd/ultimate")));
+    }
+
+    #[test]
     fn quota_allows_unsynced_qoder() {
         let mut a = qoder_exhausted();
         a.quota_limit = 0;
@@ -1437,6 +1580,124 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ultimate_free_pick_skips_credit_only_accounts() {
+        let dir = std::env::temp_dir().join(format!("marionette-uf-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+
+        let now = now_rfc3339();
+        let mut credit_only = Account {
+            id: "q-credit".into(),
+            provider: "qoder".into(),
+            email: Some("c@x.y".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"personalToken":"pt"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            quota_limit: 300,
+            quota_remaining: 200,
+        };
+        let mut free_acc = Account {
+            id: "q-free".into(),
+            provider: "qoder".into(),
+            email: Some("f@x.y".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{
+              "personalToken":"pt",
+              "free_limit":200,
+              "free_remaining":50,
+              "free_model_keys":["ultimate","quest-ultimate","experts-ultimate"]
+            }"#
+            .into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            quota_limit: 300,
+            quota_remaining: 0,
+        };
+        upsert_account(&pool, &credit_only).await.unwrap();
+        upsert_account(&pool, &free_acc).await.unwrap();
+
+        set_provider_pick_mode(&pool, "qoder", QoderPickMode::UltimateFree)
+            .await
+            .unwrap();
+
+        let ultimate = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+            .await
+            .unwrap();
+        assert_eq!(ultimate.len(), 1, "only free Ultimate accounts");
+        assert_eq!(ultimate[0].id, "q-free");
+
+        let auto = list_eligible_accounts(&pool, "qoder", Some("qd/auto"))
+            .await
+            .unwrap();
+        assert_eq!(
+            auto.len(),
+            1,
+            "ultimate_free mode must not filter non-Ultimate models"
+        );
+        assert_eq!(auto[0].id, "q-credit");
+
+        free_acc.data = r#"{
+          "personalToken":"pt",
+          "free_limit":200,
+          "free_remaining":0,
+          "free_model_keys":["ultimate"]
+        }"#
+        .into();
+        free_acc.updated_at = now_rfc3339();
+        upsert_account(&pool, &free_acc).await.unwrap();
+
+        let empty = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+            .await
+            .unwrap();
+        assert!(
+            empty.is_empty(),
+            "no free remaining → skip (not cut); empty eligible set"
+        );
+
+        set_provider_pick_mode(&pool, "qoder", QoderPickMode::Normal)
+            .await
+            .unwrap();
+        credit_only.quota_remaining = 100;
+        credit_only.updated_at = now_rfc3339();
+        upsert_account(&pool, &credit_only).await.unwrap();
+        let normal = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+            .await
+            .unwrap();
+        assert!(
+            normal.iter().any(|a| a.id == "q-credit"),
+            "normal mode allows credit-bearing Ultimate"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn qoder_pick_mode_parse_labels() {
+        assert_eq!(
+            QoderPickMode::parse("ultimate_free"),
+            Some(QoderPickMode::UltimateFree)
+        );
+        assert_eq!(
+            QoderPickMode::parse("free_ultimate"),
+            Some(QoderPickMode::UltimateFree)
+        );
+        assert_eq!(QoderPickMode::parse("normal"), Some(QoderPickMode::Normal));
+        assert!(QoderPickMode::parse("bogus").is_none());
+        assert_eq!(QoderPickMode::UltimateFree.label(), "Ultimate free only");
     }
 
     #[tokio::test]
