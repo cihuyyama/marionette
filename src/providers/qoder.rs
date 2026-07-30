@@ -16,7 +16,8 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 use sha2::Sha256;
 
-const COSY_VERSION: &str = "1.0.22";
+const COSY_VERSION: &str = "1.1.7";
+const COSY_MACHINE_OS: &str = "x86_64_win32";
 const APPCODE: &str = "cosy";
 const SIG_SECRET: &str = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw==";
 const JOB_TOKEN_URL: &str = "https://center.qoder.sh/algo/api/v3/user/jobToken?Encode=1";
@@ -678,9 +679,10 @@ impl QoderProvider {
         headers.insert("accept-encoding", "identity".parse().unwrap());
         headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
         headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+        headers.insert("cosy-machineos", COSY_MACHINE_OS.parse().unwrap());
         headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
         headers.insert("login-version", "v2".parse().unwrap());
-        headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
+        headers.insert("user-agent", "Bun/1.3.14".parse().unwrap());
 
         let resp = self
             .client
@@ -1480,9 +1482,10 @@ impl Provider for QoderProvider {
             headers.insert("accept-encoding", "identity".parse().unwrap());
             headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
             headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+            headers.insert("cosy-machineos", COSY_MACHINE_OS.parse().unwrap());
             headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
             headers.insert("login-version", "v2".parse().unwrap());
-            headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
+            headers.insert("user-agent", "Bun/1.3.14".parse().unwrap());
             headers.insert("content-type", "application/json".parse().unwrap());
             headers.insert("x-model-key", model.parse().unwrap());
             headers.insert("x-model-source", "system".parse().unwrap());
@@ -1559,6 +1562,13 @@ impl Provider for QoderProvider {
                             // it means silent reject (EOF) due to quota/context limit.
                             tracing::warn!("Qoder silent reject detected (empty first chunk). Returning RateLimited 429 to pool.");
                             return Err(ProviderError::RateLimited { retry_after_secs: None });
+                        }
+                        if let Some(err) = first_chunk_service_error(&text) {
+                            tracing::warn!(
+                                error = %err,
+                                "qoder service error in first SSE chunk; returning to pool for rotate"
+                            );
+                            return Err(err);
                         }
                         Some(c)
                     },
@@ -1976,10 +1986,7 @@ impl Provider for QoderProvider {
                     continue;
                 }
                 if let Some((svc_status, svc_msg)) = parse_qoder_service_error(trimmed) {
-                    if svc_status == 403 || svc_status == 402 {
-                        return Err(ProviderError::RateLimited { retry_after_secs: None });
-                    }
-                    return Err(ProviderError::Transport(svc_msg));
+                    return Err(provider_error_from_qoder_service(svc_status, &svc_msg));
                 }
                 if let Some(inner) = parse_sse_line(trimmed) {
                     if let Some(u) = inner.get("usage") {
@@ -2651,6 +2658,45 @@ fn parse_qoder_service_error(line: &str) -> Option<(u16, String)> {
     ))
 }
 
+fn provider_error_from_qoder_service(svc_status: u16, svc_msg: &str) -> ProviderError {
+    match svc_status {
+        402 | 403 => ProviderError::RateLimited {
+            retry_after_secs: None,
+        },
+        400 | 429 => {
+            let lower = svc_msg.to_ascii_lowercase();
+            if lower.contains("quota")
+                || lower.contains("rate")
+                || lower.contains("limit")
+                || lower.contains("exceed")
+                || lower.contains("pricing")
+                || lower.contains("balance")
+                || lower.contains("credit")
+            {
+                ProviderError::RateLimited {
+                    retry_after_secs: None,
+                }
+            } else {
+                ProviderError::Transport(svc_msg.to_string())
+            }
+        }
+        _ => ProviderError::Transport(svc_msg.to_string()),
+    }
+}
+
+fn first_chunk_service_error(text: &str) -> Option<ProviderError> {
+    for line in text.lines() {
+        let trimmed = line.trim().trim_end_matches('\r');
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((status, msg)) = parse_qoder_service_error(trimmed) {
+            return Some(provider_error_from_qoder_service(status, &msg));
+        }
+    }
+    None
+}
+
 fn parse_sse_line(line: &str) -> Option<Value> {
     if !line.starts_with("data:") {
         return None;
@@ -3021,6 +3067,78 @@ mod tests {
         assert!(result.is_some(), "expected Some for 500 error line");
         let (status, _msg) = result.unwrap();
         assert_eq!(status, 500, "expected tuple first element == 500");
+    }
+
+    #[test]
+    fn first_chunk_400_empty_msg_is_rate_limited() {
+        let chunk = "data: {\"statusCodeValue\":400,\"statusCode\":\"BAD_REQUEST\",\"message\":\"\"}\n\n";
+        let err = first_chunk_service_error(chunk).expect("service error");
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "expected RateLimited, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn first_chunk_403_is_rate_limited() {
+        let chunk =
+            "data: {\"statusCodeValue\":403,\"statusCode\":\"FORBIDDEN\",\"message\":\"quota\"}\n";
+        let err = first_chunk_service_error(chunk).expect("service error");
+        assert!(matches!(err, ProviderError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn first_chunk_400_non_quota_is_transport() {
+        let chunk =
+            "data: {\"statusCodeValue\":400,\"statusCode\":\"BAD_REQUEST\",\"message\":\"invalid schema\"}\n";
+        let err = first_chunk_service_error(chunk).expect("service error");
+        assert!(
+            matches!(err, ProviderError::Transport(_)),
+            "expected Transport for non-quota 400, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn first_chunk_normal_sse_is_ok() {
+        let chunk = "data: {\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"hi\\\"}}]}\"}\n";
+        assert!(first_chunk_service_error(chunk).is_none());
+    }
+
+    #[test]
+    fn provider_error_from_qoder_service_400_quota_wording() {
+        let err = provider_error_from_qoder_service(
+            400,
+            "Qoder HTTP 400 BAD_REQUEST: rate limited or quota exceeded",
+        );
+        assert!(matches!(err, ProviderError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn cosy_version_matches_live_cli_free_path() {
+        assert_eq!(COSY_VERSION, "1.1.7");
+        assert_eq!(COSY_MACHINE_OS, "x86_64_win32");
+    }
+
+    #[test]
+    fn build_chat_body_ultimate_free_shape() {
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "qd/ultimate",
+            "messages": [{"role":"user","content":"hai"}],
+            "stream": true,
+            "max_tokens": 32000
+        }))
+        .expect("chat req");
+        let cfg = model_cfg(req.upstream_model());
+        let body = build_chat_body(&req, &cfg);
+        assert_eq!(body["aliyun_user_type"], "");
+        assert_eq!(body["model_config"]["key"], "ultimate");
+        assert_eq!(body["model_config"]["max_input_tokens"], 1_000_000);
+        assert_eq!(body["business"]["product"], "cli");
+        assert_eq!(body["business"]["type"], "agent");
+        assert_eq!(body["business"]["version"], COSY_VERSION);
+        assert_eq!(body["business"]["stage"], "start");
+        assert_eq!(body["chat_task"], "FREE_INPUT");
+        assert_eq!(body["session_type"], "qodercli");
     }
 
     #[test]
