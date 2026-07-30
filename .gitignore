@@ -22,6 +22,7 @@ scripts/automation/**/accounts*.txt
 docs/HANDOFF.md
 docs/DEPLOYMENT.md
 docs/QODER_ENDPOINTS.md
+docs/*
 
 # Agent scratch / continuation state
 .omo/
