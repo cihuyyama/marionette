@@ -33,6 +33,10 @@ impl GrokCliProvider {
         let client = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .tcp_nodelay(true)
             .build()
             .expect("reqwest client");
         Self { client, config }

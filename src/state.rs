@@ -21,6 +21,10 @@ impl AppState {
         let config = Arc::new(config);
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .tcp_nodelay(true)
             .build()
             .expect("http client");
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
