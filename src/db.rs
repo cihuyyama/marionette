@@ -138,6 +138,10 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           ON request_logs(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_request_logs_provider
           ON request_logs(provider, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_request_logs_account
+          ON request_logs(account_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash
+          ON api_keys(key_hash);
         CREATE TABLE IF NOT EXISTS provider_settings (
           provider TEXT PRIMARY KEY,
           load_balance TEXT NOT NULL DEFAULT 'round_robin',
