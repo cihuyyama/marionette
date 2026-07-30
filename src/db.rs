@@ -1442,7 +1442,26 @@ pub async fn pick_account(
 }
 
 pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
-    let all = list_accounts(pool, None, None).await?;
+    #[derive(sqlx::FromRow)]
+    struct StatusRow {
+        provider: String,
+        is_active: i64,
+        cooldown_until: Option<String>,
+        last_error: Option<String>,
+        quota_limit: i64,
+        quota_remaining: i64,
+    }
+    // Status counting needs no token data; skip the heavy `data` blob column.
+    let rows = sqlx::query_as::<_, StatusRow>(
+        r#"
+        SELECT provider, is_active, cooldown_until, last_error,
+               quota_limit, quota_remaining
+        FROM accounts
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
     let mut total = 0u64;
     let mut bound = 0u64;
     let mut sealed = 0u64;
@@ -1450,17 +1469,34 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
     let mut fallen = 0u64;
     let mut by_provider = serde_json::Map::new();
 
-    for a in &all {
+    for r in &rows {
         total += 1;
-        match a.status_label() {
+        let probe = Account {
+            id: String::new(),
+            provider: r.provider.clone(),
+            email: None,
+            name: None,
+            is_active: r.is_active,
+            priority: 0,
+            data: String::new(),
+            cooldown_until: r.cooldown_until.clone(),
+            last_error: r.last_error.clone(),
+            last_used_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            quota_limit: r.quota_limit,
+            quota_remaining: r.quota_remaining,
+        };
+        match probe.status_label() {
             "bound" => bound += 1,
             "sealed" => sealed += 1,
             "cut" => cut += 1,
             "fallen" => fallen += 1,
             _ => {}
         }
+        let status_key = probe.status_label();
         let entry = by_provider
-            .entry(a.provider.clone())
+            .entry(r.provider.clone())
             .or_insert_with(|| {
                 serde_json::json!({
                     "total": 0, "bound": 0, "sealed": 0, "cut": 0, "fallen": 0
@@ -1469,7 +1505,7 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
         if let Some(obj) = entry.as_object_mut() {
             *obj.get_mut("total").unwrap() =
                 serde_json::json!(obj["total"].as_u64().unwrap_or(0) + 1);
-            let key = a.status_label();
+            let key = status_key;
             *obj.get_mut(key).unwrap() =
                 serde_json::json!(obj[key].as_u64().unwrap_or(0) + 1);
         }
