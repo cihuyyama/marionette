@@ -1112,6 +1112,84 @@ function readPlan(a: Account): PlanInfo | null {
   };
 }
 
+type FreeInfo = {
+  limit: number;
+  remaining: number;
+  used: number;
+  endMs: number | null;
+  endAt: string | null;
+  cliText: string | null;
+  activityId: string | null;
+};
+
+function numField(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) {
+    return Number(v);
+  }
+  return null;
+}
+
+function readFree(a: Account): FreeInfo | null {
+  if (a.provider !== "qoder") return null;
+  const limit = numField(a.data?.free_limit) ?? 0;
+  const remaining = numField(a.data?.free_remaining) ?? 0;
+  if (limit <= 0 && remaining <= 0) return null;
+  const used =
+    numField(a.data?.free_used) ?? Math.max(0, limit - remaining);
+  const endMs = numField(a.data?.free_end_ms);
+  const endAtRaw = a.data?.free_end_at;
+  const endAt =
+    typeof endAtRaw === "string" && endAtRaw ? endAtRaw : null;
+  const cliRaw = a.data?.free_cli_text;
+  const cliText =
+    typeof cliRaw === "string" && cliRaw.trim() ? cliRaw.trim() : null;
+  const idRaw = a.data?.free_activity_id;
+  const activityId =
+    typeof idRaw === "string" && idRaw.trim() ? idRaw.trim() : null;
+  return {
+    limit,
+    remaining: Math.max(0, remaining),
+    used: Math.max(0, used),
+    endMs: endMs != null && endMs > 0 ? endMs : null,
+    endAt,
+    cliText,
+    activityId,
+  };
+}
+
+function fmtFreeTitle(a: Account): string {
+  const f = readFree(a);
+  if (!f) return "No Ultimate free promo synced — refresh account";
+  const bits = [
+    f.cliText ?? `Free Ultimate ${f.remaining}/${f.limit}`,
+    f.activityId ? `id ${f.activityId}` : null,
+    f.endAt ? `ends ${f.endAt}` : f.endMs ? `ends ms ${f.endMs}` : null,
+  ].filter(Boolean);
+  return bits.join(" · ");
+}
+
+function FreeLabel({ a, compact = false }: { a: Account; compact?: boolean }) {
+  const f = readFree(a);
+  if (!f) return null;
+  const pct =
+    f.limit > 0
+      ? Math.max(0, Math.min(100, Math.round((f.remaining / f.limit) * 100)))
+      : 0;
+  const tone = healthTone(pct);
+  const label = compact
+    ? `Free ${f.remaining}/${f.limit}`
+    : `Free Ultimate ${f.remaining}/${f.limit}`;
+  return (
+    <span
+      className={`plan-chip plan-${tone}${compact ? " plan-chip-compact" : ""}`}
+      title={fmtFreeTitle(a)}
+    >
+      {label}
+    </span>
+  );
+}
+
 function fmtPlanTitle(a: Account): string {
   const p = readPlan(a);
   if (!p) return "Plan not synced — refresh account";
@@ -1155,6 +1233,8 @@ function fmtCreditTitle(a: Account): string {
     const parts = [`Qoder credits ${fmtAccountCredit(a)} (OpenAPI)`];
     const plan = readPlan(a);
     if (plan) parts.push(fmtPlanTitle(a));
+    const free = readFree(a);
+    if (free) parts.push(fmtFreeTitle(a));
     return parts.join(" · ");
   }
   if (a.quota_kind === "none" || !a.quota_limit) {
@@ -1247,8 +1327,9 @@ function AccountHealth({
   const qPct = quotaPct(a);
   const ttl = readTtl(a);
   const plan = a.provider === "qoder" ? readPlan(a) : null;
+  const free = a.provider === "qoder" ? readFree(a) : null;
 
-  if (qPct === null && !ttl && !plan) {
+  if (qPct === null && !ttl && !plan && !free) {
     return (
       <span className="mono muted nowrap">{fmtAccountCredit(a)}</span>
     );
@@ -1270,6 +1351,19 @@ function AccountHealth({
         >
           {!compact && <span className="health-tag">Plan</span>}
           <PlanLabel a={a} compact={compact} />
+        </div>
+      )}
+      {free && (
+        <div
+          className="health-row"
+          style={
+            compact
+              ? { gridTemplateColumns: "1fr" }
+              : { gridTemplateColumns: "auto 1fr" }
+          }
+        >
+          {!compact && <span className="health-tag">Free</span>}
+          <FreeLabel a={a} compact={compact} />
         </div>
       )}
       {qPct !== null && (

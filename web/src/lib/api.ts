@@ -528,10 +528,14 @@ export type LoadBalanceStrategy =
   | "priority"
   | "random";
 
+export type QoderPickMode = "normal" | "ultimate_free";
+
 export type ProviderSetting = {
   provider: string;
   load_balance: LoadBalanceStrategy | string;
   load_balance_label: string;
+  pick_mode?: QoderPickMode | string;
+  pick_mode_label?: string;
   sticky_account_id: string | null;
   rr_cursor: string | null;
   updated_at: string;
@@ -543,10 +547,17 @@ export type LoadBalanceOption = {
   hint: string;
 };
 
+export type PickModeOption = {
+  id: QoderPickMode | string;
+  label: string;
+  hint: string;
+};
+
 export function listProviderSettings(settings?: Settings) {
   return request<{
     providers: ProviderSetting[];
     strategies: LoadBalanceOption[];
+    pick_modes?: PickModeOption[];
   }>("/admin/providers", { auth: "admin" }, settings);
 }
 
@@ -560,6 +571,22 @@ export function patchProviderLoadBalance(
     {
       method: "PATCH",
       body: JSON.stringify({ load_balance }),
+      auth: "admin",
+    },
+    settings,
+  );
+}
+
+export function patchProviderPickMode(
+  provider: string,
+  pick_mode: string,
+  settings?: Settings,
+) {
+  return request<ProviderSetting>(
+    `/admin/providers/${encodeURIComponent(provider)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ pick_mode }),
       auth: "admin",
     },
     settings,
