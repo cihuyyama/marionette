@@ -47,37 +47,47 @@ export function ActivityPage() {
     }
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [u, r] = await Promise.all([
-        getUsage({ range }),
-        listRequests({
-          provider: provider || undefined,
-          limit: 200,
-          range,
-        }),
-      ]);
-      setUsage(u);
-      setRequests(r.requests || []);
-    } catch (e) {
-      setError(
-        e instanceof ApiError
-          ? e.message
-          : e instanceof Error
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [u, r] = await Promise.all([
+          getUsage({ range }, undefined, signal),
+          listRequests(
+            {
+              provider: provider || undefined,
+              limit: 200,
+              range,
+            },
+            undefined,
+            signal,
+          ),
+        ]);
+        setUsage(u);
+        setRequests(r.requests || []);
+      } catch (e) {
+        if (signal?.aborted) return;
+        setError(
+          e instanceof ApiError
             ? e.message
-            : "Failed to load activity",
-      );
-      setUsage(null);
-      setRequests([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [provider, range]);
+            : e instanceof Error
+              ? e.message
+              : "Failed to load activity",
+        );
+        setUsage(null);
+        setRequests([]);
+      } finally {
+        if (!signal?.aborted) setLoading(false);
+      }
+    },
+    [provider, range],
+  );
 
   useEffect(() => {
-    void load();
+    const ctrl = new AbortController();
+    void load(ctrl.signal);
+    return () => ctrl.abort();
   }, [load]);
 
   useEffect(() => {

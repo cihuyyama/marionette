@@ -123,16 +123,16 @@ async function request<T>(
   return body as T;
 }
 
-export function getHealth(settings?: Settings) {
+export function getHealth(settings?: Settings, signal?: AbortSignal) {
   return request<{ status: string; service?: string; version?: string }>(
     "/health",
-    { auth: "none" },
+    { auth: "none", signal },
     settings,
   );
 }
 
-export function getStats(settings?: Settings) {
-  return request<PoolStats>("/admin/stats", { auth: "admin" }, settings);
+export function getStats(settings?: Settings, signal?: AbortSignal) {
+  return request<PoolStats>("/admin/stats", { auth: "admin", signal }, settings);
 }
 
 export type ConnectionInfo = {
@@ -150,6 +150,7 @@ export function getConnection(settings?: Settings) {
 export function listAccounts(
   params?: { provider?: string; status?: string },
   settings?: Settings,
+  signal?: AbortSignal,
 ) {
   const q = new URLSearchParams();
   if (params?.provider) q.set("provider", params.provider);
@@ -157,7 +158,7 @@ export function listAccounts(
   const qs = q.toString();
   return request<{ accounts: Account[] }>(
     `/admin/accounts${qs ? `?${qs}` : ""}`,
-    { auth: "admin" },
+    { auth: "admin", signal },
     settings,
   );
 }
@@ -435,10 +436,10 @@ export function importAccountsFile(
   );
 }
 
-export function listModels(settings?: Settings) {
+export function listModels(settings?: Settings, signal?: AbortSignal) {
   return request<{ object: string; data: ModelObject[] }>(
     "/v1/models",
-    { auth: "pool" },
+    { auth: "pool", signal },
     settings,
   );
 }
@@ -496,6 +497,7 @@ export type UsageSummary = {
 export function listRequests(
   params?: { provider?: string; limit?: number; range?: UsageRange | string },
   settings?: Settings,
+  signal?: AbortSignal,
 ) {
   const q = new URLSearchParams();
   if (params?.provider) q.set("provider", params.provider);
@@ -506,7 +508,7 @@ export function listRequests(
     requests: RequestLog[];
     range?: string;
     since?: string | null;
-  }>(`/admin/requests${qs ? `?${qs}` : ""}`, { auth: "admin" }, settings);
+  }>(`/admin/requests${qs ? `?${qs}` : ""}`, { auth: "admin", signal }, settings);
 }
 
 export function getRequestDetail(id: string, settings?: Settings) {
@@ -520,13 +522,14 @@ export function getRequestDetail(id: string, settings?: Settings) {
 export function getUsage(
   params?: { range?: UsageRange | string },
   settings?: Settings,
+  signal?: AbortSignal,
 ) {
   const q = new URLSearchParams();
   if (params?.range && params.range !== "all") q.set("range", params.range);
   const qs = q.toString();
   return request<UsageSummary>(
     `/admin/usage${qs ? `?${qs}` : ""}`,
-    { auth: "admin" },
+    { auth: "admin", signal },
     settings,
   );
 }

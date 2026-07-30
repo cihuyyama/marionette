@@ -19,8 +19,9 @@ export function Layout() {
 
   useEffect(() => {
     let cancelled = false;
+    const ctrl = new AbortController();
     const tick = () => {
-      getHealth(loadSettings())
+      getHealth(loadSettings(), ctrl.signal)
         .then(() => {
           if (!cancelled) setConn("ok");
         })
@@ -32,6 +33,7 @@ export function Layout() {
     const id = window.setInterval(tick, 30_000);
     return () => {
       cancelled = true;
+      ctrl.abort();
       window.clearInterval(id);
     };
   }, []);
