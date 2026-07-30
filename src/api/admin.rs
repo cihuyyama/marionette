@@ -65,7 +65,23 @@ pub async fn connection(
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderLbBody {
-    pub load_balance: String,
+    pub load_balance: Option<String>,
+    pub pick_mode: Option<String>,
+}
+
+fn provider_settings_json(row: &db::ProviderSettingsRow) -> Value {
+    let lb = db::LoadBalance::parse(&row.load_balance).unwrap_or_default();
+    let pick = db::QoderPickMode::parse(&row.pick_mode).unwrap_or_default();
+    json!({
+        "provider": row.provider,
+        "load_balance": lb.as_str(),
+        "load_balance_label": lb.label(),
+        "pick_mode": pick.as_str(),
+        "pick_mode_label": pick.label(),
+        "sticky_account_id": row.sticky_account_id,
+        "rr_cursor": row.rr_cursor,
+        "updated_at": row.updated_at,
+    })
 }
 
 pub async fn list_provider_settings(
@@ -73,20 +89,7 @@ pub async fn list_provider_settings(
     _auth: AdminAuth,
 ) -> AppResult<Json<Value>> {
     let rows = db::list_provider_settings(&state.pool).await?;
-    let providers: Vec<Value> = rows
-        .into_iter()
-        .map(|r| {
-            let lb = db::LoadBalance::parse(&r.load_balance).unwrap_or_default();
-            json!({
-                "provider": r.provider,
-                "load_balance": lb.as_str(),
-                "load_balance_label": lb.label(),
-                "sticky_account_id": r.sticky_account_id,
-                "rr_cursor": r.rr_cursor,
-                "updated_at": r.updated_at,
-            })
-        })
-        .collect();
+    let providers: Vec<Value> = rows.iter().map(provider_settings_json).collect();
     Ok(Json(json!({
         "providers": providers,
         "strategies": [
@@ -95,7 +98,19 @@ pub async fn list_provider_settings(
             {"id": "least_used", "label": "Least used", "hint": "Prefer the account idle the longest"},
             {"id": "priority", "label": "Priority", "hint": "Lowest priority number first, then least used"},
             {"id": "random", "label": "Random", "hint": "Pick a random healthy account"},
-        ]
+        ],
+        "pick_modes": [
+            {
+                "id": db::QoderPickMode::Normal.as_str(),
+                "label": db::QoderPickMode::Normal.label(),
+                "hint": db::QoderPickMode::Normal.hint(),
+            },
+            {
+                "id": db::QoderPickMode::UltimateFree.as_str(),
+                "label": db::QoderPickMode::UltimateFree.label(),
+                "hint": db::QoderPickMode::UltimateFree.hint(),
+            },
+        ],
     })))
 }
 
@@ -108,21 +123,34 @@ pub async fn patch_provider_settings(
     if provider != "grok-cli" && provider != "qoder" {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
-    let strategy = db::LoadBalance::parse(&body.load_balance).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "invalid load_balance: {} (use round_robin|sequential|least_used|priority|random)",
-            body.load_balance
-        ))
-    })?;
-    let row = db::set_provider_load_balance(&state.pool, &provider, strategy).await?;
-    Ok(Json(json!({
-        "provider": row.provider,
-        "load_balance": strategy.as_str(),
-        "load_balance_label": strategy.label(),
-        "sticky_account_id": row.sticky_account_id,
-        "rr_cursor": row.rr_cursor,
-        "updated_at": row.updated_at,
-    })))
+    if body.load_balance.is_none() && body.pick_mode.is_none() {
+        return Err(AppError::BadRequest(
+            "provide load_balance and/or pick_mode".into(),
+        ));
+    }
+    if let Some(ref lb) = body.load_balance {
+        let strategy = db::LoadBalance::parse(lb).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "invalid load_balance: {lb} (use round_robin|sequential|least_used|priority|random)"
+            ))
+        })?;
+        db::set_provider_load_balance(&state.pool, &provider, strategy).await?;
+    }
+    if let Some(ref mode_s) = body.pick_mode {
+        if provider != "qoder" {
+            return Err(AppError::BadRequest(
+                "pick_mode is only supported for qoder".into(),
+            ));
+        }
+        let mode = db::QoderPickMode::parse(mode_s).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "invalid pick_mode: {mode_s} (use normal|ultimate_free)"
+            ))
+        })?;
+        db::set_provider_pick_mode(&state.pool, &provider, mode).await?;
+    }
+    let row = db::get_provider_settings(&state.pool, &provider).await?;
+    Ok(Json(provider_settings_json(&row)))
 }
 
 #[derive(Debug, Deserialize)]
