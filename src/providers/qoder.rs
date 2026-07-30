@@ -23,6 +23,7 @@ const JOB_TOKEN_URL: &str = "https://center.qoder.sh/algo/api/v3/user/jobToken?E
 const CHAT_URL: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 const QUOTA_USAGE_URL: &str = "https://openapi.qoder.sh/api/v2/quota/usage";
 const USER_PLAN_URL: &str = "https://openapi.qoder.sh/api/v2/user/plan";
+const ACTIVITY_URL: &str = "https://openapi.qoder.sh/algo/api/v2/activity";
 const TRIAL_URL: &str = "https://openapi.qoder.sh/api/v3/user/trial";
 
 const SERVER_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
@@ -634,6 +635,67 @@ impl QoderProvider {
         }
         parse_user_plan(&text)
     }
+
+    async fn fetch_activity(&self, tokens: &QoderTokens) -> Result<ActivitySnapshot, ProviderError> {
+        let session = build_cosy_session(tokens)?;
+        let payload_b64 = build_payload_b64(&session.info);
+        let cosy_date = format!("{}", chrono::Utc::now().timestamp());
+        let body_encoded = "";
+        let path_sig = path_sig_from_url(ACTIVITY_URL);
+        let bearer_sig = sign_bearer_request(
+            &payload_b64,
+            &session.cosy_key,
+            &cosy_date,
+            body_encoded,
+            &path_sig,
+        );
+        let bearer = format!("COSY.{payload_b64}.{bearer_sig}");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cosy-data-policy", "agree".parse().unwrap());
+        headers.insert("cosy-machinetype", "5".parse().unwrap());
+        headers.insert("cosy-clienttype", "5".parse().unwrap());
+        headers.insert("cosy-date", cosy_date.parse().unwrap());
+        headers.insert(
+            "cosy-user",
+            tokens
+                .user_id
+                .as_deref()
+                .unwrap_or("")
+                .parse()
+                .unwrap_or_else(|_| "".parse().unwrap()),
+        );
+        headers.insert("cosy-key", session.cosy_key.parse().unwrap());
+        headers.insert("cache-control", "no-cache".parse().unwrap());
+        headers.insert("cosy-business-product", "cli".parse().unwrap());
+        headers.insert("cosy-business-type", "agent".parse().unwrap());
+        headers.insert("cosy-scene", "assistant".parse().unwrap());
+        headers.insert("accept", "application/json".parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Bearer {bearer}").parse().unwrap(),
+        );
+        headers.insert("accept-encoding", "identity".parse().unwrap());
+        headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
+        headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+        headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
+        headers.insert("login-version", "v2".parse().unwrap());
+        headers.insert("user-agent", "Go-http-client/2.0".parse().unwrap());
+
+        let resp = self
+            .client
+            .get(ACTIVITY_URL)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(classify_qoder_status(status, &text));
+        }
+        parse_activity_body(&text)
+    }
 }
 
 fn floor_credit(v: f64) -> i64 {
@@ -784,6 +846,470 @@ fn apply_user_plan_to_account(account: &mut Account, plan: &UserPlanInfo) {
     account.set_data_json(&data);
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ActivityFreeBucket {
+    activity_id: String,
+    model_name: String,
+    model_keys: Vec<String>,
+    limit: i64,
+    used: i64,
+    remaining: i64,
+    reset_at_ms: i64,
+    reset_strategy: String,
+    eligible: bool,
+    activity_end_at_ms: i64,
+    status_text: Option<String>,
+    cli_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ActivitySnapshot {
+    activities: Vec<ActivityFreeBucket>,
+    query_at_ms: i64,
+    fetched_at: String,
+}
+
+fn json_i64_any(v: &Value) -> i64 {
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|n| n as i64))
+        .or_else(|| v.as_f64().map(|f| f.floor() as i64))
+        .unwrap_or(0)
+}
+
+fn parse_activity_body(body: &str) -> Result<ActivitySnapshot, ProviderError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ProviderError::Transport(format!("activity parse: {e}")))?;
+    let code = v.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let msg = v
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+        return Err(ProviderError::Transport(format!(
+            "activity code={code} msg={msg}"
+        )));
+    }
+    let data = v.get("data").cloned().unwrap_or(Value::Null);
+    let query_at_ms = data
+        .get("queryAt")
+        .map(json_i64_any)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let raw_acts = data
+        .get("activities")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut activities = Vec::new();
+    for row in raw_acts {
+        let typ = row
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if !typ.is_empty() && typ != "MODEL_FREE_QUOTA" {
+            continue;
+        }
+        let model_keys: Vec<String> = row
+            .get("modelKeys")
+            .and_then(|k| k.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let limit = row.get("limit").map(json_i64_any).unwrap_or(0).max(0);
+        let used = row.get("used").map(json_i64_any).unwrap_or(0).max(0);
+        let mut remaining = row
+            .get("remaining")
+            .map(json_i64_any)
+            .unwrap_or_else(|| (limit - used).max(0));
+        if remaining < 0 {
+            remaining = 0;
+        }
+        if remaining > limit && limit > 0 {
+            remaining = limit;
+        }
+        activities.push(ActivityFreeBucket {
+            activity_id: row
+                .get("activityId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            model_name: row
+                .get("modelName")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            model_keys,
+            limit,
+            used,
+            remaining,
+            reset_at_ms: row.get("resetAt").map(json_i64_any).unwrap_or(0),
+            reset_strategy: row
+                .get("resetStrategy")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            eligible: row
+                .get("eligible")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true),
+            activity_end_at_ms: row.get("activityEndAt").map(json_i64_any).unwrap_or(0),
+            status_text: row
+                .get("statusText")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+            cli_text: row
+                .get("cliText")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+        });
+    }
+    Ok(ActivitySnapshot {
+        activities,
+        query_at_ms,
+        fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })
+}
+
+fn activity_upstream_key(model: &str) -> String {
+    let bare = model.rsplit('/').next().unwrap_or(model).trim();
+    model_cfg(bare).key.to_string()
+}
+
+fn find_free_bucket_for_model<'a>(
+    snap: &'a ActivitySnapshot,
+    model: &str,
+) -> Option<&'a ActivityFreeBucket> {
+    let key = activity_upstream_key(model);
+    let key_l = key.to_ascii_lowercase();
+    snap.activities.iter().find(|b| {
+        b.eligible
+            && b.model_keys
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(&key_l))
+    })
+}
+
+fn free_remaining_for_model(snap: &ActivitySnapshot, model: &str) -> i64 {
+    find_free_bucket_for_model(snap, model)
+        .map(|b| b.remaining.max(0))
+        .unwrap_or(0)
+}
+
+pub fn model_has_free_activity_path(account: &Account, model: &str) -> bool {
+    free_remaining_from_account_data(&account.data_json(), model) > 0
+}
+
+pub fn free_remaining_for_account_model(account: &Account, model: &str) -> i64 {
+    free_remaining_from_account_data(&account.data_json(), model)
+}
+
+pub fn is_ultimate_free_activity_model(model: &str) -> bool {
+    let bare = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        bare.as_str(),
+        "ultimate" | "quest-ultimate" | "experts-ultimate"
+    ) || activity_upstream_key(model) == "ultimate"
+}
+
+fn write_free_remaining_used(account: &mut Account, remaining: i64, used: i64) {
+    let mut data = account.data_json();
+    let obj = match data.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let rem = remaining.max(0);
+    let used = used.max(0);
+    obj.insert("free_remaining".into(), json!(rem));
+    obj.insert("free_used".into(), json!(used));
+    if let Some(Value::Array(acts)) = obj.get_mut("activity_free") {
+        for row in acts.iter_mut() {
+            let keys_hit = row
+                .get("modelKeys")
+                .and_then(|k| k.as_array())
+                .map(|arr| {
+                    arr.iter().any(|x| {
+                        x.as_str()
+                            .map(|s| {
+                                let sl = s.to_ascii_lowercase();
+                                sl == "ultimate"
+                                    || sl == "quest-ultimate"
+                                    || sl == "experts-ultimate"
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            let id_hit = row
+                .get("activityId")
+                .and_then(|x| x.as_str())
+                .map(|s| s == "ultimate_200_free_invoke")
+                .unwrap_or(false);
+            if keys_hit || id_hit {
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("remaining".into(), json!(rem));
+                    map.insert("used".into(), json!(used));
+                }
+            }
+        }
+    }
+    account.set_data_json(&data);
+}
+
+pub fn optimistic_consume_free_call(account: &mut Account, model: &str) -> Option<i64> {
+    if !is_ultimate_free_activity_model(model) {
+        return None;
+    }
+    if free_remaining_from_account_data(&account.data_json(), model) <= 0 {
+        return None;
+    }
+    let data = account.data_json();
+    let rem = data
+        .get("free_remaining")
+        .map(json_i64_any)
+        .unwrap_or(0)
+        .max(0);
+    if rem <= 0 {
+        return None;
+    }
+    let used = data
+        .get("free_used")
+        .map(json_i64_any)
+        .unwrap_or(0)
+        .max(0);
+    let new_rem = (rem - 1).max(0);
+    let new_used = used + 1;
+    write_free_remaining_used(account, new_rem, new_used);
+    Some(new_rem)
+}
+
+pub fn cap_free_remaining_after_sync(account: &mut Account, model: &str, max_remaining: i64) {
+    if !is_ultimate_free_activity_model(model) {
+        return;
+    }
+    let cur = free_remaining_from_account_data(&account.data_json(), model);
+    if cur <= max_remaining {
+        return;
+    }
+    let data = account.data_json();
+    let limit = data
+        .get("free_limit")
+        .map(json_i64_any)
+        .unwrap_or(0)
+        .max(0);
+    let used = if limit > 0 {
+        (limit - max_remaining).max(0)
+    } else {
+        data.get("free_used")
+            .map(json_i64_any)
+            .unwrap_or(0)
+            .max(0)
+    };
+    write_free_remaining_used(account, max_remaining.max(0), used);
+}
+
+fn free_remaining_from_account_data(data: &Value, model: &str) -> i64 {
+    let key = activity_upstream_key(model);
+    let bare = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    if let Some(keys) = data
+        .get("free_model_keys")
+        .and_then(|k| k.as_array())
+    {
+        let hit = keys.iter().any(|k| {
+            k.as_str()
+                .map(|s| {
+                    let sl = s.to_ascii_lowercase();
+                    sl == key || sl == bare
+                })
+                .unwrap_or(false)
+        });
+        if hit {
+            return data
+                .get("free_remaining")
+                .map(json_i64_any)
+                .unwrap_or(0)
+                .max(0);
+        }
+    }
+    let acts = match data.get("activity_free") {
+        Some(v) => v,
+        None => return 0,
+    };
+    let snap = ActivitySnapshot {
+        activities: parse_stored_activities(acts),
+        query_at_ms: 0,
+        fetched_at: String::new(),
+    };
+    free_remaining_for_model(&snap, model)
+}
+
+fn parse_stored_activities(v: &Value) -> Vec<ActivityFreeBucket> {
+    let arr = match v.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter_map(|row| {
+            let model_keys: Vec<String> = row
+                .get("modelKeys")
+                .and_then(|k| k.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if model_keys.is_empty() && row.get("activityId").is_none() {
+                return None;
+            }
+            Some(ActivityFreeBucket {
+                activity_id: row
+                    .get("activityId")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                model_name: row
+                    .get("modelName")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                model_keys,
+                limit: row.get("limit").map(json_i64_any).unwrap_or(0).max(0),
+                used: row.get("used").map(json_i64_any).unwrap_or(0).max(0),
+                remaining: row.get("remaining").map(json_i64_any).unwrap_or(0).max(0),
+                reset_at_ms: row.get("resetAt").map(json_i64_any).unwrap_or(0),
+                reset_strategy: row
+                    .get("resetStrategy")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                eligible: row
+                    .get("eligible")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true),
+                activity_end_at_ms: row.get("activityEndAt").map(json_i64_any).unwrap_or(0),
+                status_text: row
+                    .get("statusText")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                cli_text: row
+                    .get("cliText")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+            })
+        })
+        .collect()
+}
+
+fn apply_activity_to_account(account: &mut Account, snap: &ActivitySnapshot) {
+    let mut data = account.data_json();
+    let obj = match data.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let acts_json: Vec<Value> = snap
+        .activities
+        .iter()
+        .map(|b| {
+            json!({
+                "activityId": b.activity_id,
+                "modelName": b.model_name,
+                "modelKeys": b.model_keys,
+                "limit": b.limit,
+                "used": b.used,
+                "remaining": b.remaining,
+                "resetAt": b.reset_at_ms,
+                "resetStrategy": b.reset_strategy,
+                "eligible": b.eligible,
+                "activityEndAt": b.activity_end_at_ms,
+                "statusText": b.status_text,
+                "cliText": b.cli_text,
+            })
+        })
+        .collect();
+    obj.insert("activity_free".into(), Value::Array(acts_json));
+    obj.insert("activity_query_at_ms".into(), json!(snap.query_at_ms));
+    obj.insert(
+        "activity_synced_at".into(),
+        Value::String(snap.fetched_at.clone()),
+    );
+    obj.remove("activity_error");
+
+    let primary = snap
+        .activities
+        .iter()
+        .find(|b| {
+            b.activity_id == "ultimate_200_free_invoke"
+                || b.model_keys
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case("ultimate"))
+        })
+        .or_else(|| snap.activities.first());
+
+    if let Some(b) = primary {
+        obj.insert("free_limit".into(), json!(b.limit));
+        obj.insert("free_remaining".into(), json!(b.remaining));
+        obj.insert("free_used".into(), json!(b.used));
+        obj.insert("free_activity_id".into(), Value::String(b.activity_id.clone()));
+        obj.insert(
+            "free_model_keys".into(),
+            json!(b.model_keys.clone()),
+        );
+        obj.insert(
+            "free_reset_strategy".into(),
+            Value::String(b.reset_strategy.clone()),
+        );
+        if let Some(s) = ms_to_rfc3339(b.activity_end_at_ms) {
+            obj.insert("free_end_at".into(), Value::String(s));
+        } else {
+            obj.insert("free_end_at".into(), Value::Null);
+        }
+        obj.insert("free_end_ms".into(), json!(b.activity_end_at_ms));
+        if let Some(ref t) = b.cli_text {
+            obj.insert("free_cli_text".into(), Value::String(t.clone()));
+        } else if let Some(ref t) = b.status_text {
+            obj.insert("free_cli_text".into(), Value::String(t.clone()));
+        }
+    } else {
+        obj.insert("free_limit".into(), json!(0));
+        obj.insert("free_remaining".into(), json!(0));
+        obj.insert("free_used".into(), json!(0));
+        obj.insert("free_activity_id".into(), Value::Null);
+        obj.insert("free_model_keys".into(), json!([]));
+        obj.insert("free_reset_strategy".into(), Value::Null);
+        obj.insert("free_end_at".into(), Value::Null);
+        obj.insert("free_end_ms".into(), json!(0));
+        obj.insert("free_cli_text".into(), Value::Null);
+    }
+    account.set_data_json(&data);
+}
+
+fn apply_activity_error_to_account(account: &mut Account, err: &str) {
+    let mut data = account.data_json();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "activity_error".into(),
+            Value::String(err.chars().take(200).collect()),
+        );
+        obj.insert(
+            "activity_synced_at".into(),
+            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        account.set_data_json(&data);
+    }
+}
+
 #[async_trait]
 impl Provider for QoderProvider {
     fn id(&self) -> &'static str {
@@ -857,6 +1383,28 @@ impl Provider for QoderProvider {
                     account = %account.id,
                     error = %e,
                     "qoder user/plan sync failed (credits still updated)"
+                );
+            }
+        }
+
+        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        match QoderTokens::from_data(&data) {
+            Ok(tokens) => match self.fetch_activity(&tokens).await {
+                Ok(snap) => apply_activity_to_account(account, &snap),
+                Err(e) => {
+                    tracing::warn!(
+                        account = %account.id,
+                        error = %e,
+                        "qoder activity free-quota sync failed (credits/plan still updated)"
+                    );
+                    apply_activity_error_to_account(account, &e.to_string());
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    account = %account.id,
+                    error = %e,
+                    "qoder activity skipped: tokens unreadable after plan sync"
                 );
             }
         }
@@ -2631,5 +3179,222 @@ mod tests {
     #[test]
     fn user_plan_url_is_openapi() {
         assert_eq!(USER_PLAN_URL, "https://openapi.qoder.sh/api/v2/user/plan");
+    }
+
+    #[test]
+    fn activity_url_is_openapi_algo() {
+        assert_eq!(
+            ACTIVITY_URL,
+            "https://openapi.qoder.sh/algo/api/v2/activity"
+        );
+    }
+
+    #[test]
+    fn parse_activity_empty_unclaimed() {
+        let body = r#"{
+          "code": 0,
+          "msg": "ok",
+          "data": { "activities": [], "queryAt": 1785329743398 }
+        }"#;
+        let snap = parse_activity_body(body).unwrap();
+        assert!(snap.activities.is_empty());
+        assert_eq!(snap.query_at_ms, 1785329743398);
+    }
+
+    #[test]
+    fn parse_activity_ultimate_200_free() {
+        let body = r#"{
+          "code": 0,
+          "msg": "ok",
+          "data": {
+            "activities": [{
+              "type": "MODEL_FREE_QUOTA",
+              "activityId": "ultimate_200_free_invoke",
+              "modelName": "Ultimate free",
+              "modelKeys": ["ultimate", "quest-ultimate", "experts-ultimate"],
+              "limit": 200,
+              "used": 3,
+              "remaining": 197,
+              "resetAt": 0,
+              "resetStrategy": "NEVER_EXPIRE",
+              "eligible": true,
+              "activityEndAt": 1785513540000,
+              "statusText": "197 left",
+              "cliText": "Used 3 / 200"
+            }],
+            "queryAt": 1785381043819
+          }
+        }"#;
+        let snap = parse_activity_body(body).unwrap();
+        assert_eq!(snap.activities.len(), 1);
+        let b = &snap.activities[0];
+        assert_eq!(b.activity_id, "ultimate_200_free_invoke");
+        assert_eq!(b.limit, 200);
+        assert_eq!(b.used, 3);
+        assert_eq!(b.remaining, 197);
+        assert_eq!(b.model_keys.len(), 3);
+        assert_eq!(free_remaining_for_model(&snap, "qd/ultimate"), 197);
+        assert_eq!(free_remaining_for_model(&snap, "ultimate"), 197);
+        assert_eq!(free_remaining_for_model(&snap, "qd/auto"), 0);
+        assert_eq!(free_remaining_for_model(&snap, "qd/lite"), 0);
+        assert_eq!(activity_upstream_key("qd/ultimate"), "ultimate");
+    }
+
+    #[test]
+    fn parse_activity_nonzero_code_errors() {
+        let err = parse_activity_body(r#"{"code":1,"msg":"nope"}"#).unwrap_err();
+        assert!(matches!(err, ProviderError::Transport(_)));
+    }
+
+    #[test]
+    fn parse_activity_skips_non_free_type() {
+        let body = r#"{
+          "code": 0,
+          "data": {
+            "activities": [
+              {"type": "OTHER", "activityId": "x", "modelKeys": ["ultimate"], "limit": 10, "remaining": 10, "eligible": true},
+              {"type": "MODEL_FREE_QUOTA", "activityId": "u", "modelKeys": ["ultimate"], "limit": 5, "remaining": 4, "eligible": true}
+            ],
+            "queryAt": 1
+          }
+        }"#;
+        let snap = parse_activity_body(body).unwrap();
+        assert_eq!(snap.activities.len(), 1);
+        assert_eq!(snap.activities[0].remaining, 4);
+    }
+
+    #[test]
+    fn apply_activity_writes_compact_free_fields() {
+        let mut acc = Account {
+            id: "a1".into(),
+            provider: "qoder".into(),
+            email: Some("t@example.com".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"personalToken":"pt"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            quota_limit: 0,
+            quota_remaining: 0,
+        };
+        let snap = ActivitySnapshot {
+            activities: vec![ActivityFreeBucket {
+                activity_id: "ultimate_200_free_invoke".into(),
+                model_name: "Ultimate".into(),
+                model_keys: vec![
+                    "ultimate".into(),
+                    "quest-ultimate".into(),
+                    "experts-ultimate".into(),
+                ],
+                limit: 200,
+                used: 1,
+                remaining: 199,
+                reset_at_ms: 0,
+                reset_strategy: "NEVER_EXPIRE".into(),
+                eligible: true,
+                activity_end_at_ms: 1785513540000,
+                status_text: Some("199 left".into()),
+                cli_text: Some("Used 1 / 200".into()),
+            }],
+            query_at_ms: 99,
+            fetched_at: "2026-07-30T00:00:00.000Z".into(),
+        };
+        apply_activity_to_account(&mut acc, &snap);
+        let d = acc.data_json();
+        assert_eq!(d["free_limit"], 200);
+        assert_eq!(d["free_remaining"], 199);
+        assert_eq!(d["free_used"], 1);
+        assert_eq!(d["free_activity_id"], "ultimate_200_free_invoke");
+        assert_eq!(d["personalToken"], "pt");
+        assert!(model_has_free_activity_path(&acc, "qd/ultimate"));
+        assert!(!model_has_free_activity_path(&acc, "qd/auto"));
+        assert_eq!(free_remaining_for_account_model(&acc, "ultimate"), 199);
+
+        let empty = ActivitySnapshot {
+            activities: vec![],
+            query_at_ms: 1,
+            fetched_at: "t".into(),
+        };
+        apply_activity_to_account(&mut acc, &empty);
+        let d2 = acc.data_json();
+        assert_eq!(d2["free_remaining"], 0);
+        assert_eq!(d2["free_limit"], 0);
+        assert!(!model_has_free_activity_path(&acc, "qd/ultimate"));
+    }
+
+    #[test]
+    fn is_ultimate_free_activity_model_keys() {
+        assert!(is_ultimate_free_activity_model("qd/ultimate"));
+        assert!(is_ultimate_free_activity_model("ultimate"));
+        assert!(is_ultimate_free_activity_model("quest-ultimate"));
+        assert!(!is_ultimate_free_activity_model("qd/lite"));
+        assert!(!is_ultimate_free_activity_model("qd/auto"));
+    }
+
+    #[test]
+    fn optimistic_consume_and_cap_free() {
+        let mut acc = Account {
+            id: "t".into(),
+            provider: "qoder".into(),
+            email: None,
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{
+              "personalToken":"pt",
+              "free_limit":200,
+              "free_remaining":3,
+              "free_used":197,
+              "free_model_keys":["ultimate","quest-ultimate","experts-ultimate"],
+              "activity_free":[{
+                "activityId":"ultimate_200_free_invoke",
+                "modelKeys":["ultimate"],
+                "limit":200,"used":197,"remaining":3,"eligible":true
+              }]
+            }"#
+            .into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            quota_limit: 0,
+            quota_remaining: 0,
+        };
+        assert_eq!(
+            optimistic_consume_free_call(&mut acc, "qd/ultimate"),
+            Some(2)
+        );
+        assert_eq!(free_remaining_for_account_model(&acc, "ultimate"), 2);
+        assert_eq!(acc.data_json()["free_used"], 198);
+        assert_eq!(acc.data_json()["activity_free"][0]["remaining"], 2);
+
+        assert!(optimistic_consume_free_call(&mut acc, "qd/auto").is_none());
+        assert!(optimistic_consume_free_call(&mut acc, "qd/lite").is_none());
+
+        acc.data = r#"{
+          "free_limit":200,"free_remaining":5,"free_used":195,
+          "free_model_keys":["ultimate"]
+        }"#
+        .into();
+        cap_free_remaining_after_sync(&mut acc, "qd/ultimate", 2);
+        assert_eq!(free_remaining_for_account_model(&acc, "ultimate"), 2);
+        assert_eq!(acc.data_json()["free_used"], 198);
+
+        acc.data = r#"{
+          "free_limit":200,"free_remaining":1,"free_used":199,
+          "free_model_keys":["ultimate"]
+        }"#
+        .into();
+        cap_free_remaining_after_sync(&mut acc, "qd/ultimate", 5);
+        assert_eq!(
+            free_remaining_for_account_model(&acc, "ultimate"),
+            1,
+            "cap must not raise remaining"
+        );
     }
 }
