@@ -829,25 +829,32 @@ async fn log_request(
     request_body: Option<String>,
     response_body: Option<String>,
 ) -> AppResult<()> {
-    let _ = log_request_returning_id(
-        pool,
-        provider,
-        model,
-        status,
+    // Fire-and-forget: the caller discards the id, so keep the DB insert off
+    // the response path. Owned NewRequestLog moves into the spawned task.
+    let pool = pool.clone();
+    let new_log = NewRequestLog {
+        provider: provider.into(),
+        model: Some(model.into()),
+        status: status.into(),
         stream,
-        duration_ms,
+        duration_ms: Some(duration_ms),
         prompt_tokens,
         completion_tokens,
         total_tokens,
         credits_used,
         account_quota_before,
         account_quota_after,
-        account,
-        error_message,
+        account_id: account.map(|a| a.id.clone()),
+        account_email: account.and_then(|a| a.email.clone()),
+        error_message: error_message.map(|e| e.chars().take(500).collect()),
         request_body,
         response_body,
-    )
-    .await?;
+    };
+    tokio::spawn(async move {
+        if let Err(e) = db::insert_request_log(&pool, new_log).await {
+            tracing::warn!(error = %e, "failed to write request log");
+        }
+    });
     Ok(())
 }
 
