@@ -17,9 +17,9 @@ use uuid::Uuid;
 
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
-const USER_AGENT: &str = "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)";
-const CLIENT_IDENTIFIER: &str = "grok-pager";
-const CLIENT_VERSION: &str = "0.2.93";
+const USER_AGENT: &str = "grok-shell/0.2.114 (linux; x86_64)";
+const CLIENT_IDENTIFIER: &str = "grok-shell";
+const CLIENT_VERSION: &str = "0.2.114";
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
 
