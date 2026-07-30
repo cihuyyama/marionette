@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/models", get(models::list_models_admin))
         .route("/admin/usage", get(admin::usage))
         .route("/admin/requests", get(admin::list_requests))
+        .route("/admin/requests/{id}", get(admin::get_request))
         .route("/admin/providers", get(admin::list_provider_settings))
         .route(
             "/admin/providers/{provider}",

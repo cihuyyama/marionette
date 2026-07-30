@@ -6,6 +6,7 @@ pub mod error;
 pub mod farm;
 pub mod images;
 pub mod import_util;
+pub mod log_body;
 pub mod openai;
 pub mod pool;
 pub mod providers;

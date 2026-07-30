@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  getRequestDetail,
   getUsage,
   listRequests,
   type RequestLog,
@@ -28,6 +29,23 @@ export function ActivityPage() {
   const [range, setRange] = useState<UsageRange>("week");
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState<RequestLog | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const openDetail = useCallback(async (row: RequestLog) => {
+    setDetail(row);
+    if (row.request_body !== undefined && row.response_body !== undefined) {
+      return;
+    }
+    setDetailLoading(true);
+    try {
+      const full = await getRequestDetail(row.id);
+      setDetail((cur) => (cur?.id === row.id ? { ...cur, ...full } : cur));
+    } catch {
+      /* keep metadata-only drawer */
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -274,7 +292,7 @@ export function ActivityPage() {
                   <tr
                     key={r.id}
                     className="row-click"
-                    onClick={() => setDetail(r)}
+                    onClick={() => void openDetail(r)}
                   >
                     <td>
                       <span
@@ -353,7 +371,12 @@ export function ActivityPage() {
       {detail && (
         <>
           <div className="drawer-backdrop" onClick={() => setDetail(null)} />
-          <aside className="drawer" role="dialog" aria-label="Request detail">
+          <aside
+            className="drawer drawer-wide"
+            role="dialog"
+            aria-label="Request detail"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div
               style={{
                 display: "flex",
@@ -407,9 +430,44 @@ export function ActivityPage() {
               <dt>Error</dt>
               <dd>{detail.error_message ?? "—"}</dd>
             </dl>
+            {detailLoading &&
+            detail.request_body === undefined &&
+            detail.response_body === undefined ? (
+              <p className="muted" style={{ fontSize: 12 }}>
+                <span className="spinner inline-spinner" /> Loading request &
+                response body…
+              </p>
+            ) : (
+              <>
+                <JsonBlock title="Request body" value={detail.request_body} />
+                <JsonBlock title="Response body" value={detail.response_body} />
+              </>
+            )}
           </aside>
         </>
       )}
+    </div>
+  );
+}
+
+function JsonBlock({ title, value }: { title: string; value: unknown }) {
+  const text =
+    value === undefined || value === null
+      ? "(empty — older logs have no body capture)"
+      : JSON.stringify(value, null, 2);
+  return (
+    <div className="json-block">
+      <div className="json-block-head">
+        <p className="json-block-title">{title}</p>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => void navigator.clipboard.writeText(text)}
+        >
+          Copy
+        </button>
+      </div>
+      <pre className="response json-pre">{text}</pre>
     </div>
   );
 }

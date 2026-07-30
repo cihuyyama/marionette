@@ -68,6 +68,8 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                             None,
                             None,
                             Some(e.to_string()),
+                            None,
+                            None,
                         )
                         .await;
                         return Err(e);
@@ -133,6 +135,8 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                     None,
                     Some(&account),
                     None,
+                    None,
+                    None,
                 )
                 .await;
                 let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
@@ -177,6 +181,8 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                                         None,
                                         None,
                                         Some(&account),
+                                        None,
+                                        None,
                                         None,
                                     )
                                     .await;
@@ -282,6 +288,8 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
         None,
         last_account.as_ref(),
         Some(err.to_string()),
+        None,
+        None,
     )
     .await;
     Err(err)
@@ -302,6 +310,7 @@ pub async fn handle_chat(
     };
 
     let model = req.model.clone();
+    let request_body = crate::log_body::prepare_log_body_from_serializable(&req);
     let started = Instant::now();
     let mut last_err: Option<AppError> = None;
     let mut last_account: Option<Account> = None;
@@ -328,6 +337,10 @@ pub async fn handle_chat(
                             None,
                             None,
                             Some(e.to_string()),
+                            request_body.clone(),
+                            Some(
+                                serde_json::json!({ "error": e.to_string() }).to_string(),
+                            ),
                         )
                         .await;
                         return Err(e);
@@ -371,6 +384,7 @@ pub async fn handle_chat(
                     started,
                     account,
                     outcome,
+                    request_body.clone(),
                 )
                 .await;
             }
@@ -394,6 +408,7 @@ pub async fn handle_chat(
                                         started,
                                         account,
                                         outcome,
+                                        request_body.clone(),
                                     )
                                     .await;
                                 }
@@ -442,6 +457,8 @@ pub async fn handle_chat(
         None,
         last_account.as_ref(),
         Some(err.to_string()),
+        request_body,
+        Some(serde_json::json!({ "error": err.to_string() }).to_string()),
     )
     .await;
     Err(err)
@@ -513,6 +530,7 @@ async fn handle_chat_success(
     started: Instant,
     mut account: Account,
     outcome: ChatOutcome,
+    request_body: Option<String>,
 ) -> AppResult<ChatOutcome> {
     let duration_ms = started.elapsed().as_millis() as i64;
     match outcome {
@@ -533,6 +551,7 @@ async fn handle_chat_success(
                 model,
             )
             .await;
+            let response_body = crate::log_body::prepare_log_body(&v);
             let _ = log_request(
                 &state.pool,
                 provider_id,
@@ -556,6 +575,8 @@ async fn handle_chat_success(
                 },
                 Some(&account),
                 None,
+                request_body,
+                response_body,
             )
             .await;
             let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
@@ -569,6 +590,13 @@ async fn handle_chat_success(
             response,
             usage_rx,
         } => {
+            let response_body = Some(
+                serde_json::json!({
+                    "stream": true,
+                    "note": "SSE body not buffered; usage filled after stream ends"
+                })
+                .to_string(),
+            );
             let log_id = match log_request_returning_id(
                 &state.pool,
                 provider_id,
@@ -584,6 +612,8 @@ async fn handle_chat_success(
                 None,
                 Some(&account),
                 None,
+                request_body,
+                response_body,
             )
             .await
             {
@@ -796,6 +826,8 @@ async fn log_request(
     account_quota_after: Option<i64>,
     account: Option<&Account>,
     error_message: Option<String>,
+    request_body: Option<String>,
+    response_body: Option<String>,
 ) -> AppResult<()> {
     let _ = log_request_returning_id(
         pool,
@@ -812,6 +844,8 @@ async fn log_request(
         account_quota_after,
         account,
         error_message,
+        request_body,
+        response_body,
     )
     .await?;
     Ok(())
@@ -832,6 +866,8 @@ async fn log_request_returning_id(
     account_quota_after: Option<i64>,
     account: Option<&Account>,
     error_message: Option<String>,
+    request_body: Option<String>,
+    response_body: Option<String>,
 ) -> AppResult<String> {
     db::insert_request_log(
         pool,
@@ -850,6 +886,8 @@ async fn log_request_returning_id(
             account_id: account.map(|a| a.id.clone()),
             account_email: account.and_then(|a| a.email.clone()),
             error_message: error_message.map(|e| e.chars().take(500).collect()),
+            request_body,
+            response_body,
         },
     )
     .await

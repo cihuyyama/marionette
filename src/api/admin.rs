@@ -237,6 +237,42 @@ pub async fn list_requests(
     })))
 }
 
+fn parse_stored_body(raw: Option<&str>) -> Value {
+    match raw {
+        None => Value::Null,
+        Some(s) if s.trim().is_empty() => Value::Null,
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string())),
+    }
+}
+
+pub async fn get_request(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let r = db::get_request_log(&state.pool, &id).await?;
+    Ok(Json(json!({
+        "id": r.id,
+        "created_at": r.created_at,
+        "provider": r.provider,
+        "model": r.model,
+        "status": r.status,
+        "stream": r.stream != 0,
+        "duration_ms": r.duration_ms,
+        "prompt_tokens": r.prompt_tokens,
+        "completion_tokens": r.completion_tokens,
+        "total_tokens": r.total_tokens,
+        "credits_used": r.credits_used,
+        "account_quota_before": r.account_quota_before,
+        "account_quota_after": r.account_quota_after,
+        "account_id": r.account_id,
+        "account_email": r.account_email,
+        "error_message": r.error_message,
+        "request_body": parse_stored_body(r.request_body.as_deref()),
+        "response_body": parse_stored_body(r.response_body.as_deref()),
+    })))
+}
+
 pub async fn usage(
     State(state): State<AppState>,
     _auth: AdminAuth,

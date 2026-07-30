@@ -124,7 +124,9 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           account_quota_after INTEGER,
           account_id TEXT,
           account_email TEXT,
-          error_message TEXT
+          error_message TEXT,
+          request_body TEXT,
+          response_body TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_request_logs_created
           ON request_logs(created_at DESC);
@@ -144,6 +146,23 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     .await?;
     migrate_quota_columns(pool).await?;
     migrate_provider_settings_columns(pool).await?;
+    migrate_request_log_body_columns(pool).await?;
+    Ok(())
+}
+
+async fn migrate_request_log_body_columns(pool: &SqlitePool) -> AppResult<()> {
+    let alters = [
+        "ALTER TABLE request_logs ADD COLUMN request_body TEXT",
+        "ALTER TABLE request_logs ADD COLUMN response_body TEXT",
+    ];
+    for sql in alters {
+        if let Err(e) = sqlx::query(sql).execute(pool).await {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -515,6 +534,35 @@ pub struct RequestLog {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RequestLogDetail {
+    pub id: String,
+    pub created_at: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub stream: i64,
+    pub duration_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub credits_used: Option<i64>,
+    pub account_quota_before: Option<i64>,
+    pub account_quota_after: Option<i64>,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub error_message: Option<String>,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
+}
+
+const REQUEST_LOG_LIGHT_COLUMNS: &str = r#"
+    id, created_at, provider, model, status, stream, duration_ms,
+    prompt_tokens, completion_tokens, total_tokens,
+    credits_used, account_quota_before, account_quota_after,
+    account_id, account_email, error_message
+"#;
+
 #[derive(Debug, Clone)]
 pub struct NewRequestLog {
     pub provider: String,
@@ -531,6 +579,8 @@ pub struct NewRequestLog {
     pub account_id: Option<String>,
     pub account_email: Option<String>,
     pub error_message: Option<String>,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
 }
 
 pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppResult<String> {
@@ -542,8 +592,9 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
           id, created_at, provider, model, status, stream, duration_ms,
           prompt_tokens, completion_tokens, total_tokens,
           credits_used, account_quota_before, account_quota_after,
-          account_id, account_email, error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          account_id, account_email, error_message,
+          request_body, response_body
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -562,9 +613,30 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
     .bind(&log.account_id)
     .bind(&log.account_email)
     .bind(&log.error_message)
+    .bind(&log.request_body)
+    .bind(&log.response_body)
     .execute(pool)
     .await?;
     Ok(id)
+}
+
+pub async fn get_request_log(pool: &SqlitePool, id: &str) -> AppResult<RequestLogDetail> {
+    sqlx::query_as::<_, RequestLogDetail>(
+        r#"
+        SELECT
+          id, created_at, provider, model, status, stream, duration_ms,
+          prompt_tokens, completion_tokens, total_tokens,
+          credits_used, account_quota_before, account_quota_after,
+          account_id, account_email, error_message,
+          request_body, response_body
+        FROM request_logs
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("request log {id}")))
 }
 
 pub async fn update_request_log_usage(
@@ -613,62 +685,66 @@ pub async fn list_request_logs(
     let limit = limit.clamp(1, 500);
     match (provider, since) {
         (Some(p), Some(s)) => {
-            let rows = sqlx::query_as::<_, RequestLog>(
+            let sql = format!(
                 r#"
-                SELECT * FROM request_logs
+                SELECT {REQUEST_LOG_LIGHT_COLUMNS} FROM request_logs
                 WHERE provider = ? AND created_at >= ?
                 ORDER BY created_at DESC
                 LIMIT ?
-                "#,
-            )
-            .bind(p)
-            .bind(s)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+                "#
+            );
+            let rows = sqlx::query_as::<_, RequestLog>(&sql)
+                .bind(p)
+                .bind(s)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
             Ok(rows)
         }
         (Some(p), None) => {
-            let rows = sqlx::query_as::<_, RequestLog>(
+            let sql = format!(
                 r#"
-                SELECT * FROM request_logs
+                SELECT {REQUEST_LOG_LIGHT_COLUMNS} FROM request_logs
                 WHERE provider = ?
                 ORDER BY created_at DESC
                 LIMIT ?
-                "#,
-            )
-            .bind(p)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+                "#
+            );
+            let rows = sqlx::query_as::<_, RequestLog>(&sql)
+                .bind(p)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
             Ok(rows)
         }
         (None, Some(s)) => {
-            let rows = sqlx::query_as::<_, RequestLog>(
+            let sql = format!(
                 r#"
-                SELECT * FROM request_logs
+                SELECT {REQUEST_LOG_LIGHT_COLUMNS} FROM request_logs
                 WHERE created_at >= ?
                 ORDER BY created_at DESC
                 LIMIT ?
-                "#,
-            )
-            .bind(s)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+                "#
+            );
+            let rows = sqlx::query_as::<_, RequestLog>(&sql)
+                .bind(s)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
             Ok(rows)
         }
         (None, None) => {
-            let rows = sqlx::query_as::<_, RequestLog>(
+            let sql = format!(
                 r#"
-                SELECT * FROM request_logs
+                SELECT {REQUEST_LOG_LIGHT_COLUMNS} FROM request_logs
                 ORDER BY created_at DESC
                 LIMIT ?
-                "#,
-            )
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+                "#
+            );
+            let rows = sqlx::query_as::<_, RequestLog>(&sql)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
             Ok(rows)
         }
     }

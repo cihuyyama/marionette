@@ -468,6 +468,8 @@ export type RequestLog = {
   account_id: string | null;
   account_email: string | null;
   error_message: string | null;
+  request_body?: unknown;
+  response_body?: unknown;
 };
 
 export type UsageRange = "day" | "week" | "month" | "all";
@@ -505,6 +507,14 @@ export function listRequests(
     range?: string;
     since?: string | null;
   }>(`/admin/requests${qs ? `?${qs}` : ""}`, { auth: "admin" }, settings);
+}
+
+export function getRequestDetail(id: string, settings?: Settings) {
+  return request<RequestLog>(
+    `/admin/requests/${encodeURIComponent(id)}`,
+    { auth: "admin" },
+    settings,
+  );
 }
 
 export function getUsage(
