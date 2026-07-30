@@ -65,9 +65,15 @@ pub async fn connect(db_path: &Path) -> AppResult<SqlitePool> {
     let opts = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // WAL + NORMAL is crash-safe yet skips FULL's fsync-per-commit.
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5))
+        // Negative cache_size = KiB, so -65536 = 64 MiB page cache.
+        .pragma("cache_size", "-65536")
+        .pragma("temp_store", "MEMORY");
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(8)
         .connect_with(opts)
         .await?;
     migrate(&pool).await?;
