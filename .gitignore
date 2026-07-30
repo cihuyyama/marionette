@@ -17,9 +17,11 @@ scripts/automation/**/accounts.txt
 scripts/automation/**/accounts*.txt
 !scripts/automation/**/accounts.txt.example
 !docs/**
-# HANDOFF holds VPS host/user/key path + infra layout — local only.
+# HANDOFF / DEPLOYMENT hold VPS host/user/key path + infra layout — local only.
 # MUST stay below `!docs/**`: last matching rule wins.
 docs/HANDOFF.md
+docs/DEPLOYMENT.md
+docs/QODER_ENDPOINTS.md
 
 # Agent scratch / continuation state
 .omo/
