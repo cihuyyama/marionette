@@ -3,6 +3,7 @@ use marionette::config::Config;
 use marionette::db;
 use marionette::state::AppState;
 use std::net::SocketAddr;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -77,15 +78,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = api::router(state)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(cors)
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
     if let Some(dir) = static_dir {
         if dir.exists() {
             tracing::info!(path = %dir.display(), "serving static dashboard");
             let index = dir.join("index.html");
+            let assets = dir.join("assets");
+            // Vite emits content-hashed files under assets/ — safe to cache forever.
+            let assets_service = tower_http::set_header::SetResponseHeaderLayer::overriding(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            let serve_assets = tower::ServiceBuilder::new()
+                .layer(assets_service)
+                .service(ServeDir::new(&assets));
             let serve = ServeDir::new(&dir)
                 .not_found_service(ServeFile::new(index));
-            app = app.fallback_service(serve);
+            app = app
+                .nest_service("/assets", serve_assets)
+                .fallback_service(serve);
         }
     }
 
