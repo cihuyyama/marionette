@@ -70,6 +70,9 @@ export function InjectJobPage() {
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
+    let id = 0;
+    const isTerminal = (s?: string) =>
+      s === "succeeded" || s === "failed" || s === "cancelled";
     const tick = async () => {
       try {
         const res = await getInjectEvents(jobId, afterRef.current);
@@ -82,15 +85,19 @@ export function InjectJobPage() {
           });
           afterRef.current = res.events[res.events.length - 1].seq;
         }
+        if (isTerminal(res.job?.status) && id) {
+          window.clearInterval(id);
+          id = 0;
+        }
       } catch {
         /* ignore poll errors while job ends */
       }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 1500);
+    id = window.setInterval(() => void tick(), 1500);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (id) window.clearInterval(id);
     };
   }, [jobId]);
 

@@ -152,6 +152,9 @@ function QoderGoogleSsoFarm() {
     const jid = jobIdRef.current ?? job?.id;
     if (!jid) return;
     let cancelled = false;
+    let id = 0;
+    const isTerminal = (s?: string) =>
+      s === "succeeded" || s === "failed" || s === "cancelled";
     const tick = async () => {
       try {
         const res = await getFarmEvents(jid, afterRef.current);
@@ -164,15 +167,19 @@ function QoderGoogleSsoFarm() {
           });
           afterRef.current = res.events[res.events.length - 1].seq;
         }
+        if (isTerminal(res.job?.status) && id) {
+          window.clearInterval(id);
+          id = 0;
+        }
       } catch {
         void 0;
       }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 1500);
+    id = window.setInterval(() => void tick(), 1500);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (id) window.clearInterval(id);
     };
   }, [job?.id, status?.busy]);
 
@@ -843,6 +850,9 @@ function GrokReloginFarm() {
     const jid = jobIdRef.current ?? job?.id;
     if (!jid) return;
     let cancelled = false;
+    let id = 0;
+    const isTerminal = (s?: string) =>
+      s === "succeeded" || s === "failed" || s === "cancelled";
     const tick = async () => {
       try {
         const res = await getFarmEvents(jid, afterRef.current);
@@ -855,15 +865,19 @@ function GrokReloginFarm() {
           });
           afterRef.current = res.events[res.events.length - 1].seq;
         }
+        if (isTerminal(res.job?.status) && id) {
+          window.clearInterval(id);
+          id = 0;
+        }
       } catch {
         void 0;
       }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 1500);
+    id = window.setInterval(() => void tick(), 1500);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (id) window.clearInterval(id);
     };
   }, [job?.id, status?.busy]);
 
