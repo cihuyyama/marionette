@@ -1074,6 +1074,34 @@ impl FarmManager {
         }
         std::fs::write(&accounts_path, body)?;
 
+        let mut effective_proxy_file = req.proxy_file.clone();
+        if effective_proxy_file
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            if let Ok(proxies) = db::list_active_proxies(&pool).await {
+                let live: Vec<_> = proxies
+                    .into_iter()
+                    .filter(|p| p.health != "dead")
+                    .collect();
+                if !live.is_empty() {
+                    let mut pbody = String::new();
+                    for p in &live {
+                        match (&p.username, &p.password) {
+                            (Some(u), Some(pw)) if !u.is_empty() => {
+                                pbody.push_str(&format!("{}:{}:{}:{}\n", p.host, p.port, u, pw));
+                            }
+                            _ => pbody.push_str(&format!("{}:{}\n", p.host, p.port)),
+                        }
+                    }
+                    let ppath = work.join("proxies.txt");
+                    std::fs::write(&ppath, pbody)?;
+                    effective_proxy_file = Some(ppath.to_string_lossy().to_string());
+                }
+            }
+        }
+
         if req.skip_existing {
             let path = work.join("skip-emails.txt");
             let mut skip_body = String::new();
@@ -1186,7 +1214,7 @@ impl FarmManager {
                 cmd.arg("--skip-emails-file").arg(sp);
             }
         }
-        if let Some(ref pf) = req.proxy_file {
+        if let Some(ref pf) = effective_proxy_file {
             let trimmed = pf.trim();
             if !trimmed.is_empty() {
                 cmd.arg("--proxy-file").arg(trimmed);
