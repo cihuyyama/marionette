@@ -272,6 +272,7 @@ impl Provider for GrokCliProvider {
 
     async fn chat(
         &self,
+        client: &Client,
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError> {
@@ -309,8 +310,7 @@ impl Provider for GrokCliProvider {
         let session_id = Uuid::new_v4().to_string();
         let req_id = Uuid::new_v4().to_string();
 
-        let mut req_builder = self
-            .client
+        let mut req_builder = client
             .post(RESPONSES_URL)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")

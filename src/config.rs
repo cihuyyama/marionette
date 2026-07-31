@@ -15,6 +15,7 @@ pub struct Config {
     pub refresh_lead_secs: i64,
     pub refresh_interval_secs: u64,
     pub refresh_workers: usize,
+    pub proxy_health_interval_secs: u64,
     pub static_dir: Option<PathBuf>,
 }
 
@@ -68,6 +69,10 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8)
                 .max(1),
+            proxy_health_interval_secs: env::var("MARIONETTE_PROXY_HEALTH_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             static_dir,
         }
     }

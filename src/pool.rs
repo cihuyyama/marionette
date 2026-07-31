@@ -373,7 +373,9 @@ pub async fn handle_chat(
         account.updated_at = db::now_rfc3339();
         db::update_account(&state.pool, &account).await?;
 
-        match provider.chat(&account, &req).await {
+        let chat_client = state.proxies.client_for_account(&account.id).await;
+
+        match provider.chat(&chat_client, &account, &req).await {
             Ok(outcome) => {
                 return handle_chat_success(
                     state,
@@ -397,7 +399,7 @@ pub async fn handle_chat(
                             if let Err(db_e) = db::update_account(&state.pool, &account).await {
                                 warn!(account = %account.id, error = %db_e, "persist after force_refresh failed");
                             }
-                            match provider.chat(&account, &req).await {
+                            match provider.chat(&chat_client, &account, &req).await {
                                 Ok(outcome) => {
                                     return handle_chat_success(
                                         state,

@@ -150,6 +150,42 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           pick_mode TEXT NOT NULL DEFAULT 'normal',
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS proxies (
+          id TEXT PRIMARY KEY,
+          scheme TEXT NOT NULL DEFAULT 'http',
+          host TEXT NOT NULL,
+          port INTEGER NOT NULL,
+          username TEXT,
+          password TEXT,
+          label TEXT,
+          country TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          health TEXT NOT NULL DEFAULT 'unknown',
+          latency_ms INTEGER,
+          last_check_at TEXT,
+          last_error TEXT,
+          source TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_proxies_hostport
+          ON proxies(host, port, username);
+        CREATE INDEX IF NOT EXISTS idx_proxies_active_health
+          ON proxies(is_active, health);
+        CREATE TABLE IF NOT EXISTS account_proxy (
+          account_id TEXT PRIMARY KEY,
+          proxy_id TEXT NOT NULL,
+          assigned_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_account_proxy_proxy
+          ON account_proxy(proxy_id);
+        CREATE TABLE IF NOT EXISTS proxy_settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          chat_mode TEXT NOT NULL DEFAULT 'off',
+          automation_mode TEXT NOT NULL DEFAULT 'sticky',
+          on_dead TEXT NOT NULL DEFAULT 'direct',
+          updated_at TEXT NOT NULL
+        );
         "#,
     )
     .execute(pool)
@@ -1221,6 +1257,317 @@ pub async fn update_account(pool: &SqlitePool, acc: &Account) -> AppResult<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ProxyRow {
+    pub id: String,
+    pub scheme: String,
+    pub host: String,
+    pub port: i64,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub label: Option<String>,
+    pub country: Option<String>,
+    pub is_active: i64,
+    pub health: String,
+    pub latency_ms: Option<i64>,
+    pub last_check_at: Option<String>,
+    pub last_error: Option<String>,
+    pub source: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+impl ProxyRow {
+    pub fn url(&self) -> String {
+        match (&self.username, &self.password) {
+            (Some(u), Some(p)) if !u.is_empty() => format!(
+                "{}://{}:{}@{}:{}",
+                self.scheme,
+                encode_userinfo(u),
+                encode_userinfo(p),
+                self.host,
+                self.port
+            ),
+            _ => format!("{}://{}:{}", self.scheme, self.host, self.port),
+        }
+    }
+
+    pub fn to_public(&self) -> Value {
+        let has_auth = self
+            .username
+            .as_deref()
+            .map(|u| !u.is_empty())
+            .unwrap_or(false);
+        serde_json::json!({
+            "id": self.id,
+            "scheme": self.scheme,
+            "host": self.host,
+            "port": self.port,
+            "username": self.username,
+            "has_auth": has_auth,
+            "label": self.label,
+            "country": self.country,
+            "is_active": self.is_active != 0,
+            "health": self.health,
+            "latency_ms": self.latency_ms,
+            "last_check_at": self.last_check_at,
+            "last_error": self.last_error,
+            "source": self.source,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+    }
+}
+
+pub async fn list_proxies(pool: &SqlitePool) -> AppResult<Vec<ProxyRow>> {
+    Ok(
+        sqlx::query_as::<_, ProxyRow>("SELECT * FROM proxies ORDER BY created_at ASC")
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+pub async fn list_active_proxies(pool: &SqlitePool) -> AppResult<Vec<ProxyRow>> {
+    Ok(sqlx::query_as::<_, ProxyRow>(
+        "SELECT * FROM proxies WHERE is_active = 1 ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_proxy(pool: &SqlitePool, id: &str) -> AppResult<ProxyRow> {
+    sqlx::query_as::<_, ProxyRow>("SELECT * FROM proxies WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("proxy {id}")))
+}
+
+/// Insert a proxy, or update the existing row when (host, port, username)
+/// already exists. Idempotent so re-importing a file never duplicates.
+pub async fn upsert_proxy(pool: &SqlitePool, p: &ProxyRow) -> AppResult<(String, bool)> {
+    let now = now_rfc3339();
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM proxies WHERE host = ? AND port = ? AND IFNULL(username,'') = IFNULL(?,'')",
+    )
+    .bind(&p.host)
+    .bind(p.port)
+    .bind(&p.username)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(id) = existing {
+        sqlx::query(
+            "UPDATE proxies SET scheme=?, password=?, label=?, country=?, source=?, updated_at=? WHERE id=?",
+        )
+        .bind(&p.scheme)
+        .bind(&p.password)
+        .bind(&p.label)
+        .bind(&p.country)
+        .bind(&p.source)
+        .bind(&now)
+        .bind(&id)
+        .execute(pool)
+        .await?;
+        return Ok((id, false));
+    }
+    let id = if p.id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        p.id.clone()
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO proxies
+          (id, scheme, host, port, username, password, label, country,
+           is_active, health, latency_ms, last_check_at, last_error, source,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'unknown', NULL, NULL, NULL, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(&p.scheme)
+    .bind(&p.host)
+    .bind(p.port)
+    .bind(&p.username)
+    .bind(&p.password)
+    .bind(&p.label)
+    .bind(&p.country)
+    .bind(&p.source)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok((id, true))
+}
+
+pub async fn set_proxy_health(
+    pool: &SqlitePool,
+    id: &str,
+    health: &str,
+    latency_ms: Option<i64>,
+    last_error: Option<&str>,
+) -> AppResult<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE proxies SET health=?, latency_ms=?, last_error=?, last_check_at=?, updated_at=? WHERE id=?",
+    )
+    .bind(health)
+    .bind(latency_ms)
+    .bind(last_error)
+    .bind(&now)
+    .bind(&now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_proxy_active(pool: &SqlitePool, id: &str, active: bool) -> AppResult<()> {
+    sqlx::query("UPDATE proxies SET is_active=?, updated_at=? WHERE id=?")
+        .bind(if active { 1 } else { 0 })
+        .bind(now_rfc3339())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_proxy(pool: &SqlitePool, id: &str) -> AppResult<()> {
+    let r = sqlx::query("DELETE FROM proxies WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if r.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("proxy {id}")));
+    }
+    sqlx::query("DELETE FROM account_proxy WHERE proxy_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_account_proxy_map(pool: &SqlitePool) -> AppResult<Vec<(String, String)>> {
+    Ok(
+        sqlx::query_as::<_, (String, String)>("SELECT account_id, proxy_id FROM account_proxy")
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+pub async fn get_account_proxy(pool: &SqlitePool, account_id: &str) -> AppResult<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT proxy_id FROM account_proxy WHERE account_id = ?")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+pub async fn set_account_proxy(
+    pool: &SqlitePool,
+    account_id: &str,
+    proxy_id: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO account_proxy (account_id, proxy_id, assigned_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(account_id) DO UPDATE SET proxy_id = excluded.proxy_id, assigned_at = excluded.assigned_at
+        "#,
+    )
+    .bind(account_id)
+    .bind(proxy_id)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_account_proxy(pool: &SqlitePool, account_id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM account_proxy WHERE account_id = ?")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn proxy_assignment_counts(pool: &SqlitePool) -> AppResult<Vec<(String, i64)>> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
+        "SELECT proxy_id, COUNT(*) FROM account_proxy GROUP BY proxy_id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ProxySettingsRow {
+    pub id: i64,
+    pub chat_mode: String,
+    pub automation_mode: String,
+    pub on_dead: String,
+    pub updated_at: String,
+}
+
+pub async fn get_proxy_settings(pool: &SqlitePool) -> AppResult<ProxySettingsRow> {
+    if let Some(row) =
+        sqlx::query_as::<_, ProxySettingsRow>("SELECT * FROM proxy_settings WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+    {
+        return Ok(row);
+    }
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO proxy_settings (id, chat_mode, automation_mode, on_dead, updated_at) VALUES (1, 'off', 'sticky', 'direct', ?)",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(ProxySettingsRow {
+        id: 1,
+        chat_mode: "off".into(),
+        automation_mode: "sticky".into(),
+        on_dead: "direct".into(),
+        updated_at: now,
+    })
+}
+
+pub async fn update_proxy_settings(
+    pool: &SqlitePool,
+    chat_mode: Option<&str>,
+    automation_mode: Option<&str>,
+    on_dead: Option<&str>,
+) -> AppResult<ProxySettingsRow> {
+    let cur = get_proxy_settings(pool).await?;
+    let chat = chat_mode.unwrap_or(&cur.chat_mode);
+    let auto = automation_mode.unwrap_or(&cur.automation_mode);
+    let dead = on_dead.unwrap_or(&cur.on_dead);
+    sqlx::query(
+        "UPDATE proxy_settings SET chat_mode=?, automation_mode=?, on_dead=?, updated_at=? WHERE id=1",
+    )
+    .bind(chat)
+    .bind(auto)
+    .bind(dead)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    get_proxy_settings(pool).await
 }
 
 pub async fn decrement_quota(

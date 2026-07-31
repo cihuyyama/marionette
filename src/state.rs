@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::farm::FarmManager;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
+use crate::proxy::ProxyManager;
 use crate::refresh_job::RefreshManager;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub qoder: Arc<QoderProvider>,
     pub farm: FarmManager,
     pub refresh: RefreshManager,
+    pub proxies: ProxyManager,
 }
 
 impl AppState {
@@ -31,6 +33,7 @@ impl AppState {
             .expect("http client");
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
         let qoder = Arc::new(QoderProvider::new());
+        let proxies = ProxyManager::new(pool.clone());
         Self {
             pool,
             config,
@@ -39,6 +42,7 @@ impl AppState {
             qoder,
             farm,
             refresh: RefreshManager::new(),
+            proxies,
         }
     }
 }

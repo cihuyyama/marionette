@@ -3,6 +3,7 @@ pub mod chat;
 pub mod health;
 pub mod images;
 pub mod models;
+pub mod proxies;
 
 use crate::state::AppState;
 use axum::{
@@ -47,6 +48,25 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/refresh", get(admin::refresh_status))
         .route("/admin/refresh/jobs/{id}", get(admin::refresh_get_job))
         .route("/admin/refresh/cancel", post(admin::refresh_cancel))
+        .route(
+            "/admin/proxies",
+            get(proxies::list_proxies).post(proxies::import_proxies),
+        )
+        .route("/admin/proxies/check", post(proxies::check_all))
+        .route("/admin/proxies/assign", post(proxies::assign))
+        .route(
+            "/admin/proxies/settings",
+            get(proxies::get_settings).patch(proxies::update_settings),
+        )
+        .route(
+            "/admin/proxies/{id}",
+            patch(proxies::toggle_proxy).delete(proxies::delete_proxy),
+        )
+        .route("/admin/proxies/{id}/check", post(proxies::check_one))
+        .route(
+            "/admin/accounts/{id}/proxy",
+            axum::routing::delete(proxies::clear_assignments),
+        )
         .route("/admin/accounts/{id}/inject", post(admin::inject_account))
         .route(
             "/admin/accounts/{id}/claim-trial",

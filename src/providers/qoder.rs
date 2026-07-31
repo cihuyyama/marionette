@@ -1415,6 +1415,7 @@ impl Provider for QoderProvider {
 
     async fn chat(
         &self,
+        _client: &Client,
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError> {

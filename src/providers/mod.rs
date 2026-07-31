@@ -47,8 +47,12 @@ pub enum ChatOutcome {
 pub trait Provider: Send + Sync {
     fn id(&self) -> &'static str;
     async fn ensure_fresh_auth(&self, account: &mut Account) -> Result<(), ProviderError>;
+    /// Send a chat completion. `client` is the (possibly proxied) HTTP client
+    /// the pool resolved for this account; providers must send the upstream
+    /// request through it rather than a private client so proxy routing works.
     async fn chat(
         &self,
+        client: &reqwest::Client,
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError>;
