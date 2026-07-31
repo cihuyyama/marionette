@@ -859,3 +859,129 @@ export function importFarmJob(id: string, settings?: Settings) {
     settings,
   );
 }
+
+export type ProxyHealth = "ok" | "dead" | "unknown";
+
+export type Proxy = {
+  id: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  has_auth: boolean;
+  label?: string | null;
+  country?: string | null;
+  is_active: boolean;
+  health: ProxyHealth;
+  latency_ms?: number | null;
+  last_check_at?: string | null;
+  last_error?: string | null;
+  source?: string | null;
+  assigned_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProxyChatMode = "off" | "follow-account" | "rotating";
+export type ProxyAutomationMode = "off" | "sticky" | "rotating";
+export type ProxyOnDead = "direct" | "reassign" | "fail";
+
+export type ProxySettings = {
+  chat_mode: ProxyChatMode;
+  automation_mode: ProxyAutomationMode;
+  on_dead: ProxyOnDead;
+  updated_at?: string;
+};
+
+export type ProxyListResult = {
+  proxies: Proxy[];
+  total: number;
+  healthy: number;
+  settings: ProxySettings;
+};
+
+export function listProxies(settings?: Settings, signal?: AbortSignal) {
+  return request<ProxyListResult>(
+    `/admin/proxies`,
+    { auth: "admin", signal },
+    settings,
+  );
+}
+
+export function importProxies(
+  body: {
+    text?: string;
+    proxies?: string[];
+    scheme?: string;
+    country?: string;
+    label?: string;
+    source?: string;
+  },
+  settings?: Settings,
+) {
+  return request<{ inserted: number; updated: number; skipped: number }>(
+    `/admin/proxies`,
+    { method: "POST", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+
+export function deleteProxy(id: string, settings?: Settings) {
+  return request<{ deleted: boolean; id: string }>(
+    `/admin/proxies/${encodeURIComponent(id)}`,
+    { method: "DELETE", auth: "admin" },
+    settings,
+  );
+}
+
+export function toggleProxy(id: string, isActive: boolean, settings?: Settings) {
+  return request<Proxy>(
+    `/admin/proxies/${encodeURIComponent(id)}`,
+    { method: "PATCH", auth: "admin", body: JSON.stringify({ is_active: isActive }) },
+    settings,
+  );
+}
+
+export function checkAllProxies(settings?: Settings) {
+  return request<{ checked: number; healthy: number; dead: number }>(
+    `/admin/proxies/check`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export function checkProxy(id: string, settings?: Settings) {
+  return request<Proxy>(
+    `/admin/proxies/${encodeURIComponent(id)}/check`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export function assignProxies(provider: string, settings?: Settings) {
+  return request<{ provider: string; assigned: number }>(
+    `/admin/proxies/assign`,
+    { method: "POST", auth: "admin", body: JSON.stringify({ provider }) },
+    settings,
+  );
+}
+
+export function getProxySettings(settings?: Settings) {
+  return request<ProxySettings>(
+    `/admin/proxies/settings`,
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function updateProxySettings(
+  body: Partial<Pick<ProxySettings, "chat_mode" | "automation_mode" | "on_dead">>,
+  settings?: Settings,
+) {
+  return request<ProxySettings>(
+    `/admin/proxies/settings`,
+    { method: "PATCH", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+

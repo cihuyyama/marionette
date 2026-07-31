@@ -34,6 +34,9 @@ const FarmPage = lazy(() =>
 const InjectJobPage = lazy(() =>
   import("./pages/InjectJob").then((m) => ({ default: m.InjectJobPage })),
 );
+const ProxiesPage = lazy(() =>
+  import("./pages/Proxies").then((m) => ({ default: m.ProxiesPage })),
+);
 
 export default function App() {
   return (
@@ -66,6 +69,7 @@ export default function App() {
                 element={<Navigate to="/automation" replace />}
               />
               <Route path="smoke" element={<SmokeTest />} />
+              <Route path="proxies" element={<ProxiesPage />} />
               <Route path="settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

@@ -1143,6 +1143,54 @@ pre.response {
   gap: var(--space-2);
 }
 
+.proxy-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.proxy-setting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.proxy-setting label {
+  font-size: 0.75rem;
+  color: var(--fog, #9a9488);
+}
+
+.proxy-assign {
+  justify-content: flex-start;
+}
+
+.proxy-err {
+  font-size: 0.72rem;
+  max-width: 22ch;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.toggle {
+  min-width: 3rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line, #2a2822);
+  background: transparent;
+  color: var(--fog, #9a9488);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.toggle-on {
+  border-color: var(--jade, #4a8);
+  color: var(--jade, #4a8);
+}
+
 .list-toolbar {
   flex-wrap: wrap;
   align-items: center;
