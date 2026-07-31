@@ -1075,10 +1075,15 @@ impl FarmManager {
         std::fs::write(&accounts_path, body)?;
 
         let mut effective_proxy_file = req.proxy_file.clone();
-        if effective_proxy_file
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
+        let automation_proxy_on = db::get_proxy_settings(&pool)
+            .await
+            .map(|s| s.automation_mode != "off")
+            .unwrap_or(false);
+        if automation_proxy_on
+            && effective_proxy_file
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
         {
             if let Ok(proxies) = db::list_active_proxies(&pool).await {
                 let live: Vec<_> = proxies
