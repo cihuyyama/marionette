@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::farm::FarmManager;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
+use crate::refresh_job::RefreshManager;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ pub struct AppState {
     pub grok: Arc<GrokCliProvider>,
     pub qoder: Arc<QoderProvider>,
     pub farm: FarmManager,
+    pub refresh: RefreshManager,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
             grok,
             qoder,
             farm,
+            refresh: RefreshManager::new(),
         }
     }
 }

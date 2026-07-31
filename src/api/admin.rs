@@ -4,6 +4,7 @@ use crate::error::{AppError, AppResult, ProviderError};
 use crate::farm::{RetryFarmRequest, StartFarmRequest};
 use crate::import_util;
 use crate::providers::Provider;
+use crate::refresh_job::RefreshAllRequest;
 use crate::state::AppState;
 use axum::{
     Json,
@@ -1218,4 +1219,41 @@ pub async fn farm_retry_failed(
             .retry_failed(&id, opts, state.pool.clone())
             .await?,
     ))
+}
+
+pub async fn refresh_all(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    body: Result<Json<RefreshAllRequest>, axum::extract::rejection::JsonRejection>,
+) -> AppResult<Json<Value>> {
+    let req = body
+        .map(|j| j.0)
+        .unwrap_or(RefreshAllRequest {
+            provider: None,
+            force: None,
+            concurrency: None,
+        });
+    Ok(Json(state.refresh.start(state.clone(), req).await?))
+}
+
+pub async fn refresh_status(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.refresh.snapshot().await))
+}
+
+pub async fn refresh_get_job(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.refresh.get_job(&id).await?))
+}
+
+pub async fn refresh_cancel(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.refresh.cancel().await?))
 }

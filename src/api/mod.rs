@@ -43,6 +43,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(admin::delete_account),
         )
         .route("/admin/accounts/{id}/refresh", post(admin::refresh_account))
+        .route("/admin/accounts/refresh-all", post(admin::refresh_all))
+        .route("/admin/refresh", get(admin::refresh_status))
+        .route("/admin/refresh/jobs/{id}", get(admin::refresh_get_job))
+        .route("/admin/refresh/cancel", post(admin::refresh_cancel))
         .route("/admin/accounts/{id}/inject", post(admin::inject_account))
         .route(
             "/admin/accounts/{id}/claim-trial",

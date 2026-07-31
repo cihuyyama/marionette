@@ -210,6 +210,67 @@ export function refreshAccount(id: string, settings?: Settings) {
   );
 }
 
+export type RefreshJob = {
+  id: string;
+  provider: string;
+  status: "running" | "succeeded" | "cancelled";
+  force: boolean;
+  concurrency: number;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  total: number;
+  processed: number;
+  ok: number;
+  failed: number;
+  cut: number;
+  error?: string | null;
+  last_email?: string | null;
+};
+
+export function refreshAllAccounts(
+  opts?: { provider?: string; force?: boolean; concurrency?: number },
+  settings?: Settings,
+) {
+  return request<RefreshJob>(
+    `/admin/accounts/refresh-all`,
+    {
+      method: "POST",
+      auth: "admin",
+      body: JSON.stringify({
+        provider: opts?.provider ?? "grok-cli",
+        force: opts?.force ?? true,
+        concurrency: opts?.concurrency,
+      }),
+    },
+    settings,
+  );
+}
+
+export function getRefreshJob(id: string, settings?: Settings, signal?: AbortSignal) {
+  return request<RefreshJob>(
+    `/admin/refresh/jobs/${encodeURIComponent(id)}`,
+    { auth: "admin", signal },
+    settings,
+  );
+}
+
+export function cancelRefreshAll(settings?: Settings) {
+  return request<{ cancelling: boolean; id: string }>(
+    `/admin/refresh/cancel`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export function getRefreshStatus(settings?: Settings, signal?: AbortSignal) {
+  return request<{ current: RefreshJob | null; history: RefreshJob[] }>(
+    `/admin/refresh`,
+    { auth: "admin", signal },
+    settings,
+  );
+}
+
 export type ClaimTrialResult = {
   ok: boolean;
   http_status: number;

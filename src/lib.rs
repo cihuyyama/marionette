@@ -10,5 +10,6 @@ pub mod log_body;
 pub mod openai;
 pub mod pool;
 pub mod providers;
+pub mod refresh_job;
 pub mod state;
 pub mod workers;

@@ -7,10 +7,15 @@ import {
   patchProviderLoadBalance,
   patchProviderPickMode,
   warmupQoderAccounts,
+  refreshAllAccounts,
+  getRefreshJob,
+  getRefreshStatus,
+  cancelRefreshAll,
   type Account,
   type LoadBalanceOption,
   type PickModeOption,
   type ProviderSetting,
+  type RefreshJob,
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { PROVIDERS, labelProvider, type ProviderId } from "../lib/providers";
@@ -226,6 +231,9 @@ export function Accounts() {
   const [loading, setLoading] = useState(true);
   const [savingProvider, setSavingProvider] = useState<string | null>(null);
   const [warmupBusy, setWarmupBusy] = useState(false);
+  const [refreshJob, setRefreshJob] = useState<RefreshJob | null>(null);
+  const refreshBusy =
+    refreshJob?.status === "running";
   const [addProvider, setAddProvider] = useState<ProviderId | null>(null);
 
   const load = useCallback(async () => {
@@ -261,6 +269,22 @@ export function Accounts() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void (async () => {
+      try {
+        const snap = await getRefreshStatus(undefined, ctrl.signal);
+        const cur = snap.current;
+        if (cur?.status === "running" && cur.provider === "grok-cli") {
+          setRefreshJob(cur);
+        }
+      } catch {
+        /* ignore — no running job or offline */
+      }
+    })();
+    return () => ctrl.abort();
+  }, []);
 
   useEffect(() => {
     if (!message) return;
@@ -304,6 +328,61 @@ export function Accounts() {
       setWarmupBusy(false);
     }
   }
+
+  async function onRefreshAllGrok() {
+    if (refreshBusy) return;
+    setError(null);
+    try {
+      const job = await refreshAllAccounts({ provider: "grok-cli", force: true });
+      setRefreshJob(job);
+      setMessage(`Refresh started for ${job.total} grok accounts…`);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Failed to start refresh-all",
+      );
+    }
+  }
+
+  async function onCancelRefresh() {
+    try {
+      await cancelRefreshAll();
+      setMessage("Cancelling refresh-all…");
+    } catch {
+      /* ignore — job may have just finished */
+    }
+  }
+
+  useEffect(() => {
+    if (refreshJob?.status !== "running") return;
+    const id = refreshJob.id;
+    let stop = false;
+    const ctrl = new AbortController();
+    const tick = async () => {
+      try {
+        const job = await getRefreshJob(id, undefined, ctrl.signal);
+        if (stop) return;
+        setRefreshJob(job);
+        if (job.status !== "running") {
+          setMessage(
+            `Refresh done: ${job.ok} ok · ${job.failed} failed · ${job.cut} cut (of ${job.total})`,
+          );
+          void load();
+        }
+      } catch {
+        /* transient poll error — keep trying */
+      }
+    };
+    const timer = window.setInterval(() => void tick(), 1500);
+    return () => {
+      stop = true;
+      ctrl.abort();
+      window.clearInterval(timer);
+    };
+  }, [refreshJob?.status, refreshJob?.id, load]);
 
   async function onLoadBalanceChange(provider: string, value: string) {
     setSavingProvider(provider);
@@ -560,6 +639,45 @@ export function Accounts() {
                       ) : null;
                     })()}
                   </>
+                ) : null}
+                {provider === "grok-cli" ? (
+                  <div className="provider-lb-refresh">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={
+                        refreshBusy ||
+                        loading ||
+                        byProvider["grok-cli"].total -
+                          byProvider["grok-cli"].inactive <=
+                          0
+                      }
+                      onClick={() => void onRefreshAllGrok()}
+                    >
+                      {refreshBusy
+                        ? `Refreshing ${refreshJob?.processed ?? 0}/${refreshJob?.total ?? 0}…`
+                        : `Refresh all auth (${Math.max(
+                            0,
+                            byProvider["grok-cli"].total -
+                              byProvider["grok-cli"].inactive,
+                          )})`}
+                    </button>
+                    {refreshBusy ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost"
+                        onClick={() => void onCancelRefresh()}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                    {refreshJob && refreshJob.provider === "grok-cli" ? (
+                      <p className="provider-lb-hint">
+                        {refreshJob.ok} ok · {refreshJob.failed} failed ·{" "}
+                        {refreshJob.cut} cut
+                      </p>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
             </div>
