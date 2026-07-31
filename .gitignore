@@ -16,6 +16,10 @@ data/
 scripts/automation/**/accounts.txt
 scripts/automation/**/accounts*.txt
 !scripts/automation/**/accounts.txt.example
+# Proxy pool lists (host:port:user:pass) — credentials, never commit.
+**/proxies.txt
+**/*proxy*.txt
+**/*proxies*.txt
 !docs/**
 # HANDOFF / DEPLOYMENT hold VPS host/user/key path + infra layout — local only.
 # MUST stay below `!docs/**`: last matching rule wins.
