@@ -111,6 +111,12 @@ pub struct StartFarmRequest {
     #[serde(default)]
     pub account_delay: Option<f64>,
     pub proxy_file: Option<String>,
+    #[serde(default)]
+    pub imap_host: Option<String>,
+    #[serde(default)]
+    pub imap_user: Option<String>,
+    #[serde(default)]
+    pub imap_pass: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1002,12 +1008,17 @@ impl FarmManager {
         let is_grok = provider == "grok-cli";
         let (pkg_dir, pkg_parent, module, output_name) = self.package_paths_for(provider);
 
+        let is_register_mode = req.accounts.trim_start().starts_with("register:");
         let default_pw = req
             .default_password
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let mut accounts = parse_accounts_text(&req.accounts, default_pw);
+        let mut accounts = if is_register_mode {
+            vec![("__register__".to_string(), default_pw.unwrap_or("").to_string())]
+        } else {
+            parse_accounts_text(&req.accounts, default_pw)
+        };
         if accounts.is_empty() {
             return Err(AppError::BadRequest(
                 "no accounts: use email|password lines (or bare email + default_password)"
@@ -1065,14 +1076,18 @@ impl FarmManager {
         let output_path = work.join(output_name);
         let log_path = work.join("farm.log");
 
-        let mut body = String::new();
-        for (email, pass) in &accounts {
-            body.push_str(email);
-            body.push('|');
-            body.push_str(pass);
-            body.push('\n');
+        if is_register_mode {
+            std::fs::write(&accounts_path, format!("{}\n", req.accounts.trim()))?;
+        } else {
+            let mut body = String::new();
+            for (email, pass) in &accounts {
+                body.push_str(email);
+                body.push('|');
+                body.push_str(pass);
+                body.push('\n');
+            }
+            std::fs::write(&accounts_path, body)?;
         }
-        std::fs::write(&accounts_path, body)?;
 
         let mut effective_proxy_file = req.proxy_file.clone();
         let automation_proxy_on = db::get_proxy_settings(&pool)
@@ -1159,6 +1174,20 @@ impl FarmManager {
             .env("PYTHONPATH", &pythonpath)
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONIOENCODING", "utf-8");
+        if is_register_mode {
+            if let Some(pw) = default_pw {
+                cmd.env("GROK_PASSWORD", pw);
+            }
+            if let Some(h) = req.imap_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                cmd.env("GROK_IMAP_HOST", h);
+            }
+            if let Some(u) = req.imap_user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                cmd.env("GROK_IMAP_USER", u);
+            }
+            if let Some(p) = req.imap_pass.as_deref().filter(|s| !s.trim().is_empty()) {
+                cmd.env("GROK_IMAP_PASS", p);
+            }
+        }
         if !is_grok {
             if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
                 if !k.trim().is_empty() {
@@ -1295,6 +1324,9 @@ impl FarmManager {
                 join_stderr = Some(tokio::spawn(async move {
                     let mut lines = BufReader::new(err).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
+                        if is_stderr_noise(&line) {
+                            continue;
+                        }
                         let _ = append_log_file(&lp, &format!("[stderr] {line}\n")).await;
                         mgr2.push_line(&jid, format!("[stderr] {line}")).await;
                     }
@@ -1884,6 +1916,9 @@ impl FarmManager {
             skip_existing: opts.skip_existing,
             account_delay: opts.account_delay,
             proxy_file: opts.proxy_file,
+            imap_host: None,
+            imap_user: None,
+            imap_pass: None,
         };
         let mut out = self.start(req, pool).await?;
         if let Some(obj) = out.as_object_mut() {
@@ -1892,6 +1927,22 @@ impl FarmManager {
         }
         Ok(out)
     }
+}
+
+fn is_stderr_noise(line: &str) -> bool {
+    const NOISE: &[&str] = &[
+        "LeakWarning",
+        "unclosed transport",
+        "I/O operation on closed pipe",
+        "_ProactorBasePipeTransport.__del__",
+        "BaseSubprocessTransport.__del__",
+        "proactor_events.py",
+        "base_subprocess.py",
+        "windows_utils.py",
+        "result = self.fn(*self.args, **self.kwargs)",
+        "ResourceWarning",
+    ];
+    NOISE.iter().any(|n| line.contains(n))
 }
 
 fn normalize_farm_provider(raw: Option<&str>) -> &'static str {
@@ -2278,6 +2329,26 @@ mod tests {
         let abs = std::env::current_dir().unwrap().join("scripts");
         let p = resolve_path(abs);
         assert!(p.is_absolute());
+    }
+
+    #[test]
+    fn stderr_noise_filters_asyncio_spam() {
+        assert!(is_stderr_noise(
+            "C:\\python-3.10\\lib\\concurrent\\futures\\thread.py:58: LeakWarning: When using a proxy"
+        ));
+        assert!(is_stderr_noise("ValueError: I/O operation on closed pipe"));
+        assert!(is_stderr_noise(
+            "Exception ignored in: <function _ProactorBasePipeTransport.__del__ at 0x0>"
+        ));
+        assert!(is_stderr_noise("  _warn(f\"unclosed transport {self!r}\", ResourceWarning)"));
+    }
+
+    #[test]
+    fn stderr_noise_keeps_real_errors() {
+        assert!(!is_stderr_noise("BrowserType.launch: Invalid URL"));
+        assert!(!is_stderr_noise("camoufox import failed: No module named 'camoufox'"));
+        assert!(!is_stderr_noise("Traceback (most recent call last):"));
+        assert!(!is_stderr_noise("ConnectionError: proxy refused"));
     }
 
     #[test]
