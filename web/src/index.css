@@ -1923,3 +1923,70 @@ table.data tr.row-click {
   font-size: 12px;
   line-height: 1.4;
 }
+
+/* ——— Farm log lines (structured, readable) ——— */
+.farm-log {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.farm-log .farm-log-icon {
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+  color: var(--muted);
+}
+
+.farm-log-step {
+  flex-shrink: 0;
+  min-width: 120px;
+  color: var(--thread);
+  font-weight: 600;
+}
+
+.farm-log-email {
+  flex-shrink: 0;
+  font-size: 11.5px;
+}
+
+.farm-log-msg {
+  color: var(--parchment);
+  word-break: break-word;
+}
+
+.farm-log-ok .farm-log-icon {
+  color: var(--fog);
+}
+
+.farm-log-ok .farm-log-msg {
+  color: var(--fog);
+}
+
+.farm-log-err {
+  background: var(--blood-soft);
+  border-radius: 4px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.farm-log-err .farm-log-icon,
+.farm-log-err .farm-log-msg {
+  color: #d98a95;
+}
+
+.farm-log-warn .farm-log-icon,
+.farm-log-warn .farm-log-msg {
+  color: var(--thread);
+}
+
+.farm-log-wait .farm-log-icon {
+  color: var(--thread);
+}
+
+.farm-log-dbg {
+  opacity: 0.72;
+}

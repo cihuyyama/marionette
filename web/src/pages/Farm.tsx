@@ -41,6 +41,63 @@ function statusTone(status: string): string {
   }
 }
 
+const FARM_LEVEL_ICON: Record<string, string> = {
+  OK: "✓",
+  ERR: "✕",
+  WARN: "▲",
+  WAIT: "…",
+  STEP: "▸",
+  DBG: "·",
+  INFO: "•",
+};
+
+const FARM_STEP_LABEL: Record<string, string> = {
+  start: "Start",
+  launch: "Launch browser",
+  register: "Signup form",
+  signup_open: "Open signup",
+  castle: "Castle token",
+  signup_email: "Submit email",
+  wait_otp: "Await OTP",
+  confirm_otp: "Confirm OTP",
+  profile: "Profile + password",
+  turnstile: "Turnstile",
+  sso_extract: "Extract SSO",
+  device_flow: "Device Flow",
+  import: "Import",
+  done: "Done",
+  summary: "Summary",
+};
+
+type FarmLogParts = {
+  time: string;
+  level: string;
+  icon: string;
+  step: string;
+  email: string;
+  msg: string;
+};
+
+function farmLogParts(ev: FarmEvent): FarmLogParts | null {
+  const p = ev.parsed;
+  if (!p || typeof p !== "object") return null;
+  const level = typeof p.level === "string" ? p.level : "INFO";
+  const rawStep = typeof p.step === "string" ? p.step : "";
+  const email =
+    (typeof p.email_masked === "string" && p.email_masked) ||
+    (typeof p.email === "string" ? p.email : "") ||
+    "";
+  const msg = typeof p.msg === "string" ? p.msg : ev.line;
+  return {
+    time: ev.ts.slice(11, 19),
+    level,
+    icon: FARM_LEVEL_ICON[level] ?? "•",
+    step: rawStep ? (FARM_STEP_LABEL[rawStep] ?? rawStep) : "",
+    email,
+    msg,
+  };
+}
+
 export function FarmPage() {
   const { provider, method } = useParams<{
     provider: string;
@@ -1180,12 +1237,25 @@ function GrokRegisterFarm() {
             {events.length === 0 && (
               <div className="muted" style={{ padding: "12px 0" }}>Waiting for output…</div>
             )}
-            {events.map((ev) => (
-              <div key={ev.seq} className="log-line">
-                <span className="muted">{ev.ts.slice(11, 19)}</span>{" "}
-                {ev.line}
-              </div>
-            ))}
+            {events.map((ev) => {
+              const parts = farmLogParts(ev);
+              if (!parts) {
+                return (
+                  <div key={ev.seq} className="log-line">
+                    <span className="muted">{ev.ts.slice(11, 19)}</span> {ev.line}
+                  </div>
+                );
+              }
+              return (
+                <div key={ev.seq} className={`log-line farm-log farm-log-${parts.level.toLowerCase()}`}>
+                  <span className="muted">{parts.time}</span>
+                  <span className="farm-log-icon" aria-hidden>{parts.icon}</span>
+                  {parts.step && <span className="farm-log-step">{parts.step}</span>}
+                  {parts.email && <span className="muted farm-log-email">{parts.email}</span>}
+                  <span className="farm-log-msg">{parts.msg}</span>
+                </div>
+              );
+            })}
             <div ref={logEndRef} />
           </div>
         </div>
