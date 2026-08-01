@@ -5,11 +5,12 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from .browser import close_session, launch_camoufox
+from .browser import close_session, launch_camoufox, save_cookies
 from .config import Config
 from .export import emails_in_output, write_backup, write_failures
 from .login import do_email_login
 from .oauth import obtain_oidc_tokens
+from .activate import activate_grok_if_needed
 from .progress import Progress, mask_email
 from .verify import verify_chat
 
@@ -126,7 +127,7 @@ async def process_one(
 
     try:
         prog.step(label, "browser", "launch camoufox")
-        session = await launch_camoufox(cfg, prog)
+        session = await launch_camoufox(cfg, prog, email=email)
         page = session["page"]
 
         # Optional warm login on accounts.x.ai (OAuth path also drives login)
@@ -134,6 +135,9 @@ async def process_one(
             await do_email_login(page, email, password, cfg, prog, label)
         except Exception as exc:
             prog.log(f"pre-login note: {exc}", "WAIT", email=label)
+
+        # Ensure account has Grok entitlement (principalId) before OAuth
+        await activate_grok_if_needed(page, cfg, prog, label)
 
         tokens = await obtain_oidc_tokens(page, email, password, cfg, prog, label)
         access = tokens.get("access_token") or ""
@@ -164,6 +168,7 @@ async def process_one(
             prog.log("verify_chat ACTIVE ok", "OK", email=label)
 
         result["ok"] = True
+        await save_cookies(page, email)
         if count_result:
             prog.mark_ok(label, "relogin ok")
         else:

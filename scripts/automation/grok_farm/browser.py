@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import random
 import re
@@ -13,6 +14,48 @@ from .progress import Progress
 
 _proxy_idx = 0
 _proxy_lock = asyncio.Lock()
+
+# Directory for persistent browser profiles (one per account email).
+# Each profile retains cookies, storage, and fingerprint across runs so
+# Castle sees a stable device rather than a brand-new one on every relogin.
+_PROFILES_DIR = Path(__file__).resolve().parent / ".profiles"
+
+
+def _profile_dir_for(email: str) -> Path:
+    """Deterministic profile directory for an account email.
+
+    Uses a short SHA-256 prefix so filenames are safe on all filesystems.
+    """
+    slug = hashlib.sha256(email.strip().lower().encode()).hexdigest()[:16]
+    d = _PROFILES_DIR / slug
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+async def _restore_cookies(page: Any, email: str) -> None:
+    cookie_file = _profile_dir_for(email) / "cookies.json"
+    if not cookie_file.is_file():
+        return
+    try:
+        import json as _json
+
+        cookies = _json.loads(cookie_file.read_text(encoding="utf-8"))
+        if cookies:
+            await page.context.add_cookies(cookies)
+    except Exception:
+        pass
+
+
+async def save_cookies(page: Any, email: str) -> None:
+    """Persist current session cookies so next run skips login+Turnstile."""
+    cookie_file = _profile_dir_for(email) / "cookies.json"
+    try:
+        import json as _json
+
+        cookies = await page.context.cookies()
+        cookie_file.write_text(_json.dumps(cookies), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _normalize_proxy_url(raw: str) -> str | None:
@@ -98,6 +141,16 @@ async def next_proxy_url(cfg: Config) -> str | None:
         return url
 
 
+def sticky_proxy_for_email(email: str, cfg: Config) -> str | None:
+    """Pick a fixed proxy for this email via hash so Castle always sees
+    the same IP for the same device profile."""
+    pool = load_proxy_pool(cfg)
+    if not pool:
+        return None
+    idx = int(hashlib.sha256(email.strip().lower().encode()).hexdigest()[:8], 16)
+    return pool[idx % len(pool)]
+
+
 def _proxy_dict(proxy_url: str) -> dict[str, Any]:
     if "://" not in proxy_url:
         proxy_url = f"http://{proxy_url}"
@@ -114,7 +167,7 @@ def _proxy_dict(proxy_url: str) -> dict[str, Any]:
     return out
 
 
-async def launch_camoufox(cfg: Config, prog: Progress) -> dict[str, Any]:
+async def launch_camoufox(cfg: Config, prog: Progress, email: str = "") -> dict[str, Any]:
     try:
         from browserforge.fingerprints import Screen
         from camoufox.async_api import AsyncCamoufox
@@ -140,7 +193,15 @@ async def launch_camoufox(cfg: Config, prog: Progress) -> dict[str, Any]:
         "i_know_what_im_doing": True,
     }
 
-    proxy_url = await next_proxy_url(cfg)
+    if email:
+        prog.log(f"profile {_profile_dir_for(email).name}", "INFO")
+
+    # Sticky proxy: same email always exits from the same IP
+    if email:
+        proxy_url = sticky_proxy_for_email(email, cfg)
+    else:
+        proxy_url = await next_proxy_url(cfg)
+
     if proxy_url:
         kwargs["proxy"] = _proxy_dict(proxy_url)
         kwargs["geoip"] = True
@@ -151,6 +212,11 @@ async def launch_camoufox(cfg: Config, prog: Progress) -> dict[str, Any]:
     browser = await manager.__aenter__()
     page = await browser.new_page()
     page.set_default_timeout(max(60_000, cfg.login_timeout * 1000))
+
+    # Restore session cookies from profile so login can be skipped
+    if email:
+        await _restore_cookies(page, email)
+
     return {
         "manager": manager,
         "browser": browser,

@@ -26,7 +26,9 @@ def verify_chat(access_token: str, cfg: Config | None = None) -> bool:
     chat_url = (cfg.chat_url if cfg else None) or (
         "https://cli-chat-proxy.grok.com/v1/chat/completions"
     )
-    version = (cfg.chat_client_version if cfg else None) or "0.1.202"
+    version = (cfg.chat_client_version if cfg else None) or "0.2.114"
+    identifier = (cfg.chat_client_identifier if cfg else None) or "grok-shell"
+    user_agent = (cfg.chat_user_agent if cfg else None) or "grok-shell/0.2.114 (linux; x86_64)"
     payload = json.dumps(
         {
             "model": "grok-4.5",
@@ -41,7 +43,10 @@ def verify_chat(access_token: str, cfg: Config | None = None) -> bool:
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "X-Grok-Client-Version": version,
+            "User-Agent": user_agent,
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-grok-client-identifier": identifier,
+            "x-grok-client-version": version,
         },
         method="POST",
     )

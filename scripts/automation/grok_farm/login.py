@@ -819,6 +819,8 @@ async def drive_email_password_login(
                     await try_click_turnstile(page, round_i, prog=prog, label=label)
                     await asyncio.sleep(1.5)
                     continue
+                await asyncio.sleep(0.4)
+                await _ensure_password_filled(page, password)
 
         if not await _ensure_password_filled(page, password):
             prog.log(f"password empty after turnstile (round {round_i + 1})", "WAIT", email=label)

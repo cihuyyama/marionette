@@ -48,6 +48,24 @@ def extract_code_from_url(url: str) -> str | None:
     return vals[0] if vals else None
 
 
+def extract_error_from_url(url: str) -> tuple[str, str] | None:
+    """Return (error, error_description) if the callback carries an OAuth
+    error instead of a code, else None."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost"):
+        return None
+    params = parse_qs(parsed.query)
+    err = params.get("error")
+    if not err:
+        return None
+    desc = params.get("error_description") or params.get("error_uri") or [""]
+    return err[0], desc[0]
+
+
 def build_authorize_url(cfg: Config, challenge: str, state: str, nonce: str) -> str:
     params = {
         "response_type": "code",
@@ -298,7 +316,29 @@ async def handle_optional_otp(
     prog.log("OTP submitted", "OK", email=label)
 
 
-async def obtain_oidc_tokens(
+class OAuthAccessDenied(RuntimeError):
+    """xAI refused to mint an authorization code (consent 'Access denied' /
+    'Failed to generate authentication code', or callback error=access_denied).
+    Retryable with a fresh PKCE session, but often account-level."""
+
+
+async def _consent_page_denied(page: Any) -> str | None:
+    try:
+        txt = await page.evaluate(
+            """() => ((document.body && document.body.innerText) || '')
+                .replace(/\\s+/g, ' ').trim().slice(0, 400)"""
+        )
+    except Exception:
+        return None
+    low = (txt or "").lower()
+    if "failed to generate authentication code" in low or (
+        "access denied" in low and "authoriz" in low
+    ):
+        return txt[:200]
+    return None
+
+
+async def _attempt_oidc(
     page: Any,
     email_addr: str,
     password: str,
@@ -308,14 +348,14 @@ async def obtain_oidc_tokens(
 ) -> dict[str, Any]:
     """
     PKCE authorize → email sign-in / consent → capture code via route to
-    127.0.0.1:56121 → exchange_code_for_tokens.
+    127.0.0.1:56121 → exchange_code_for_tokens. One attempt.
     """
-    prog.step(label, "oauth", "Grok CLI OAuth PKCE")
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(24)
     nonce = secrets.token_hex(16)
     auth_url = build_authorize_url(cfg, challenge, state, nonce)
     auth_code: dict[str, str | None] = {"code": None}
+    auth_err: dict[str, str | None] = {"error": None, "desc": None}
 
     async def _handle_route(route: Any) -> None:
         req_url = route.request.url
@@ -331,6 +371,16 @@ async def obtain_oidc_tokens(
             if code:
                 auth_code["code"] = code
                 prog.log("OAuth code captured via route", "OK", email=label, step="oauth")
+            else:
+                err = extract_error_from_url(req_url)
+                if err:
+                    auth_err["error"], auth_err["desc"] = err
+                    prog.log(
+                        f"OAuth callback error: {err[0]} {err[1]!r}",
+                        "ERR",
+                        email=label,
+                        step="oauth",
+                    )
             try:
                 await route.abort()
             except Exception:
@@ -360,6 +410,10 @@ async def obtain_oidc_tokens(
 
         deadline = time.monotonic() + float(cfg.oauth_timeout)
         while time.monotonic() < deadline and not auth_code.get("code"):
+            if auth_err.get("error"):
+                raise OAuthAccessDenied(
+                    f"{auth_err['error']}: {auth_err.get('desc') or ''}".strip()
+                )
             try:
                 cur = page.url or ""
                 code = extract_code_from_url(cur)
@@ -374,6 +428,9 @@ async def obtain_oidc_tokens(
 
             if "/oauth2/consent" in cur:
                 await dismiss_cookie_banner(page)
+                denied = await _consent_page_denied(page)
+                if denied:
+                    raise OAuthAccessDenied(denied)
                 clicked = await click_text_button(
                     page,
                     ["Allow", "Authorize", "Approve", "Accept", "Continue", "Confirm", "Grant"],
@@ -381,7 +438,10 @@ async def obtain_oidc_tokens(
                 )
                 if clicked:
                     prog.log(f"consent clicked: {clicked!r}", "OK", email=label, step="consent")
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(1.0)
+                    denied = await _consent_page_denied(page)
+                    if denied:
+                        raise OAuthAccessDenied(denied)
             elif "accounts.x.ai" in cur or "auth.x.ai" in cur:
                 await dismiss_cookie_banner(page)
                 if await page.locator('input[type="email"], input[type="password"]').count() == 0:
@@ -401,7 +461,12 @@ async def obtain_oidc_tokens(
                 if await _otp_form_present(page).count() > 0:
                     await handle_optional_otp(page, email_addr, cfg, prog, label)
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
+
+        if auth_err.get("error") and not auth_code.get("code"):
+            raise OAuthAccessDenied(
+                f"{auth_err['error']}: {auth_err.get('desc') or ''}".strip()
+            )
 
         if not auth_code.get("code"):
             try:
@@ -415,6 +480,9 @@ async def obtain_oidc_tokens(
 
         code = auth_code.get("code")
         if not code:
+            denied = await _consent_page_denied(page)
+            if denied:
+                raise OAuthAccessDenied(denied)
             try:
                 cur = (page.url or "")[:160]
                 hint = await page.evaluate(
@@ -441,3 +509,40 @@ async def obtain_oidc_tokens(
             await page.unroute("**/*")
         except Exception:
             pass
+
+
+async def obtain_oidc_tokens(
+    page: Any,
+    email_addr: str,
+    password: str,
+    cfg: Config,
+    prog: Progress,
+    label: str,
+) -> dict[str, Any]:
+    """Drive OAuth PKCE with one retry on a transient 'Access denied' at the
+    consent/code-generation step (fresh PKCE + short backoff)."""
+    prog.step(label, "oauth", "Grok CLI OAuth PKCE")
+    attempts = max(1, cfg.oauth_retries)
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return await _attempt_oidc(page, email_addr, password, cfg, prog, label)
+        except OAuthAccessDenied as exc:
+            last_exc = exc
+            if i + 1 < attempts:
+                prog.log(
+                    f"oauth access denied — retry {i + 1}/{attempts - 1} with fresh PKCE",
+                    "WAIT",
+                    email=label,
+                    step="oauth",
+                )
+                await asyncio.sleep(2.0 + 1.0 * i)
+                try:
+                    await page.goto(cfg.signin_url, wait_until="domcontentloaded", timeout=30_000)
+                except Exception:
+                    pass
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("oauth: no attempt ran")
