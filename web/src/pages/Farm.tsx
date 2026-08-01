@@ -19,6 +19,11 @@ import {
   isReadyFarm,
   methodLabel,
 } from "../lib/automation";
+import {
+  clearGrokRegisterPreset,
+  loadGrokRegisterPreset,
+  saveGrokRegisterPreset,
+} from "../lib/grokRegister";
 
 function statusTone(status: string): string {
   switch (status) {
@@ -58,6 +63,9 @@ export function FarmPage() {
   }
 
   if (provider === "grok-cli") {
+    if (method === "register") {
+      return <GrokRegisterFarm />;
+    }
     return <GrokReloginFarm />;
   }
 
@@ -789,6 +797,400 @@ function needsGrokRelogin(acc: Account): boolean {
     err.includes("accessdenied") ||
     err.includes("401") ||
     err.includes("403")
+  );
+}
+
+function GrokRegisterFarm() {
+  const preset = useRef(loadGrokRegisterPreset()).current;
+  const [status, setStatus] = useState<FarmStatus | null>(null);
+  const [method, setMethod] = useState<"imap" | "plus_trick">(preset.method);
+  const [count, setCount] = useState(preset.count);
+  const [domain, setDomain] = useState(preset.domain);
+  const [imapHost, setImapHost] = useState(preset.imapHost);
+  const [imapUser, setImapUser] = useState(preset.imapUser);
+  const [imapPass, setImapPass] = useState(preset.imapPass);
+  const [gmailBase, setGmailBase] = useState(preset.gmailBase);
+  const [password, setPassword] = useState(preset.password);
+  const [headless, setHeadless] = useState(preset.headless);
+  const [autoImport, setAutoImport] = useState(preset.autoImport);
+  const [concurrency, setConcurrency] = useState(preset.concurrency);
+  const [savePasswords, setSavePasswords] = useState(preset.savePasswords);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [events, setEvents] = useState<FarmEvent[]>([]);
+  const [job, setJob] = useState<FarmJob | null>(null);
+  const afterRef = useRef(0);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+
+  const packageOk = status?.info.packages?.["grok-cli"]?.package_present ?? false;
+  const maxWorkers = Math.max(1, status?.info.max_concurrency ?? 8);
+  const busy = status?.busy ?? false;
+
+  useEffect(() => {
+    saveGrokRegisterPreset({
+      method,
+      count,
+      concurrency,
+      headless,
+      autoImport,
+      domain,
+      gmailBase,
+      imapHost,
+      imapUser,
+      savePasswords,
+      password,
+      imapPass,
+    });
+  }, [
+    method,
+    count,
+    concurrency,
+    headless,
+    autoImport,
+    domain,
+    gmailBase,
+    imapHost,
+    imapUser,
+    savePasswords,
+    password,
+    imapPass,
+  ]);
+
+  function onForgetPreset() {
+    clearGrokRegisterPreset();
+    setPassword("");
+    setImapPass("");
+    setNotice("Saved register settings cleared");
+  }
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await getFarmStatus();
+      setStatus(s);
+      if (s.current && (s.current.provider ?? "") === "grok-cli") {
+        setJob(s.current);
+        jobIdRef.current = s.current.id;
+      }
+      setError(null);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Failed to load farm status");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+    const id = window.setInterval(() => void refreshStatus(), 4000);
+    return () => window.clearInterval(id);
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    const jid = jobIdRef.current ?? job?.id;
+    if (!jid) return;
+    let cancelled = false;
+    let id = 0;
+    const isTerminal = (s?: string) => s === "succeeded" || s === "failed" || s === "cancelled";
+    const tick = async () => {
+      try {
+        const res = await getFarmEvents(jid, afterRef.current);
+        if (cancelled) return;
+        setJob(res.job);
+        if (res.events.length) {
+          setEvents((prev) => {
+            const next = [...prev, ...res.events];
+            return next.length > 1500 ? next.slice(-1500) : next;
+          });
+          afterRef.current = res.events[res.events.length - 1].seq;
+        }
+        if (isTerminal(res.job?.status) && id) {
+          window.clearInterval(id);
+          id = 0;
+        }
+      } catch {
+        void 0;
+      }
+    };
+    void tick();
+    id = window.setInterval(() => void tick(), 1500);
+    return () => {
+      cancelled = true;
+      if (id) window.clearInterval(id);
+    };
+  }, [job?.id, status?.busy]);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [events.length]);
+
+  async function onStart(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+    const target = method === "imap" ? domain.trim() : gmailBase.trim();
+    if (!target) {
+      setError(method === "imap" ? "Catch-all domain is required" : "Gmail address is required");
+      return;
+    }
+    if (!password.trim()) {
+      setError("Password is required for all new accounts");
+      return;
+    }
+    if (method === "imap" && (!imapHost.trim() || !imapUser.trim() || !imapPass.trim())) {
+      setError("IMAP host, user, and password are required to read OTP codes");
+      return;
+    }
+    setStarting(true);
+    try {
+      const workers = Math.max(1, Math.min(maxWorkers, Math.floor(concurrency) || 1));
+      const n = Math.max(1, Math.floor(count) || 1);
+      const emailSource = method === "imap" ? target : `plus:${target}`;
+      const res = await startFarmJob({
+        provider: "grok-cli",
+        accounts: `register:${n}:${emailSource}`,
+        default_password: password.trim(),
+        headless,
+        auto_import: autoImport,
+        concurrency: workers,
+        ...(method === "imap"
+          ? {
+              imap_host: imapHost.trim(),
+              imap_user: imapUser.trim(),
+              imap_pass: imapPass,
+            }
+          : {}),
+      });
+      setJob(res.job);
+      jobIdRef.current = res.job.id;
+      afterRef.current = 0;
+      setEvents([]);
+      setNotice(`Job ${res.job.id.slice(0, 8)}… · ${n} account(s) · ${workers} worker(s) · ${method === "imap" ? "OTP IMAP" : "Gmail plus-trick"}`);
+      await refreshStatus();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Start failed");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function onCancel() {
+    if (!job) return;
+    setError(null);
+    try {
+      const res = await cancelFarmJob(job.id);
+      setJob(res.job);
+      setNotice("Cancel requested");
+      await refreshStatus();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Cancel failed");
+    }
+  }
+
+  const running = job && !["succeeded", "failed", "cancelled"].includes(job.status);
+  const disabled = !!running || starting;
+
+  return (
+    <div>
+      <header className="page-header">
+        <p className="breadcrumb muted">
+          <Link to="/automation">Automation</Link>
+          <span aria-hidden> / </span>
+          <span>Grok CLI</span>
+          <span aria-hidden> / </span>
+          <span>Register</span>
+        </p>
+        <h1>Grok CLI · Register</h1>
+        <p className="subtitle">
+          Thread new marionettes from scratch — Castle fingerprint, Turnstile, Device Flow
+        </p>
+      </header>
+
+      {!packageOk && (
+        <div className="alert alert-error" role="alert">
+          Farm package missing — ensure <code className="mono">scripts/automation/grok_farm/__main__.py</code> exists and Python is configured.
+        </div>
+      )}
+      {error && <div className="alert alert-error" role="alert">{error}</div>}
+      {notice && <div className="alert alert-ok" role="status">{notice}</div>}
+
+      <form className="panel" onSubmit={onStart}>
+        <fieldset style={{ border: "none", padding: 0, margin: 0 }} disabled={disabled}>
+          <div className="form-section">
+            <span className="label" style={{ marginBottom: 8, display: "block" }}>Email method</span>
+            <div className="radio-group">
+              <label className="radio-card">
+                <input
+                  type="radio"
+                  name="email-method"
+                  checked={method === "imap"}
+                  onChange={() => setMethod("imap")}
+                />
+                <span className="radio-card-body">
+                  <strong>OTP via IMAP</strong>
+                  <span className="muted">Catch-all domain + IMAP inbox reads the 6-char code</span>
+                </span>
+              </label>
+              <label className="radio-card">
+                <input
+                  type="radio"
+                  name="email-method"
+                  checked={method === "plus_trick"}
+                  onChange={() => setMethod("plus_trick")}
+                />
+                <span className="radio-card-body">
+                  <strong>Gmail plus-trick</strong>
+                  <span className="muted">user+tag@gmail.com — all OTP lands in one inbox</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div className="form-grid" style={{ marginTop: 20 }}>
+            {method === "imap" ? (
+              <label>
+                <span className="label">Catch-all domain</span>
+                <input
+                  type="text"
+                  value={domain}
+                  onChange={(e) => setDomain(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+            ) : (              <label>
+                <span className="label">Gmail address</span>
+                <input
+                  type="email"
+                  value={gmailBase}
+                  onChange={(e) => setGmailBase(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+            )}
+            <label>
+              <span className="label">Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+            </label>
+            {method === "imap" && (
+              <>
+                <label>
+                  <span className="label">IMAP host</span>
+                  <input
+                    type="text"
+                    value={imapHost}
+                    onChange={(e) => setImapHost(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  <span className="label">IMAP user</span>
+                  <input
+                    type="text"
+                    value={imapUser}
+                    onChange={(e) => setImapUser(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  <span className="label">IMAP password</span>
+                  <input
+                    type="password"
+                    value={imapPass}
+                    onChange={(e) => setImapPass(e.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
+              </>
+            )}
+            <label>
+              <span className="label">Accounts</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={count}
+                onChange={(e) => setCount(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              <span className="label">Concurrency</span>
+              <input
+                type="number"
+                min={1}
+                max={maxWorkers}
+                value={concurrency}
+                onChange={(e) => setConcurrency(Number(e.target.value))}
+              />
+            </label>
+          </div>
+
+          <div className="form-row" style={{ marginTop: 16, gap: 20 }}>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={headless} onChange={(e) => setHeadless(e.target.checked)} />
+              Headless
+            </label>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={autoImport} onChange={(e) => setAutoImport(e.target.checked)} />
+              Auto-import to pool
+            </label>
+            <label className="checkbox-label" title="Store the account + IMAP passwords in this browser so you don't retype them">
+              <input type="checkbox" checked={savePasswords} onChange={(e) => setSavePasswords(e.target.checked)} />
+              Remember passwords
+            </label>
+          </div>
+        </fieldset>
+
+        <div className="btn-row" style={{ marginTop: 20 }}>
+          <button type="submit" className="btn btn-primary" disabled={disabled || !packageOk || busy}>
+            {starting ? "Starting…" : running ? "Running…" : `Register ${count} account${count !== 1 ? "s" : ""}`}
+          </button>
+          {running && (
+            <button type="button" className="btn btn-danger" onClick={() => void onCancel()}>
+              Cancel
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost" onClick={onForgetPreset} disabled={!!running}>
+            Forget saved
+          </button>
+        </div>
+      </form>
+
+      {job && (
+        <div className="panel" style={{ marginTop: 16 }}>
+          <div className="panel-header">
+            <h3>
+              Job <span className="mono">{job.id.slice(0, 8)}</span>{" "}
+              <span className={`chip chip-${statusTone(job.status)}`}>{job.status}</span>
+            </h3>
+            <span className="muted">
+              {job.ok} ok · {job.fail} fail · {job.total} total
+              {job.current_step ? ` · ${job.current_step}` : ""}
+              {job.current_email ? ` · ${job.current_email}` : ""}
+            </span>
+          </div>
+          <div className="log-box" style={{ maxHeight: 400, overflow: "auto" }}>
+            {events.length === 0 && (
+              <div className="muted" style={{ padding: "12px 0" }}>Waiting for output…</div>
+            )}
+            {events.map((ev) => (
+              <div key={ev.seq} className="log-line">
+                <span className="muted">{ev.ts.slice(11, 19)}</span>{" "}
+                {ev.line}
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

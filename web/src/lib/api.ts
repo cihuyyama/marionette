@@ -780,6 +780,9 @@ export function startFarmJob(
     skip_existing?: boolean;
     account_delay?: number;
     proxy_file?: string | null;
+    imap_host?: string;
+    imap_user?: string;
+    imap_pass?: string;
   },
   settings?: Settings,
 ) {

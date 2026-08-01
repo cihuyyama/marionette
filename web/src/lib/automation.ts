@@ -1,6 +1,6 @@
 import { labelProvider, type ProviderId } from "./providers";
 
-export type AutomationMethodId = "google-sso" | "imap" | "relogin";
+export type AutomationMethodId = "google-sso" | "imap" | "relogin" | "register";
 
 export type AutomationAvailability = "ready" | "coming_soon";
 
@@ -55,6 +55,13 @@ export const AUTOMATION_PROVIDERS: AutomationProvider[] = [
           "Email+password → OAuth PKCE → verify chat → grok-cli pool. Camoufox under scripts/automation/grok_farm.",
         status: "ready",
       },
+      {
+        id: "register",
+        label: "Register",
+        description:
+          "Signup new accounts: Castle + Turnstile → Device Flow → tokens → pool import. Camoufox under scripts/automation/grok_farm.",
+        status: "ready",
+      },
     ],
   },
 ];
@@ -92,6 +99,7 @@ export function methodLabel(id: AutomationMethodId | string): string {
   if (id === "google-sso") return "Google SSO";
   if (id === "imap") return "IMAP";
   if (id === "relogin") return "Relogin";
+  if (id === "register") return "Register";
   return id;
 }
 

@@ -1832,3 +1832,94 @@ table.data tr.row-click {
 .empty-state {
   padding: var(--space-5);
 }
+
+/* ——— Form layout ——— */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+.form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.form-section {
+  margin-bottom: var(--space-2);
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--parchment);
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: var(--thread);
+  width: 15px;
+  height: 15px;
+}
+
+/* ——— Radio cards (register method picker) ——— */
+.radio-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--ink);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.radio-card:hover {
+  border-color: rgba(196, 163, 90, 0.4);
+}
+
+.radio-card:has(input:checked) {
+  border-color: var(--thread);
+  background: rgba(196, 163, 90, 0.06);
+}
+
+.radio-card input[type="radio"] {
+  accent-color: var(--thread);
+  margin-top: 3px;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.radio-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.radio-card-body strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--parchment);
+}
+
+.radio-card-body .muted {
+  font-size: 12px;
+  line-height: 1.4;
+}
