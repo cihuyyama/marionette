@@ -16,10 +16,32 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m grok_farm",
         description=(
-            "Grok CLI manual thin/mass relogin "
-            "(email+password -> OAuth PKCE -> verify_chat -> marionette-import JSON). "
-            "No signup farm. No 9Router DB writes."
+            "Grok CLI relogin + register farm. "
+            "relogin: email+password -> OAuth PKCE -> verify_chat. "
+            "register: signup new accounts -> Castle + Turnstile -> Device Flow -> tokens."
         ),
+    )
+    p.add_argument(
+        "--mode",
+        choices=("relogin", "register"),
+        default="relogin",
+        help="relogin (default): existing accounts. register: create new accounts.",
+    )
+    p.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="[register] Number of accounts to create (default 1)",
+    )
+    p.add_argument(
+        "--domain",
+        default=None,
+        help="[register] Email domain (default: GROK_EMAIL_DOMAIN env)",
+    )
+    p.add_argument(
+        "--password",
+        default=None,
+        help="[register] Password for new accounts (default: GROK_PASSWORD env)",
     )
     p.add_argument(
         "accounts",
@@ -125,6 +147,25 @@ def main(argv: list[str] | None = None) -> int:
     if overrides:
         cfg = replace(cfg, **overrides)
 
+    if args.mode == "register":
+        return _run_register(args, cfg)
+
+    # Auto-detect register mode from accounts text: "register:COUNT:DOMAIN"
+    raw_accounts_text = ""
+    if args.file:
+        fp = Path(args.file)
+        if fp.is_file():
+            raw_accounts_text = fp.read_text(encoding="utf-8").strip()
+    elif args.accounts:
+        raw_accounts_text = "\n".join(args.accounts).strip()
+    if raw_accounts_text.startswith("register:"):
+        parts = raw_accounts_text.split(":", 2)
+        if len(parts) >= 3:
+            args.count = int(parts[1]) if parts[1].isdigit() else 1
+            args.domain = parts[2].strip()
+            args.mode = "register"
+            return _run_register(args, cfg)
+
     accounts = load_accounts(args.file, list(args.accounts or []))
     if not accounts:
         print(
@@ -183,6 +224,79 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote/updated {n} connection(s) -> {path}")
 
     failed = sum(1 for r in results if not r.get("ok"))
+    return 0 if failed == 0 else 1
+
+
+def _run_register(args, cfg) -> int:
+    import os
+
+    from .register import run_register
+
+    domain = (args.domain or os.environ.get("GROK_EMAIL_DOMAIN") or "").strip().lstrip("@")
+    password = (args.password or os.environ.get("GROK_PASSWORD") or "").strip()
+    count = max(1, int(args.count or 1))
+    concurrency = max(1, int(args.concurrency or 1))
+    proxy_file = args.proxy_file or cfg.proxy_file or ""
+
+    prog = Progress(
+        ui=cfg.ui,
+        debug=cfg.debug,
+        json_progress=cfg.json_progress,
+        total=count,
+    )
+    prog.log(
+        f"mode=register count={count} domain={domain} "
+        f"concurrency={concurrency} headless={cfg.headless} "
+        f"proxy_file={proxy_file or '(none)'} out={cfg.output}",
+        "INFO",
+        step="start",
+    )
+
+    if not domain:
+        prog.log("GROK_EMAIL_DOMAIN not set", "ERR", step="start")
+        return 2
+    if not password:
+        prog.log("GROK_PASSWORD not set", "ERR", step="start")
+        return 2
+
+    results = asyncio.run(
+        run_register(
+            cfg,
+            prog,
+            count=count,
+            concurrency=concurrency,
+            domain=domain,
+            password=password,
+            proxy_file=proxy_file,
+        )
+    )
+
+    ok_results = []
+    for r in results:
+        tokens = r.get("tokens") or {}
+        if tokens.get("access_token"):
+            ok_results.append({
+                "ok": True,
+                "email": r["email"],
+                "accessToken": tokens["access_token"],
+                "refreshToken": tokens.get("refresh_token", ""),
+                "idToken": tokens.get("id_token", ""),
+                "expiresAt": tokens.get("expires_at", ""),
+                "expiresIn": tokens.get("expires_in", 21600),
+                "scope": tokens.get("scope", ""),
+                "clientId": tokens.get("client_id", cfg.client_id),
+                "sso": r.get("sso_cookie", ""),
+            })
+
+    if ok_results:
+        n, path = write_backup(ok_results, cfg.output, append=True)
+        prog.log(f"wrote {n} account(s) -> {path}", "OK", step="done")
+        if cfg.json_progress:
+            import json as _json
+            print(_json.dumps({"event": "account_ok", "count": n, "path": str(path)}), flush=True)
+
+    failed = count - len(ok_results)
+    prog.log(f"register done: ok={len(ok_results)} fail={failed}", "INFO", step="done")
     return 0 if failed == 0 else 1
 
 

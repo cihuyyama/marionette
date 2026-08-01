@@ -18,7 +18,9 @@ DEFAULT_SCOPE = (
 )
 DEFAULT_SIGNIN = "https://accounts.x.ai/sign-in"
 DEFAULT_CHAT_URL = "https://cli-chat-proxy.grok.com/v1/chat/completions"
-DEFAULT_CHAT_VERSION = "0.1.202"
+DEFAULT_CHAT_VERSION = "0.2.114"
+DEFAULT_CLIENT_IDENTIFIER = "grok-shell"
+DEFAULT_USER_AGENT = "grok-shell/0.2.114 (linux; x86_64)"
 
 
 def _load_dotenv() -> None:
@@ -68,6 +70,7 @@ class Config:
     browser_os: str
     login_timeout: int
     oauth_timeout: int
+    oauth_retries: int
     proxy_url: str
     proxy_file: str
     proxy_shuffle: bool
@@ -89,6 +92,8 @@ class Config:
     signin_url: str = DEFAULT_SIGNIN
     chat_url: str = DEFAULT_CHAT_URL
     chat_client_version: str = DEFAULT_CHAT_VERSION
+    chat_client_identifier: str = DEFAULT_CLIENT_IDENTIFIER
+    chat_user_agent: str = DEFAULT_USER_AGENT
     # Optional IMAP when xAI shows OTP (not required for pure password accounts)
     imap_host: str = ""
     imap_port: int = 993
@@ -114,12 +119,13 @@ def load_config() -> Config:
         browser_os=_env("GROK_BROWSER_OS", "windows") or "windows",
         login_timeout=_env_int("GROK_LOGIN_TIMEOUT", 120),
         oauth_timeout=_env_int("GROK_OAUTH_TIMEOUT", 120),
+        oauth_retries=_env_int("GROK_OAUTH_RETRIES", 2),
         proxy_url=_env("GROK_PROXY_URL") or _env("BATCHER_PROXY_URL"),
         proxy_file=_env("GROK_PROXY_FILE"),
         proxy_shuffle=_env_bool("GROK_PROXY_SHUFFLE", True),
         humanize=_env_bool("GROK_HUMANIZE", True),
-        humanize_headed=_env_float("GROK_HUMANIZE_HEADED", 0.5),
-        humanize_headless=_env_float("GROK_HUMANIZE_HEADLESS", 0.5),
+        humanize_headed=_env_float("GROK_HUMANIZE_HEADED", 1),
+        humanize_headless=_env_float("GROK_HUMANIZE_HEADLESS", 1),
         output=out,
         screenshot_dir=shots,
         ui=(_env("GROK_UI", "log") or "log").lower(),
@@ -135,8 +141,12 @@ def load_config() -> Config:
         chat_url=_env("GROK_CHAT_URL", DEFAULT_CHAT_URL) or DEFAULT_CHAT_URL,
         chat_client_version=_env("GROK_CHAT_CLIENT_VERSION", DEFAULT_CHAT_VERSION)
         or DEFAULT_CHAT_VERSION,
-        imap_host=_env("GROK_IMAP_HOST"),
+        chat_client_identifier=_env("GROK_CHAT_CLIENT_IDENTIFIER", DEFAULT_CLIENT_IDENTIFIER)
+        or DEFAULT_CLIENT_IDENTIFIER,
+        chat_user_agent=_env("GROK_CHAT_USER_AGENT", DEFAULT_USER_AGENT) or DEFAULT_USER_AGENT,
+        imap_host=_env("GROK_IMAP_HOST", "imap.gmail.com"),
         imap_port=_env_int("GROK_IMAP_PORT", 993),
         imap_user=_env("GROK_IMAP_USER"),
-        imap_pass=_env("GROK_IMAP_PASS"),
+        # Gmail App Passwords display as "abcd efgh ijkl mnop" but IMAP LOGIN rejects spaces.
+        imap_pass=_env("GROK_IMAP_PASS").replace(" ", ""),
     )
