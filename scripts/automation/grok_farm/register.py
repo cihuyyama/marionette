@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import imaplib
 import json
+import random
 import re
 import secrets
 import string
@@ -14,9 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from . import castle
+from .activate import activate_grok_if_needed
 from .browser import _normalize_proxy_url, _proxy_dict
 from .config import Config
-from .device_flow import obtain_tokens
+from .device_flow import obtain_tokens_via_browser
+from .export import append_pending, drop_pending_email, write_backup
+from .login import dismiss_cookie_banner
+from .oauth import obtain_oidc_tokens
 from .progress import Progress
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up"
@@ -63,12 +68,18 @@ def _is_plausible_otp(code: str) -> bool:
 
 
 def _extract_otp(subject: str, body: str) -> str | None:
+    # Subject "xAI confirmation code: XXX-XXX" is authoritative: the code is
+    # explicitly labelled, so trust it directly (LTH-963 is valid, not CSS noise).
     m = _XAI_SUBJ_CODE_RE.search(subject or "")
-    if m and _is_plausible_otp(m.group(1)):
-        return m.group(1).upper()
+    if m:
+        code = m.group(1) or m.group(2)
+        if code and re.fullmatch(r"[A-Z0-9]{3}-[A-Z0-9]{3}", code.upper()):
+            return code.upper()
+    # Bare token in subject: still trusted (subject rarely carries CSS).
     for m in _XAI_CODE_RE.finditer(subject or ""):
-        if _is_plausible_otp(m.group(1)):
+        if re.fullmatch(r"[A-Z0-9]{3}-[A-Z0-9]{3}", m.group(1).upper()):
             return m.group(1).upper()
+    # Body scan: strip markup, apply CSS-noise plausibility (PER-100, RGB-255...).
     plain = re.sub(r"<style[\s\S]*?</style>", " ", body or "", flags=re.I)
     plain = re.sub(r"<script[\s\S]*?</script>", " ", plain, flags=re.I)
     plain = re.sub(r"<[^>]+>", " ", plain)
@@ -211,23 +222,68 @@ async def _fill_profile_and_password(page: Any, password: str, prog: Progress) -
         return False
 
 
-async def _handle_turnstile_checkbox(page: Any, prog: Progress, max_wait: float = 25) -> bool:
+async def _turnstile_token_len(page: Any) -> int:
+    try:
+        return int(
+            await page.evaluate(
+                "() => { const el = document.querySelector('[name=\"cf-turnstile-response\"]');"
+                " return el ? (el.value || '').length : 0; }"
+            )
+        )
+    except Exception:
+        return 0
+
+
+async def _find_cf_frame(page: Any) -> Any:
+    for fr in page.frames:
+        if "challenges.cloudflare.com" in (fr.url or ""):
+            return fr
+    return None
+
+
+async def _handle_turnstile_checkbox(
+    page: Any, prog: Progress, email: str = "", password: str = "", max_wait: float = 45
+) -> bool:
+    # The signup Turnstile iframe renders with an EMPTY src attribute, so CSS
+    # selectors (iframe[src*=...]) never match. page.frames exposes the live
+    # cross-origin frame; frame_element() gives its box for a humanized click
+    # on the checkbox (left-center). Verified live: one click -> token len 709.
     deadline = time.monotonic() + max_wait
+    clicks = 0
     while time.monotonic() < deadline:
-        try:
-            iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-            checkbox = iframe.locator('input[type="checkbox"], .cbx, #cf-turnstile-checkbox')
-            if await checkbox.count() > 0:
-                await checkbox.first.click(force=True, timeout=3000)
-                await asyncio.sleep(3)
-                token = await page.evaluate(
-                    "() => { const el = document.querySelector('[name=\"cf-turnstile-response\"]'); return el ? el.value.length : 0; }"
-                )
-                if token and int(token) > 20:
-                    return True
-        except Exception:
-            pass
-        await asyncio.sleep(1.5)
+        if await _turnstile_token_len(page) > 20:
+            prog.log("turnstile token ok", "OK", email=email, step="turnstile")
+            return True
+        cf_frame = await _find_cf_frame(page)
+        if cf_frame is None:
+            await asyncio.sleep(1.5)
+            continue
+        if clicks < 6:
+            try:
+                fe = await cf_frame.frame_element()
+                box = await fe.bounding_box()
+                if box:
+                    x = box["x"] + min(30, box["width"] * 0.1)
+                    y = box["y"] + box["height"] / 2
+                    prog.log(
+                        f"click turnstile @({x:.0f},{y:.0f}) try {clicks + 1}",
+                        "WAIT",
+                        email=email,
+                        step="turnstile",
+                    )
+                    await page.mouse.move(x - 50, y - 15, steps=8)
+                    await asyncio.sleep(random.uniform(0.2, 0.4))
+                    await page.mouse.move(x, y, steps=12)
+                    await asyncio.sleep(random.uniform(0.15, 0.35))
+                    await page.mouse.click(x, y)
+                    clicks += 1
+            except Exception:
+                pass
+        for _ in range(4):
+            await asyncio.sleep(1.5)
+            if await _turnstile_token_len(page) > 20:
+                prog.log("turnstile token ok", "OK", email=email, step="turnstile")
+                return True
     return False
 
 
@@ -235,11 +291,52 @@ async def _extract_sso_cookie(page: Any) -> str | None:
     try:
         cookies = await page.context.cookies()
         for c in cookies:
-            if c.get("name") == "sso":
+            if c.get("name") == "sso" and str(c.get("value") or "").startswith("eyJ"):
                 return c["value"]
     except Exception:
         pass
     return None
+
+
+async def _poll_sso_cookie(page: Any, prog: Progress, email: str) -> str | None:
+    # The 'sso' JWT propagates only via explicit per-domain /set-cookie hops;
+    # a plain grok.com visit leaves a fresh signup session logged out (no sso).
+    sso = await _extract_sso_cookie(page)
+    if sso:
+        return sso
+    hops = (
+        "https://auth.x.ai/set-cookie",
+        "https://auth.grokusercontent.com/set-cookie",
+        "https://grok.com/",
+        "https://accounts.x.ai/",
+        "https://accounts.x.ai/sign-in?redirect=grok-com",
+        "https://grok.com/",
+    )
+    for hop in hops:
+        try:
+            await page.goto(hop, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        for _ in range(3):
+            await asyncio.sleep(1.5)
+            sso = await _extract_sso_cookie(page)
+            if sso:
+                prog.log(
+                    f"SSO cookie via {hop.split('//')[-1]}", "DBG", email=email, step="sso_extract"
+                )
+                return sso
+    return None
+
+
+async def _shot(page: Any, cfg: Config, email: str, tag: str, prog: Progress) -> None:
+    try:
+        cfg.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        safe = email.replace("@", "_at_").replace(".", "_")
+        path = cfg.screenshot_dir / f"{safe}_{tag}.png"
+        await page.screenshot(path=str(path), full_page=True)
+        prog.log(f"screenshot -> {path.name}", "DBG", email=email, step=tag)
+    except Exception:
+        pass
 
 
 async def register_one(
@@ -260,6 +357,7 @@ async def register_one(
             prog.log("goto signup failed", "ERR", email=email, step="signup_open")
             return None
     await asyncio.sleep(3)
+    await dismiss_cookie_banner(page)
 
     prog.step(email, "castle", "Minting Castle token")
     await castle.mint(page, prog, email)
@@ -275,6 +373,7 @@ async def register_one(
 
     if not await _fill_email_and_submit(page, email, prog):
         prog.log("email fill/submit failed", "ERR", email=email, step="signup_email")
+        await _shot(page, cfg, email, "fail_signup_email", prog)
         return None
 
     prog.step(email, "wait_otp", "Waiting for OTP via IMAP")
@@ -289,6 +388,7 @@ async def register_one(
     prog.step(email, "confirm_otp", "Confirming OTP")
     if not await _fill_otp(page, otp, prog):
         prog.log("OTP fill failed", "ERR", email=email, step="confirm_otp")
+        await _shot(page, cfg, email, "fail_confirm_otp", prog)
         return None
     await asyncio.sleep(2)
 
@@ -296,7 +396,13 @@ async def register_one(
     await _fill_profile_and_password(page, password, prog)
 
     prog.step(email, "turnstile", "Solving Turnstile")
-    await _handle_turnstile_checkbox(page, prog, max_wait=25)
+    solved = await _handle_turnstile_checkbox(
+        page, prog, email=email, password=password, max_wait=45
+    )
+    if not solved:
+        prog.log("turnstile not solved", "ERR", email=email, step="turnstile")
+        await _shot(page, cfg, email, "fail_turnstile", prog)
+        return None
 
     submit_btn = page.get_by_role("button", name=re.compile(r"complete|sign up|create|submit", re.I))
     try:
@@ -307,33 +413,101 @@ async def register_one(
     await asyncio.sleep(3)
 
     prog.step(email, "sso_extract", "Extracting SSO cookie")
-    sso_cookie = await _extract_sso_cookie(page)
-    if not sso_cookie:
-        try:
-            await page.goto("https://grok.com", wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5)
-            sso_cookie = await _extract_sso_cookie(page)
-        except Exception:
-            pass
+    sso_cookie = await _poll_sso_cookie(page, prog, email)
     if not sso_cookie:
         prog.log("SSO cookie not found", "ERR", email=email, step="sso_extract")
+        await _shot(page, cfg, email, "fail_sso", prog)
         return None
     prog.log(f"SSO cookie: {sso_cookie[:12]}...", "DBG", email=email, step="sso_extract")
 
-    prog.step(email, "device_flow", "Running OAuth Device Flow")
-    tokens = await asyncio.get_event_loop().run_in_executor(
-        None, obtain_tokens, cfg, sso_cookie, proxy_url, prog, email
-    )
-    if not tokens:
-        prog.log("Device Flow failed", "ERR", email=email, step="device_flow")
-        return None
+    # New accounts have no Grok principal until they visit grok.com + accept
+    # terms. Without it, OAuth consent returns "Failed to generate
+    # authentication code / Access denied". Confirm an authenticated session
+    # before consent; the principal is provisioned async, so poll grok.com until
+    # it is truly signed in rather than assuming after one visit.
+    provisioned = await activate_grok_if_needed(page, cfg, prog, email)
+    if not provisioned:
+        await asyncio.sleep(4.0)
+        provisioned = await activate_grok_if_needed(page, cfg, prog, email)
+    if not provisioned:
+        prog.log(
+            "grok.com principal unconfirmed — consent may deny",
+            "WARN",
+            email=email,
+            step="activate",
+        )
 
-    return {
+    # Fresh accounts hit "Failed to generate authentication code / Access denied"
+    # on PKCE consent, so approve device flow in the already-signed-in browser
+    # first (reference's 1000+-account path); fall back to in-page PKCE.
+    prog.step(email, "oauth", "OAuth tokens (device→PKCE)")
+    tokens = await _obtain_tokens_with_retry(page, email, password, cfg, prog, proxy_url)
+
+    base = {
         "email": email,
         "password": password,
         "sso_cookie": sso_cookie,
-        "tokens": tokens,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    if not tokens or not tokens.get("access_token"):
+        prog.log("OAuth incomplete — account saved as sso_only", "WARN", email=email, step="oauth")
+        await _shot(page, cfg, email, "fail_oauth", prog)
+        return {**base, "tokens": None, "stage": "sso_only"}
+
+    return {**base, "tokens": tokens, "stage": "tokens"}
+
+
+async def _obtain_tokens_with_retry(
+    page: Any,
+    email: str,
+    password: str,
+    cfg: Config,
+    prog: Progress,
+    proxy_url: str,
+) -> dict | None:
+    attempts = max(1, cfg.oauth_retries)
+    for attempt in range(1, attempts + 1):
+        try:
+            tokens = await obtain_tokens_via_browser(
+                page, cfg, prog=prog, email=email, password=password, proxy_url=proxy_url
+            )
+            if tokens and tokens.get("access_token"):
+                return tokens
+        except Exception as exc:
+            prog.log(f"device flow error: {exc}", "WARN", email=email, step="oauth")
+        prog.log("device flow miss — falling back to PKCE", "WAIT", email=email, step="oauth")
+        try:
+            tokens = await obtain_oidc_tokens(
+                page, email, password, cfg, prog, email, reprovision=activate_grok_if_needed
+            )
+            if tokens and tokens.get("access_token"):
+                return tokens
+        except Exception as exc:
+            prog.log(f"OAuth failed (device+PKCE): {exc}", "ERR", email=email, step="oauth")
+        if attempt < attempts:
+            backoff = min(15.0, 3.0 * attempt)
+            prog.log(f"oauth retry {attempt}/{attempts - 1} (backoff {backoff:.0f}s)", "WAIT", email=email, step="oauth")
+            await asyncio.sleep(backoff)
+            await activate_grok_if_needed(page, cfg, prog, email)
+    return None
+
+
+def _result_to_export(r: dict, cfg: Config) -> dict | None:
+    """Map register_one result to write_backup shape; None when no access token."""
+    tokens = r.get("tokens") or {}
+    if not tokens.get("access_token"):
+        return None
+    return {
+        "ok": True,
+        "email": r.get("email", ""),
+        "accessToken": tokens["access_token"],
+        "refreshToken": tokens.get("refresh_token", ""),
+        "idToken": tokens.get("id_token", ""),
+        "expiresAt": tokens.get("expires_at", ""),
+        "expiresIn": tokens.get("expires_in", 21600),
+        "scope": tokens.get("scope", ""),
+        "clientId": tokens.get("client_id", cfg.client_id),
+        "sso": r.get("sso_cookie", ""),
     }
 
 
@@ -376,6 +550,7 @@ async def run_register(
 
     results: list[dict] = []
     sem = asyncio.Semaphore(max(1, concurrency))
+    save_lock = asyncio.Lock()
     proxy_idx = 0
 
     async def worker(idx: int) -> None:
@@ -408,9 +583,30 @@ async def run_register(
                     page = await browser.new_page()
                     prog.step(email, "register", "filling signup form")
                     result = await register_one(page, email, password, cfg, prog, proxy_url)
-                    if result:
-                        results.append(result)
+                    if result and result.get("stage") == "tokens":
+                        async with save_lock:
+                            results.append(result)
+                            export_row = _result_to_export(result, cfg)
+                            if export_row:
+                                try:
+                                    n, path = write_backup([export_row], cfg.output, append=True)
+                                    drop_pending_email(email, cfg.output)
+                                    prog.log(f"saved -> {path} (+{n})", "INFO", email=email)
+                                except Exception as exc:
+                                    prog.log(f"save err: {exc}", "ERR", email=email)
                         prog.mark_ok(email, "registered + tokens obtained")
+                    elif result and result.get("stage") == "sso_only":
+                        async with save_lock:
+                            results.append(result)
+                            try:
+                                pp = append_pending(
+                                    {"email": email, "password": password, "sso": result.get("sso_cookie", "")},
+                                    cfg.output,
+                                )
+                                prog.log(f"pending (sso_only) -> {pp}", "WARN", email=email)
+                            except Exception as exc:
+                                prog.log(f"pending write err: {exc}", "ERR", email=email)
+                        prog.mark_fail(email, "signup ok but OAuth incomplete (saved to pending)")
                     else:
                         prog.mark_fail(email, "registration flow returned no result")
             except Exception as e:
@@ -426,3 +622,47 @@ async def run_register(
     tasks = [worker(i) for i in range(count)]
     await asyncio.gather(*tasks, return_exceptions=True)
     return results
+
+
+async def retry_pending(
+    cfg: Config,
+    prog: Progress,
+    proxy_url: str = "",
+) -> list[dict]:
+    """Recover sso_only accounts: mint tokens over HTTP from the saved SSO
+    cookie (no browser), then move each success from pending into the backup."""
+    from .device_flow import obtain_tokens
+    from .export import load_pending
+
+    pending = load_pending(cfg.output)
+    if not pending:
+        prog.log("no pending accounts to retry", "INFO", step="retry_pending")
+        return []
+
+    prog.total = len(pending)
+    prog.log(f"retry-pending: {len(pending)} account(s)", "INFO", step="retry_pending")
+    recovered: list[dict] = []
+
+    for row in pending:
+        email = str(row.get("email") or "")
+        sso = str(row.get("sso") or "")
+        if not email or not sso:
+            prog.mark_fail(email or "(unknown)", "pending row missing email/sso")
+            continue
+        loop = asyncio.get_event_loop()
+        tokens = await loop.run_in_executor(
+            None, lambda: obtain_tokens(cfg, sso, proxy_url, prog, email)
+        )
+        if tokens and tokens.get("access_token"):
+            export_row = _result_to_export({"email": email, "tokens": tokens, "sso_cookie": sso}, cfg)
+            if export_row:
+                n, path = write_backup([export_row], cfg.output, append=True)
+                drop_pending_email(email, cfg.output)
+                recovered.append(export_row)
+                prog.log(f"recovered -> {path} (+{n})", "OK", email=email)
+                prog.mark_ok(email, "recovered from pending")
+                continue
+        prog.mark_fail(email, "still no tokens (kept in pending)")
+
+    prog.summary()
+    return recovered

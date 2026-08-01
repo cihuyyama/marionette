@@ -77,7 +77,7 @@ def build_authorize_url(cfg: Config, challenge: str, state: str, nonce: str) -> 
         "state": state,
         "nonce": nonce,
         "plan": "generic",
-        "referrer": "cli-proxy-api",
+        "referrer": "grok-build",
     }
     return f"{cfg.authorize_url}?{urlencode(params)}"
 
@@ -338,6 +338,46 @@ async def _consent_page_denied(page: Any) -> str | None:
     return None
 
 
+async def _consent_force_allow(page: Any) -> bool:
+    """Fallback when the visible Allow button can't be clicked: locate the Grok
+    consent <form> (skipping any cookie/privacy form), force its hidden
+    action=allow field, and submit. Mirrors the battle-tested reference flow —
+    xAI consent posts action=allow, so this passes the step even when the button
+    is obscured/re-rendered. Returns True if a submit was dispatched."""
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const forms = Array.from(document.querySelectorAll('form'));
+                    const form = forms.find((x) => {
+                        const t = (x.innerText || '');
+                        return t.includes('Grok') || t.includes('Allow') || t.includes('Authorize');
+                    }) || document.querySelector('form');
+                    if (!form) return false;
+                    const ft = (form.innerText || '');
+                    if (/cookie/i.test(ft) || ft.includes('privacy preference') || ft.includes('Allow all')) return false;
+                    let action = form.querySelector('input[name=action]');
+                    if (!action) {
+                        action = document.createElement('input');
+                        action.type = 'hidden';
+                        action.name = 'action';
+                        form.appendChild(action);
+                    }
+                    action.value = 'allow';
+                    const btn = [...form.querySelectorAll('button')].find((b) => {
+                        const t = (b.innerText || '').trim();
+                        return t === 'Allow' || t === 'Authorize' || t === 'Approve' || t === 'Confirm';
+                    });
+                    if (btn) btn.click();
+                    else form.submit();
+                    return true;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
 async def _attempt_oidc(
     page: Any,
     email_addr: str,
@@ -356,6 +396,8 @@ async def _attempt_oidc(
     auth_url = build_authorize_url(cfg, challenge, state, nonce)
     auth_code: dict[str, str | None] = {"code": None}
     auth_err: dict[str, str | None] = {"error": None, "desc": None}
+    login_attempts = 0
+    max_login_attempts = 3
 
     async def _handle_route(route: Any) -> None:
         req_url = route.request.url
@@ -442,6 +484,18 @@ async def _attempt_oidc(
                     denied = await _consent_page_denied(page)
                     if denied:
                         raise OAuthAccessDenied(denied)
+                else:
+                    if await _consent_force_allow(page):
+                        prog.log(
+                            "consent force-allow (form action=allow)",
+                            "OK",
+                            email=label,
+                            step="consent",
+                        )
+                        await asyncio.sleep(1.5)
+                        denied = await _consent_page_denied(page)
+                        if denied:
+                            raise OAuthAccessDenied(denied)
             elif "accounts.x.ai" in cur or "auth.x.ai" in cur:
                 await dismiss_cookie_banner(page)
                 if await page.locator('input[type="email"], input[type="password"]').count() == 0:
@@ -457,6 +511,12 @@ async def _attempt_oidc(
                     > 0
                 )
                 if has_form or has_email_btn:
+                    if login_attempts >= max_login_attempts:
+                        raise OAuthAccessDenied(
+                            "login retries exhausted (still on sign-in form after "
+                            f"{login_attempts} attempts)"
+                        )
+                    login_attempts += 1
                     await drive_email_password_login(page, email_addr, password, prog, label)
                 if await _otp_form_present(page).count() > 0:
                     await handle_optional_otp(page, email_addr, cfg, prog, label)
@@ -518,11 +578,17 @@ async def obtain_oidc_tokens(
     cfg: Config,
     prog: Progress,
     label: str,
+    reprovision: Any = None,
 ) -> dict[str, Any]:
-    """Drive OAuth PKCE with one retry on a transient 'Access denied' at the
-    consent/code-generation step (fresh PKCE + short backoff)."""
+    """Drive OAuth PKCE, retrying 'Access denied' at the consent step.
+
+    Fresh-account 'Failed to generate authentication code' is caused by the
+    Grok principal being provisioned asynchronously server-side, so each retry
+    re-runs activation (poll grok.com until signed in) with exponential backoff
+    before a fresh PKCE attempt, rather than just re-navigating to sign-in.
+    """
     prog.step(label, "oauth", "Grok CLI OAuth PKCE")
-    attempts = max(1, cfg.oauth_retries)
+    attempts = max(2, cfg.oauth_retries)
     last_exc: Exception | None = None
     for i in range(attempts):
         try:
@@ -530,17 +596,27 @@ async def obtain_oidc_tokens(
         except OAuthAccessDenied as exc:
             last_exc = exc
             if i + 1 < attempts:
+                backoff = min(20.0, 3.0 * (2**i))
                 prog.log(
-                    f"oauth access denied — retry {i + 1}/{attempts - 1} with fresh PKCE",
+                    f"access denied — reprovision + retry {i + 1}/{attempts - 1} "
+                    f"(backoff {backoff:.0f}s)",
                     "WAIT",
                     email=label,
                     step="oauth",
                 )
-                await asyncio.sleep(2.0 + 1.0 * i)
-                try:
-                    await page.goto(cfg.signin_url, wait_until="domcontentloaded", timeout=30_000)
-                except Exception:
-                    pass
+                await asyncio.sleep(backoff)
+                if reprovision is not None:
+                    try:
+                        await reprovision(page, cfg, prog, label)
+                    except Exception as rexc:
+                        prog.log(f"reprovision error: {rexc}", "DBG", email=label, step="oauth")
+                else:
+                    try:
+                        await page.goto(
+                            cfg.signin_url, wait_until="domcontentloaded", timeout=30_000
+                        )
+                    except Exception:
+                        pass
                 continue
             raise
     if last_exc:

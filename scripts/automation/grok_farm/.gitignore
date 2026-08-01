@@ -11,6 +11,8 @@ accounts*.txt
 !accounts.txt.example
 *.json
 !package.json
+*.pending.jsonl
+*.pending.jsonl.lock
 debug_*.png
 farm.log
 proxies.txt

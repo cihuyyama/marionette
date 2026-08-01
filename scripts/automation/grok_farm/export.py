@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +72,21 @@ def connection_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     return conn
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def write_backup(
     results: list[dict[str, Any]],
     path: Path,
@@ -129,7 +146,7 @@ def write_backup(
         "source": "marionette/scripts/automation/grok_farm",
         "count": len(connections),
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return added, path
 
 
@@ -175,3 +192,55 @@ def emails_in_output(path: Path) -> set[str]:
         if isinstance(email, str) and "@" in email:
             found.add(email.strip().lower())
     return found
+
+
+def pending_path_for(output: Path) -> Path:
+    output = Path(output)
+    return output.with_name(output.stem + ".pending.jsonl")
+
+
+def append_pending(row: dict[str, Any], output: Path) -> Path:
+    path = pending_path_for(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({**row, "pendingAt": _now_iso()}, ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    return path
+
+
+def load_pending(output: Path) -> list[dict[str, Any]]:
+    path = pending_path_for(output)
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("email"):
+            rows.append(row)
+    return rows
+
+
+def rewrite_pending(rows: list[dict[str, Any]], output: Path) -> Path:
+    path = pending_path_for(output)
+    if not rows:
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return path
+    body = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n"
+    _atomic_write_text(path, body)
+    return path
+
+
+def drop_pending_email(email: str, output: Path) -> Path:
+    target = (email or "").strip().lower()
+    remaining = [r for r in load_pending(output) if str(r.get("email") or "").lower() != target]
+    return rewrite_pending(remaining, output)

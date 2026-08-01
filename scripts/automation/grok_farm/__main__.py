@@ -23,9 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode",
-        choices=("relogin", "register"),
+        choices=("relogin", "register", "retry-pending"),
         default="relogin",
-        help="relogin (default): existing accounts. register: create new accounts.",
+        help="relogin (default): existing accounts. register: create new accounts. "
+        "retry-pending: mint tokens for saved sso_only accounts over HTTP.",
     )
     p.add_argument(
         "--count",
@@ -149,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "register":
         return _run_register(args, cfg)
+    if args.mode == "retry-pending":
+        return _run_retry_pending(args, cfg)
 
     # Auto-detect register mode from accounts text: "register:COUNT:DOMAIN"
     raw_accounts_text = ""
@@ -289,8 +292,9 @@ def _run_register(args, cfg) -> int:
             })
 
     if ok_results:
+        # Idempotent reconciliation: run_register already saved each account (dedup on grok-cli:email).
         n, path = write_backup(ok_results, cfg.output, append=True)
-        prog.log(f"wrote {n} account(s) -> {path}", "OK", step="done")
+        prog.log(f"final sync: {len(ok_results)} account(s) confirmed -> {path}", "OK", step="done")
         if cfg.json_progress:
             import json as _json
             print(_json.dumps({"event": "account_ok", "count": n, "path": str(path)}), flush=True)
@@ -298,6 +302,18 @@ def _run_register(args, cfg) -> int:
     failed = count - len(ok_results)
     prog.log(f"register done: ok={len(ok_results)} fail={failed}", "INFO", step="done")
     return 0 if failed == 0 else 1
+
+
+def _run_retry_pending(args, cfg) -> int:
+    from .register import retry_pending
+
+    proxy_url = cfg.proxy_url or ""
+    prog = Progress(ui=cfg.ui, debug=cfg.debug, json_progress=cfg.json_progress, total=0)
+    prog.log(f"mode=retry-pending out={cfg.output}", "INFO", step="start")
+
+    recovered = asyncio.run(retry_pending(cfg, prog, proxy_url=proxy_url))
+    prog.log(f"retry-pending done: recovered={len(recovered)}", "INFO", step="done")
+    return 0
 
 
 if __name__ == "__main__":
