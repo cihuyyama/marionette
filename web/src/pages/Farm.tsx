@@ -746,7 +746,7 @@ function QoderGoogleSsoFarm() {
             </p>
           )}
           <div
-            className="farm-log mono"
+            className="log-box mono"
             style={{
               marginTop: "var(--space-3)",
               maxHeight: 360,
@@ -2347,7 +2347,7 @@ function GrokReloginFarm() {
             </p>
           )}
           <div
-            className="farm-log mono"
+            className="log-box mono"
             style={{
               marginTop: "var(--space-3)",
               maxHeight: 360,

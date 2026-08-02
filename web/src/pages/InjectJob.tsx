@@ -282,7 +282,7 @@ export function InjectJobPage() {
           Process log
         </h2>
         <div
-          className="farm-log mono"
+          className="log-box mono"
           style={{
             maxHeight: "min(60vh, 520px)",
             overflow: "auto",
