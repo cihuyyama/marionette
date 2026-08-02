@@ -231,6 +231,31 @@ export function grokBilling(id: string, settings?: Settings) {
   );
 }
 
+export type ExportPatItem = {
+  id: string;
+  email?: string | null;
+  pat?: string;
+  error?: string;
+};
+
+export type ExportPatResult = {
+  count: number;
+  total: number;
+  items: ExportPatItem[];
+};
+
+export function exportQoderPats(accountIds: string[], settings?: Settings) {
+  return request<ExportPatResult>(
+    `/admin/accounts/export-pats`,
+    {
+      method: "POST",
+      auth: "admin",
+      body: JSON.stringify({ account_ids: accountIds }),
+    },
+    settings,
+  );
+}
+
 export type RefreshJob = {
   id: string;
   provider: string;

@@ -13,6 +13,7 @@ import {
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { BulkInjectModal } from "../components/BulkInjectModal";
+import { ExportPatModal } from "../components/ExportPatModal";
 import { InjectModal } from "../components/InjectModal";
 import { StatusChip } from "../components/StatusChip";
 import { isProviderId, labelProvider, type ProviderId } from "../lib/providers";
@@ -57,6 +58,7 @@ export function AccountList() {
     email: string | null;
   } | null>(null);
   const [bulkInjectOpen, setBulkInjectOpen] = useState(false);
+  const [exportPatOpen, setExportPatOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!provider) return;
@@ -476,6 +478,17 @@ export function AccountList() {
             >
               Clear
             </button>
+            {provider === "qoder" && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={bulkBusy}
+                title="Show full PATs for selected accounts (copy/paste)"
+                onClick={() => setExportPatOpen(true)}
+              >
+                Export PAT ({selectedIds.size})
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-sm btn-danger"
@@ -1072,6 +1085,14 @@ export function AccountList() {
             setMessage(summary);
             navigate(`/accounts/qoder/inject/${jobId}`);
           }}
+        />
+      )}
+
+      {providerId === "qoder" && (
+        <ExportPatModal
+          open={exportPatOpen}
+          accountIds={Array.from(selectedIds)}
+          onClose={() => setExportPatOpen(false)}
         />
       )}
     </div>

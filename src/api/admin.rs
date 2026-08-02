@@ -453,6 +453,41 @@ fn qoder_personal_token(acc: &Account) -> Option<String> {
     None
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ExportPatBody {
+    pub account_ids: Vec<String>,
+}
+
+pub async fn export_qoder_pats(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(body): Json<ExportPatBody>,
+) -> AppResult<Json<Value>> {
+    if body.account_ids.is_empty() {
+        return Err(AppError::BadRequest("account_ids is empty".into()));
+    }
+    let mut items = Vec::with_capacity(body.account_ids.len());
+    for id in &body.account_ids {
+        let acc = match db::get_account(&state.pool, id).await {
+            Ok(a) => a,
+            Err(_) => {
+                items.push(json!({ "id": id, "error": "not found" }));
+                continue;
+            }
+        };
+        if acc.provider != "qoder" {
+            items.push(json!({ "id": id, "email": acc.email, "error": "not a qoder account" }));
+            continue;
+        }
+        match qoder_personal_token(&acc) {
+            Some(pat) => items.push(json!({ "id": id, "email": acc.email, "pat": pat })),
+            None => items.push(json!({ "id": id, "email": acc.email, "error": "no personalToken" })),
+        }
+    }
+    let ok = items.iter().filter(|i| i.get("pat").is_some()).count();
+    Ok(Json(json!({ "count": ok, "total": items.len(), "items": items })))
+}
+
 pub async fn inject_account(
     State(state): State<AppState>,
     _auth: AdminAuth,
