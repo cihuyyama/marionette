@@ -223,8 +223,19 @@ def main(argv: list[str] | None = None) -> int:
 
     register_count = int(args.count or 0)
     register_mode = args.mode == "register"
-    # Dashboard passes accounts text "register:COUNT:SOURCE"; auto-detect it.
+    # Dashboard passes "register:COUNT:SOURCE" — as a positional arg (CLI) or as the
+    # first line of the -f accounts file (Rust farm runner writes it there).
     raw_first = (list(args.accounts or []) + [""])[0]
+    if not raw_first.startswith("register:") and args.file:
+        try:
+            with open(args.file, encoding="utf-8-sig") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        raw_first = line
+                        break
+        except OSError:
+            pass
     if raw_first.startswith("register:"):
         parts = raw_first.split(":")
         register_mode = True
