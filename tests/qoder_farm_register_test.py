@@ -6,6 +6,7 @@ import unittest
 
 from qoder_farm.captcha import detect_gap_offset
 from qoder_farm.email_signup import generate_email
+from qoder_farm.farm import _has_prior_credit
 from qoder_farm.imap import extract_code, matches_target
 
 try:
@@ -70,6 +71,20 @@ class OtpExtractTest(unittest.TestCase):
     def test_style_noise_ignored_before_real_code(self) -> None:
         body = "<style>.x{width:123px}</style> code 654321"
         self.assertEqual(extract_code("hi", body), "654321")
+
+
+class InjectGateTest(unittest.TestCase):
+    def test_fresh_account_has_no_prior_credit(self) -> None:
+        self.assertFalse(_has_prior_credit({"quotaLimit": 0, "quotaRemaining": 0}))
+
+    def test_exhausted_bucket_counts_as_prior_credit(self) -> None:
+        self.assertTrue(_has_prior_credit({"quotaLimit": 300, "quotaRemaining": 0}))
+
+    def test_active_bucket_counts_as_prior_credit(self) -> None:
+        self.assertTrue(_has_prior_credit({"quotaLimit": 300, "quotaRemaining": 150}))
+
+    def test_missing_quota_is_not_prior_credit(self) -> None:
+        self.assertFalse(_has_prior_credit(None))
 
 
 class MatchesTargetTest(unittest.TestCase):

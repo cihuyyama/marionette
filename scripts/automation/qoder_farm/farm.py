@@ -25,6 +25,18 @@ from .progress import Progress, mask_email
 from .session import ensure_qoder_session, recover_page_load_error
 
 
+def _has_prior_credit(quota: dict[str, Any] | None) -> bool:
+    # A fresh Free/Community account has never been granted a credit bucket:
+    # quotaLimit == 0. Any positive limit means credits were already issued
+    # (even if now 0 remaining / exhausted), so it must NOT be re-injected.
+    if not quota:
+        return False
+    try:
+        return float(quota.get("quotaLimit") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def write_failed_accounts(
     failures: list[dict[str, Any]],
     password_by_email: dict[str, str],
@@ -182,13 +194,6 @@ async def process_one(
             except Exception as exc:
                 prog.log(f"exchange failed (PAT still saved): {exc}", "WAIT", email=label)
 
-        inject_info: dict[str, Any]
-        if do_inject and cfg.dudul_inject:
-            inject_info = await dudul_inject(page, pat, cfg, prog, label)
-        else:
-            inject_info = {"ok": False, "skipped": True, "reason": "inject disabled"}
-        result["inject"] = inject_info
-
         if sot and not result.get("quota"):
             prog.step(label, "quota", "fetch usage")
             try:
@@ -197,12 +202,27 @@ async def process_one(
                 if quota:
                     prog.log(
                         f"quota remaining={quota.get('quotaRemaining')} "
-                        f"plan={quota.get('plan')}",
+                        f"limit={quota.get('quotaLimit')} plan={quota.get('plan')}",
                         "INFO",
                         email=label,
                     )
             except Exception as exc:
                 prog.log(f"quota fetch err: {exc}", "DBG", email=label)
+
+        inject_info: dict[str, Any]
+        if not (do_inject and cfg.dudul_inject):
+            inject_info = {"ok": False, "skipped": True, "reason": "inject disabled"}
+        elif cfg.inject_only_free and _has_prior_credit(result.get("quota")):
+            q = result.get("quota") or {}
+            reason = (
+                f"has prior credit (limit={q.get('quotaLimit')} "
+                f"remaining={q.get('quotaRemaining')} plan={q.get('plan')})"
+            )
+            prog.log(f"inject skipped — {reason}", "WAIT", email=label)
+            inject_info = {"ok": False, "skipped": True, "reason": reason}
+        else:
+            inject_info = await dudul_inject(page, pat, cfg, prog, label)
+        result["inject"] = inject_info
 
         result["ok"] = True
         result["authMethod"] = "gsuite"
