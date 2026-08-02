@@ -7,40 +7,23 @@ from typing import Any
 
 from .browser import close_session, launch_camoufox
 from .config import Config, load_config
+from .eligibility import inject_eligibility
 from .inject import dudul_inject
 from .pat import exchange_pat, fetch_quota
 from .progress import Progress
 
 
-def _has_prior_credit(quota: dict[str, Any] | None) -> bool:
-    if not quota:
-        return False
-    try:
-        return float(quota.get("quotaLimit") or 0) > 0
-    except (TypeError, ValueError):
-        return False
-
-
-async def _prior_credit_reason(pat: str, cfg: Config, prog: Progress, display: str) -> str | None:
-    # inject-only receives a PAT directly; exchange it to read the account's quota
-    # so we can honor inject_only_free (skip accounts that already hold a credit
-    # bucket, even exhausted). On any failure, do NOT block (return None).
+async def _inject_eligibility_reason(pat: str, cfg: Config, prog: Progress, display: str) -> str | None:
     try:
         exchanged = await exchange_pat(pat, cfg)
         sot = exchanged.get("securityOauthToken") or ""
         if not sot:
-            return None
+            return "quota unverifiable (PAT exchange returned no token)"
         quota = await fetch_quota(sot, cfg)
     except Exception as exc:
-        prog.log(f"quota precheck skipped: {exc}", "DBG", email=display, step="inject")
-        return None
-    if _has_prior_credit(quota):
-        q = quota or {}
-        return (
-            f"has prior credit (limit={q.get('quotaLimit')} "
-            f"remaining={q.get('quotaRemaining')} plan={q.get('plan')})"
-        )
-    return None
+        return f"quota unverifiable ({type(exc).__name__})"
+    eligible, reason = inject_eligibility(quota)
+    return None if eligible else reason
 
 
 def _mask_pat(pat: str) -> str:
@@ -132,18 +115,17 @@ async def run_inject_only(
         step="inject",
     )
 
-    if cfg.inject_only_free:
-        skip_reason = await _prior_credit_reason(pat, cfg, prog, display)
-        if skip_reason:
-            prog.log(f"inject skipped — {skip_reason}", "WAIT", email=display, step="inject")
-            return {
-                "ok": False,
-                "skipped": True,
-                "reason": skip_reason,
-                "email": email or None,
-                "label": label or None,
-                "mode": "inject_only",
-            }
+    skip_reason = await _inject_eligibility_reason(pat, cfg, prog, display)
+    if skip_reason:
+        prog.log(f"inject skipped — {skip_reason}", "WAIT", email=display, step="inject")
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": skip_reason,
+            "email": email or None,
+            "label": label or None,
+            "mode": "inject_only",
+        }
 
     session = reuse_session
     close_owned = False

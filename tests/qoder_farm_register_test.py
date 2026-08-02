@@ -6,7 +6,7 @@ import unittest
 
 from qoder_farm.captcha import detect_gap_offset
 from qoder_farm.email_signup import generate_email
-from qoder_farm.farm import _has_prior_credit
+from qoder_farm.eligibility import inject_eligibility
 from qoder_farm.imap import extract_code, matches_target
 
 try:
@@ -73,18 +73,53 @@ class OtpExtractTest(unittest.TestCase):
         self.assertEqual(extract_code("hi", body), "654321")
 
 
-class InjectGateTest(unittest.TestCase):
-    def test_fresh_account_has_no_prior_credit(self) -> None:
-        self.assertFalse(_has_prior_credit({"quotaLimit": 0, "quotaRemaining": 0}))
+class InjectEligibilityTest(unittest.TestCase):
+    def test_fresh_community_account_is_eligible(self) -> None:
+        self.assertEqual(
+            inject_eligibility({"quotaLimit": 0, "quotaRemaining": 0, "plan": "Community"}),
+            (True, "fresh free account"),
+        )
 
-    def test_exhausted_bucket_counts_as_prior_credit(self) -> None:
-        self.assertTrue(_has_prior_credit({"quotaLimit": 300, "quotaRemaining": 0}))
+    def test_exhausted_credit_bucket_is_ineligible(self) -> None:
+        eligible, reason = inject_eligibility(
+            {"quotaLimit": 300, "quotaRemaining": 0, "plan": "Community"}
+        )
+        self.assertFalse(eligible)
+        self.assertIn("prior credit bucket", reason)
 
-    def test_active_bucket_counts_as_prior_credit(self) -> None:
-        self.assertTrue(_has_prior_credit({"quotaLimit": 300, "quotaRemaining": 150}))
+    def test_active_credit_bucket_is_ineligible(self) -> None:
+        self.assertFalse(
+            inject_eligibility({"quotaLimit": 300, "quotaRemaining": 150, "plan": "Community"})[0]
+        )
 
-    def test_missing_quota_is_not_prior_credit(self) -> None:
-        self.assertFalse(_has_prior_credit(None))
+    def test_pro_trial_is_ineligible_even_with_zero_limit(self) -> None:
+        eligible, reason = inject_eligibility(
+            {"quotaLimit": 0, "quotaRemaining": 0, "plan": "Pro Trial"}
+        )
+        self.assertFalse(eligible)
+        self.assertIn("plan", reason)
+
+    def test_missing_quota_is_fail_closed(self) -> None:
+        eligible, reason = inject_eligibility(None)
+        self.assertFalse(eligible)
+        self.assertIn("unverifiable", reason)
+
+    def test_incomplete_quota_is_fail_closed(self) -> None:
+        eligible, reason = inject_eligibility({"plan": "Community"})
+        self.assertFalse(eligible)
+        self.assertIn("unverifiable", reason)
+
+    def test_missing_plan_is_fail_closed(self) -> None:
+        eligible, reason = inject_eligibility({"quotaLimit": 0, "quotaRemaining": 0})
+        self.assertFalse(eligible)
+        self.assertIn("unverifiable", reason)
+
+    def test_unparseable_quota_limit_is_fail_closed(self) -> None:
+        eligible, reason = inject_eligibility(
+            {"quotaLimit": "unknown", "quotaRemaining": 0, "plan": "Community"}
+        )
+        self.assertFalse(eligible)
+        self.assertIn("unverifiable", reason)
 
 
 class MatchesTargetTest(unittest.TestCase):

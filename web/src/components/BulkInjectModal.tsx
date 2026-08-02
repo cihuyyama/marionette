@@ -52,7 +52,6 @@ export function BulkInjectModal({
     setLoading(true);
     try {
       const res = await startBulkInjectJob({
-        onlyNoCredit: true,
         includeInactive: false,
         headless,
         refresh,

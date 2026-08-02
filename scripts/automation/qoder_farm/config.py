@@ -78,10 +78,6 @@ class Config:
     debug: bool
     json_progress: bool
 
-    # Only inject accounts that have NO prior credit bucket (quotaLimit == 0).
-    # Accounts that already got credits (even if 0 remaining/exhausted) are skipped.
-    inject_only_free: bool = True
-
     # IMAP for email-signup (register) mode. Empty in GSuite/SSO mode.
     imap_host: str = ""
     imap_port: int = 993
@@ -141,7 +137,6 @@ def load_config() -> Config:
         inject_max_attempts=_env_int("QODER_INJECT_MAX_ATTEMPTS", 8),
         inject_backoff=_env_float_list("QODER_INJECT_BACKOFF", "2,2,2,2,2,2,2"),
         inject_total_budget_s=_env_int("QODER_INJECT_TOTAL_BUDGET_S", 300),
-        inject_only_free=_env_bool("QODER_INJECT_ONLY_FREE", True),
         output=out,
         screenshot_dir=shots,
         ui=(_env("QODER_UI", "log") or "log").lower(),

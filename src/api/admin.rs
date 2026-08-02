@@ -466,11 +466,27 @@ pub struct BulkInjectBody {
     pub include_inactive: Option<bool>,
     pub headless: Option<bool>,
     pub refresh: Option<bool>,
-    pub only_no_credit: Option<bool>,
+}
+
+fn is_free_qoder_plan(plan: &str) -> bool {
+    matches!(
+        plan.trim().to_ascii_lowercase().as_str(),
+        "community" | "free" | "free plan" | "personal_standard" | "standard"
+    )
 }
 
 fn qoder_needs_inject_credit(acc: &Account) -> bool {
-    acc.quota_limit <= 0 || acc.quota_remaining <= 0
+    if acc.quota_limit != 0 {
+        return false;
+    }
+
+    let Ok(data) = serde_json::from_str::<Value>(&acc.data) else {
+        return false;
+    };
+    let Some(plan) = data.get("plan").and_then(Value::as_str) else {
+        return false;
+    };
+    is_free_qoder_plan(plan)
 }
 
 pub async fn inject_bulk(
@@ -484,10 +500,8 @@ pub async fn inject_bulk(
         include_inactive: None,
         headless: None,
         refresh: None,
-        only_no_credit: None,
     });
     let include_inactive = body.include_inactive.unwrap_or(false);
-    let only_no_credit = body.only_no_credit.unwrap_or(true);
     let headless = body.headless.or(q.headless).unwrap_or(true);
     let do_refresh = body.refresh.or(q.refresh).unwrap_or(true);
 
@@ -510,7 +524,7 @@ pub async fn inject_bulk(
             skipped_inactive += 1;
             continue;
         }
-        if only_no_credit && !qoder_needs_inject_credit(&acc) {
+        if !qoder_needs_inject_credit(&acc) {
             skipped_has_credit += 1;
             continue;
         }
@@ -537,7 +551,6 @@ pub async fn inject_bulk(
         total,
         headless,
         refresh = do_refresh,
-        only_no_credit,
         skipped_no_pat,
         skipped_inactive,
         skipped_has_credit,
@@ -550,7 +563,6 @@ pub async fn inject_bulk(
         .await?;
     if let Some(obj) = out.as_object_mut() {
         obj.insert("total".into(), json!(total));
-        obj.insert("only_no_credit".into(), json!(only_no_credit));
         obj.insert("skipped_no_pat".into(), json!(skipped_no_pat));
         obj.insert("skipped_inactive".into(), json!(skipped_inactive));
         obj.insert("skipped_has_credit".into(), json!(skipped_has_credit));
@@ -1256,4 +1268,49 @@ pub async fn refresh_cancel(
     _auth: AdminAuth,
 ) -> AppResult<Json<Value>> {
     Ok(Json(state.refresh.cancel().await?))
+}
+
+#[cfg(test)]
+mod inject_eligibility_tests {
+    use super::*;
+
+    fn qoder_account(quota_limit: i64, quota_remaining: i64, data: &str) -> Account {
+        Account {
+            id: "test".into(),
+            provider: "qoder".into(),
+            email: None,
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: data.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            quota_limit,
+            quota_remaining,
+        }
+    }
+
+    #[test]
+    fn fresh_community_account_is_eligible_for_bulk_inject() {
+        assert!(qoder_needs_inject_credit(&qoder_account(0, 0, r#"{"plan":"Community"}"#)));
+    }
+
+    #[test]
+    fn exhausted_credit_bucket_is_not_eligible_for_bulk_inject() {
+        assert!(!qoder_needs_inject_credit(&qoder_account(300, 0, r#"{"plan":"Community"}"#)));
+    }
+
+    #[test]
+    fn pro_trial_is_not_eligible_even_when_limit_is_zero() {
+        assert!(!qoder_needs_inject_credit(&qoder_account(0, 0, r#"{"plan":"Pro Trial"}"#)));
+    }
+
+    #[test]
+    fn missing_or_invalid_plan_is_not_eligible_for_bulk_inject() {
+        assert!(!qoder_needs_inject_credit(&qoder_account(0, 0, r#"{}"#)));
+        assert!(!qoder_needs_inject_credit(&qoder_account(0, 0, "not json")));
+    }
 }

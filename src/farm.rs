@@ -119,8 +119,6 @@ pub struct StartFarmRequest {
     pub imap_pass: Option<String>,
     #[serde(default)]
     pub captcha_mode: Option<String>,
-    #[serde(default)]
-    pub inject_only_free: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1205,12 +1203,6 @@ impl FarmManager {
             {
                 cmd.env("QODER_CAPTCHA_MODE", mode);
             }
-            if let Some(only_free) = req.inject_only_free {
-                cmd.env(
-                    "QODER_INJECT_ONLY_FREE",
-                    if only_free { "true" } else { "false" },
-                );
-            }
         }
         if !is_grok {
             if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
@@ -1944,7 +1936,6 @@ impl FarmManager {
             imap_user: None,
             imap_pass: None,
             captcha_mode: None,
-            inject_only_free: None,
         };
         let mut out = self.start(req, pool).await?;
         if let Some(obj) = out.as_object_mut() {

@@ -8,6 +8,7 @@ from typing import Any
 
 from .browser import close_session, launch_camoufox
 from .config import Config
+from .eligibility import inject_eligibility
 from .export import write_backup, write_failures
 from .google_sso import (
     click_qoder_google_button,
@@ -23,18 +24,6 @@ from .pat import (
 )
 from .progress import Progress, mask_email
 from .session import ensure_qoder_session, recover_page_load_error
-
-
-def _has_prior_credit(quota: dict[str, Any] | None) -> bool:
-    # A fresh Free/Community account has never been granted a credit bucket:
-    # quotaLimit == 0. Any positive limit means credits were already issued
-    # (even if now 0 remaining / exhausted), so it must NOT be re-injected.
-    if not quota:
-        return False
-    try:
-        return float(quota.get("quotaLimit") or 0) > 0
-    except (TypeError, ValueError):
-        return False
 
 
 def write_failed_accounts(
@@ -212,16 +201,13 @@ async def process_one(
         inject_info: dict[str, Any]
         if not (do_inject and cfg.dudul_inject):
             inject_info = {"ok": False, "skipped": True, "reason": "inject disabled"}
-        elif cfg.inject_only_free and _has_prior_credit(result.get("quota")):
-            q = result.get("quota") or {}
-            reason = (
-                f"has prior credit (limit={q.get('quotaLimit')} "
-                f"remaining={q.get('quotaRemaining')} plan={q.get('plan')})"
-            )
-            prog.log(f"inject skipped — {reason}", "WAIT", email=label)
-            inject_info = {"ok": False, "skipped": True, "reason": reason}
         else:
-            inject_info = await dudul_inject(page, pat, cfg, prog, label)
+            eligible, reason = inject_eligibility(result.get("quota"))
+            if not eligible:
+                prog.log(f"inject skipped — {reason}", "WAIT", email=label)
+                inject_info = {"ok": False, "skipped": True, "reason": reason}
+            else:
+                inject_info = await dudul_inject(page, pat, cfg, prog, label)
         result["inject"] = inject_info
 
         result["ok"] = True

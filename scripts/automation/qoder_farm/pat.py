@@ -186,11 +186,17 @@ async def fetch_quota(oauth_token: str, cfg: Config) -> dict[str, Any] | None:
             return None
         quota_data = await resp.json()
         resp2 = await http.get(cfg.plan_url, headers=headers)
-        plan_data = await resp2.json() if resp2.status == 200 else {}
+        if resp2.status != 200:
+            return None
+        plan_data = await resp2.json()
     user_quota = quota_data.get("userQuota") or {}
+    if not isinstance(user_quota, dict) or "total" not in user_quota or "remaining" not in user_quota:
+        return None
+    if not isinstance(plan_data, dict) or "plan_tier_name" not in plan_data:
+        return None
     return {
         "quotaLimit": user_quota.get("total", 0),
         "quotaRemaining": user_quota.get("remaining", 0),
-        "plan": plan_data.get("plan_tier_name", "Community"),
+        "plan": plan_data.get("plan_tier_name"),
         "isQuotaExceeded": quota_data.get("isQuotaExceeded", False),
     }

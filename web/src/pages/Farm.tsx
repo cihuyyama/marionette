@@ -1286,7 +1286,6 @@ function QoderRegisterFarm() {
   const [headless, setHeadless] = useState(preset.headless);
   const [autoImport, setAutoImport] = useState(preset.autoImport);
   const [inject, setInject] = useState(preset.inject);
-  const [injectOnlyFree, setInjectOnlyFree] = useState(preset.injectOnlyFree);
   const [captchaMode, setCaptchaMode] = useState(preset.captchaMode);
   const [concurrency, setConcurrency] = useState(preset.concurrency);
   const [savePasswords, setSavePasswords] = useState(preset.savePasswords);
@@ -1311,7 +1310,6 @@ function QoderRegisterFarm() {
       headless,
       autoImport,
       inject,
-      injectOnlyFree,
       captchaMode,
       domain,
       gmailBase,
@@ -1328,7 +1326,6 @@ function QoderRegisterFarm() {
     headless,
     autoImport,
     inject,
-    injectOnlyFree,
     captchaMode,
     domain,
     gmailBase,
@@ -1433,7 +1430,6 @@ function QoderRegisterFarm() {
         headless,
         auto_import: autoImport,
         inject,
-        inject_only_free: injectOnlyFree,
         captcha_mode: captchaMode,
         concurrency: workers,
         ...(method === "imap"
@@ -1639,15 +1635,6 @@ function QoderRegisterFarm() {
             <label className="checkbox-label" title="Run dudul inject after PAT (needs QODER_DUDUL_ACCESS_KEY on the server)">
               <input type="checkbox" checked={inject} onChange={(e) => setInject(e.target.checked)} />
               dudul inject
-            </label>
-            <label className="checkbox-label" title="Only inject accounts that never held a credit bucket (skip exhausted 0/300)">
-              <input
-                type="checkbox"
-                checked={injectOnlyFree}
-                disabled={!inject}
-                onChange={(e) => setInjectOnlyFree(e.target.checked)}
-              />
-              Inject only credit-less
             </label>
             <label className="checkbox-label" title="Store the account + IMAP passwords in this browser so you don't retype them">
               <input type="checkbox" checked={savePasswords} onChange={(e) => setSavePasswords(e.target.checked)} />

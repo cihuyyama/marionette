@@ -367,7 +367,6 @@ export function startInjectJob(
 
 export type BulkInjectStartResult = InjectStartResult & {
   total?: number;
-  only_no_credit?: boolean;
   skipped_no_pat?: number;
   skipped_inactive?: number;
   skipped_has_credit?: number;
@@ -377,7 +376,6 @@ export function startBulkInjectJob(
   opts?: {
     accountIds?: string[];
     includeInactive?: boolean;
-    onlyNoCredit?: boolean;
     headless?: boolean;
     refresh?: boolean;
   },
@@ -391,7 +389,6 @@ export function startBulkInjectJob(
       body: JSON.stringify({
         account_ids: opts?.accountIds,
         include_inactive: opts?.includeInactive ?? false,
-        only_no_credit: opts?.onlyNoCredit ?? true,
         headless: opts?.headless ?? true,
         refresh: opts?.refresh ?? true,
       }),
@@ -784,7 +781,6 @@ export function startFarmJob(
     imap_user?: string;
     imap_pass?: string;
     captcha_mode?: string;
-    inject_only_free?: boolean;
   },
   settings?: Settings,
 ) {
@@ -989,4 +985,3 @@ export function updateProxySettings(
     settings,
   );
 }
-

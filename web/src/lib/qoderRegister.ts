@@ -10,7 +10,6 @@ export type QoderRegisterPreset = {
   headless: boolean;
   autoImport: boolean;
   inject: boolean;
-  injectOnlyFree: boolean;
   captchaMode: QoderCaptchaMode;
   domain: string;
   gmailBase: string;
@@ -28,7 +27,6 @@ export const QODER_REGISTER_DEFAULTS: QoderRegisterPreset = {
   headless: false,
   autoImport: true,
   inject: false,
-  injectOnlyFree: true,
   captchaMode: "auto",
   domain: "",
   gmailBase: "",
@@ -55,7 +53,6 @@ export function loadQoderRegisterPreset(): QoderRegisterPreset {
       headless: p.headless ?? QODER_REGISTER_DEFAULTS.headless,
       autoImport: p.autoImport ?? QODER_REGISTER_DEFAULTS.autoImport,
       inject: p.inject ?? QODER_REGISTER_DEFAULTS.inject,
-      injectOnlyFree: p.injectOnlyFree ?? QODER_REGISTER_DEFAULTS.injectOnlyFree,
       captchaMode: isCaptchaMode(p.captchaMode) ? p.captchaMode : QODER_REGISTER_DEFAULTS.captchaMode,
       domain: p.domain ?? "",
       gmailBase: p.gmailBase ?? "",
@@ -78,7 +75,6 @@ export function saveQoderRegisterPreset(p: QoderRegisterPreset): void {
     headless: p.headless,
     autoImport: p.autoImport,
     inject: p.inject,
-    injectOnlyFree: p.injectOnlyFree,
     captchaMode: p.captchaMode,
     domain: p.domain.trim(),
     gmailBase: p.gmailBase.trim(),
