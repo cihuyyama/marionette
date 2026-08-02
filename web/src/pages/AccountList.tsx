@@ -4,6 +4,7 @@ import {
   ApiError,
   claimProTrial,
   deleteAccount,
+  grokBilling,
   listAccounts,
   patchAccount,
   refreshAccount,
@@ -682,6 +683,26 @@ export function AccountList() {
                         >
                           Auth
                         </button>
+                        {provider === "grok-cli" && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Fetch live credit/billing config from grok (refreshes auth first)"
+                            onClick={() =>
+                              void withBusy(
+                                a.id,
+                                async () => {
+                                  const res = await grokBilling(a.id);
+                                  setMessage(fmtGrokBilling(res));
+                                },
+                                undefined,
+                              )
+                            }
+                          >
+                            Credits
+                          </button>
+                        )}
                         {provider === "qoder" && (
                           <>
                             <button
@@ -1055,6 +1076,23 @@ export function AccountList() {
       )}
     </div>
   );
+}
+
+function fmtGrokBilling(res: import("../lib/api").GrokBilling): string {
+  const b = res.billing ?? {};
+  const used = b.used?.val;
+  const limit = b.monthlyLimit?.val;
+  const cap = b.onDemandCap?.val;
+  const who = res.email || res.id.slice(0, 8);
+  const parts: string[] = [];
+  if (typeof used === "number") parts.push(`used ${used}`);
+  if (typeof limit === "number") parts.push(`limit ${limit}`);
+  if (typeof cap === "number") parts.push(`onDemandCap ${cap}`);
+  const period =
+    b.billingPeriodStart && b.billingPeriodEnd
+      ? ` · ${b.billingPeriodStart.slice(0, 10)}→${b.billingPeriodEnd.slice(0, 10)}`
+      : "";
+  return `${who}: ${parts.length ? parts.join(" · ") : "no meter"}${period}`;
 }
 
 function fmtAccountCredit(a: Account): string {

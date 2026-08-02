@@ -210,6 +210,27 @@ export function refreshAccount(id: string, settings?: Settings) {
   );
 }
 
+export type GrokBilling = {
+  id: string;
+  email?: string | null;
+  billing: {
+    used?: { val?: number };
+    monthlyLimit?: { val?: number };
+    onDemandCap?: { val?: number };
+    billingPeriodStart?: string;
+    billingPeriodEnd?: string;
+    [k: string]: unknown;
+  };
+};
+
+export function grokBilling(id: string, settings?: Settings) {
+  return request<GrokBilling>(
+    `/admin/accounts/${encodeURIComponent(id)}/grok-billing`,
+    { method: "GET", auth: "admin" },
+    settings,
+  );
+}
+
 export type RefreshJob = {
   id: string;
   provider: string;

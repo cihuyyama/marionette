@@ -403,6 +403,37 @@ pub async fn refresh_account(
     Ok(Json(json!(acc.to_public())))
 }
 
+pub async fn grok_billing(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut acc = db::get_account(&state.pool, &id).await?;
+    if acc.provider != "grok-cli" {
+        return Err(AppError::BadRequest(
+            "grok billing is only for provider grok-cli".into(),
+        ));
+    }
+    state
+        .grok
+        .ensure_fresh_auth(&mut acc)
+        .await
+        .map_err(AppError::from)?;
+    acc.updated_at = db::now_rfc3339();
+    db::update_account(&state.pool, &acc).await?;
+
+    let billing = state
+        .grok
+        .fetch_billing(&acc)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(json!({
+        "id": acc.id,
+        "email": acc.email,
+        "billing": billing,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InjectQuery {
     pub headless: Option<bool>,

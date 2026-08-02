@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
+const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing";
 const USER_AGENT: &str = "grok-shell/0.2.114 (linux; x86_64)";
 const CLIENT_IDENTIFIER: &str = "grok-shell";
 const CLIENT_VERSION: &str = "0.2.114";
@@ -246,6 +247,42 @@ impl GrokCliProvider {
             images.truncate(cap);
         }
         Ok(images)
+    }
+
+    /// Fetch grok-cli account credit config from `GET /v1/billing`.
+    /// Fails closed: non-200 (e.g. expired token -> 401) is an error,
+    /// never a fabricated balance. Caller must `ensure_fresh_auth` first.
+    pub async fn fetch_billing(&self, account: &Account) -> Result<Value, ProviderError> {
+        let data = account.data_json();
+        let token = Self::access_token(&data)
+            .ok_or_else(|| ProviderError::AuthInvalid("missing accessToken".into()))?;
+
+        let resp = self
+            .client
+            .get(BILLING_URL)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .header("x-xai-token-auth", TOKEN_AUTH)
+            .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
+            .header("x-grok-client-version", CLIENT_VERSION)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        if status != 200 {
+            return Err(classify_http_status(status, &text));
+        }
+
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| ProviderError::Other(format!("billing json: {e}")))?;
+        let config = parsed.get("config").cloned().unwrap_or(parsed);
+        Ok(config)
     }
 }
 
