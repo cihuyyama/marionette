@@ -95,6 +95,10 @@ class Config:
     # auto-then-manual (solver tries, then hands off to human on failure).
     captcha_mode: str = "auto"
     captcha_manual_timeout: int = 180
+    # Max auto slide attempts before giving up one signup (F015-flagged IPs never pass).
+    captcha_max_attempts: int = 4
+    # Wall-clock budget per account attempt; abort fast on flagged proxies (0 = off).
+    register_account_budget_s: int = 240
 
     # Qoder endpoints (from etteeum)
     sign_up_url: str = "https://qoder.com/users/sign-up"
@@ -152,4 +156,6 @@ def load_config() -> Config:
         email_source=_env("QODER_EMAIL_SOURCE"),
         captcha_mode=(_env("QODER_CAPTCHA_MODE", "auto") or "auto").lower(),
         captcha_manual_timeout=_env_int("QODER_CAPTCHA_MANUAL_TIMEOUT", 180),
+        captcha_max_attempts=_env_int("QODER_CAPTCHA_MAX_ATTEMPTS", 4),
+        register_account_budget_s=_env_int("QODER_REGISTER_ACCOUNT_BUDGET_S", 240),
     )

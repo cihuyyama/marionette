@@ -97,7 +97,7 @@ async def register_one(
             await _screenshot(session["page"], cfg, email, "error")
         return result
     finally:
-        await close_session(session)
+        await asyncio.shield(close_session(session))
 
 
 async def run_register(
@@ -138,6 +138,7 @@ async def run_register(
             if delay_s > 0 and index > 0 and concurrency > 1:
                 await asyncio.sleep(delay_s * (index % concurrency))
             r: dict[str, Any] | None = None
+            budget = float(getattr(cfg, "register_account_budget_s", 0) or 0)
             for attempt in range(1, max_attempts + 1):
                 if attempt > 1:
                     prog.log(
@@ -146,7 +147,7 @@ async def run_register(
                         email=mask_email(email),
                     )
                     await asyncio.sleep(1.5 + 0.8 * (attempt - 1))
-                r = await register_one(
+                coro = register_one(
                     email,
                     password,
                     cfg,
@@ -156,6 +157,25 @@ async def run_register(
                     first=names.get(email, ("", ""))[0],
                     last=names.get(email, ("", ""))[1],
                 )
+                if budget > 0:
+                    try:
+                        r = await asyncio.wait_for(coro, timeout=budget)
+                    except asyncio.TimeoutError:
+                        r = {
+                            "ok": False,
+                            "email": email,
+                            "password": password,
+                            "personalToken": None,
+                            "authMethod": "email",
+                            "error": f"account budget {budget:.0f}s exceeded (flagged proxy?)",
+                        }
+                        prog.log(
+                            f"budget {budget:.0f}s exceeded — abort attempt, rotate proxy",
+                            "WARN",
+                            email=mask_email(email),
+                        )
+                else:
+                    r = await coro
                 if r.get("ok") and r.get("personalToken"):
                     prog.mark_ok(mask_email(email), "registered + PAT")
                     break

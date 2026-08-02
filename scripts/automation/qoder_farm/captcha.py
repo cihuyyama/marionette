@@ -547,9 +547,10 @@ async def handle_captcha(
 ) -> bool:
     mode = (getattr(cfg, "captcha_mode", "auto") or "auto").lower()
     manual_timeout = int(getattr(cfg, "captcha_manual_timeout", 180) or 180)
+    max_attempts = int(getattr(cfg, "captcha_max_attempts", 8) or 8)
     if mode == "manual":
         return await solve_manual(page, prog, email, manual_timeout)
-    solved = await solve_slide_captcha(page, prog, email)
+    solved = await solve_slide_captcha(page, prog, email, max_attempts=max_attempts)
     if solved:
         return True
     if mode == "auto-then-manual":
