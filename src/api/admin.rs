@@ -475,18 +475,20 @@ fn is_free_qoder_plan(plan: &str) -> bool {
     )
 }
 
+/// Bulk candidate gate only — final fail-closed policy is Python `inject_eligibility`.
+/// Pool rows almost never store `data.plan`; requiring it here emptied bulk (0/54).
 fn qoder_needs_inject_credit(acc: &Account) -> bool {
     if acc.quota_limit != 0 {
         return false;
     }
 
     let Ok(data) = serde_json::from_str::<Value>(&acc.data) else {
-        return false;
+        return true;
     };
-    let Some(plan) = data.get("plan").and_then(Value::as_str) else {
-        return false;
-    };
-    is_free_qoder_plan(plan)
+    match data.get("plan").and_then(Value::as_str) {
+        Some(plan) if !is_free_qoder_plan(plan) => false,
+        Some(_) | None => true,
+    }
 }
 
 pub async fn inject_bulk(
@@ -540,10 +542,11 @@ pub async fn inject_bulk(
     }
 
     if items.is_empty() {
-        return Err(AppError::BadRequest(
-            "no qoder accounts need inject (not-synced / zero credit + unmasked PAT; active by default)"
-                .into(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "no qoder accounts need inject (skipped_has_credit={skipped_has_credit}, \
+             skipped_no_pat={skipped_no_pat}, skipped_inactive={skipped_inactive}; \
+             need quota_limit=0 + unmasked PAT; non-free plan hard-skipped, missing plan ok for live check)"
+        )));
     }
 
     let total = items.len();
@@ -1309,8 +1312,14 @@ mod inject_eligibility_tests {
     }
 
     #[test]
-    fn missing_or_invalid_plan_is_not_eligible_for_bulk_inject() {
-        assert!(!qoder_needs_inject_credit(&qoder_account(0, 0, r#"{}"#)));
-        assert!(!qoder_needs_inject_credit(&qoder_account(0, 0, "not json")));
+    fn missing_plan_is_eligible_for_bulk_prefilter_live_check() {
+        assert!(qoder_needs_inject_credit(&qoder_account(0, 0, r#"{}"#)));
+        assert!(qoder_needs_inject_credit(&qoder_account(0, 0, "not json")));
+    }
+
+    #[test]
+    fn positive_quota_limit_is_not_eligible_even_without_plan() {
+        assert!(!qoder_needs_inject_credit(&qoder_account(300, 0, r#"{}"#)));
+        assert!(!qoder_needs_inject_credit(&qoder_account(1000, 50, r#"{"plan":"Community"}"#)));
     }
 }
