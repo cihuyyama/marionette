@@ -117,6 +117,10 @@ pub struct StartFarmRequest {
     pub imap_user: Option<String>,
     #[serde(default)]
     pub imap_pass: Option<String>,
+    #[serde(default)]
+    pub captcha_mode: Option<String>,
+    #[serde(default)]
+    pub inject_only_free: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1175,17 +1179,37 @@ impl FarmManager {
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONIOENCODING", "utf-8");
         if is_register_mode {
+            let imap_prefix = if is_grok { "GROK" } else { "QODER" };
             if let Some(pw) = default_pw {
-                cmd.env("GROK_PASSWORD", pw);
+                cmd.env(format!("{imap_prefix}_PASSWORD"), pw);
+                if !is_grok {
+                    cmd.env("QODER_REGISTER_PASSWORD", pw);
+                }
             }
             if let Some(h) = req.imap_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                cmd.env("GROK_IMAP_HOST", h);
+                cmd.env(format!("{imap_prefix}_IMAP_HOST"), h);
             }
             if let Some(u) = req.imap_user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                cmd.env("GROK_IMAP_USER", u);
+                cmd.env(format!("{imap_prefix}_IMAP_USER"), u);
             }
             if let Some(p) = req.imap_pass.as_deref().filter(|s| !s.trim().is_empty()) {
-                cmd.env("GROK_IMAP_PASS", p);
+                cmd.env(format!("{imap_prefix}_IMAP_PASS"), p);
+            }
+        }
+        if !is_grok {
+            if let Some(mode) = req
+                .captcha_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                cmd.env("QODER_CAPTCHA_MODE", mode);
+            }
+            if let Some(only_free) = req.inject_only_free {
+                cmd.env(
+                    "QODER_INJECT_ONLY_FREE",
+                    if only_free { "true" } else { "false" },
+                );
             }
         }
         if !is_grok {
@@ -1919,6 +1943,8 @@ impl FarmManager {
             imap_host: None,
             imap_user: None,
             imap_pass: None,
+            captcha_mode: None,
+            inject_only_free: None,
         };
         let mut out = self.start(req, pool).await?;
         if let Some(obj) = out.as_object_mut() {

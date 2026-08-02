@@ -783,6 +783,8 @@ export function startFarmJob(
     imap_host?: string;
     imap_user?: string;
     imap_pass?: string;
+    captcha_mode?: string;
+    inject_only_free?: boolean;
   },
   settings?: Settings,
 ) {

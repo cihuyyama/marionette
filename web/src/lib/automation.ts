@@ -34,6 +34,13 @@ export const AUTOMATION_PROVIDERS: AutomationProvider[] = [
         status: "ready",
       },
       {
+        id: "register",
+        label: "Register",
+        description:
+          "Signup new accounts: email + Aliyun slide captcha → IMAP OTP → PAT → optional inject → pool. Camoufox under scripts/automation/qoder_farm.",
+        status: "ready",
+      },
+      {
         id: "imap",
         label: "IMAP",
         description:
