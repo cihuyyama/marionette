@@ -2,3 +2,11 @@
 # One account per line. # comments ok.
 
 # user@your-gsuite.com|YourPassword
+
+# --- register mode (--mode register) ---
+# Create fresh accounts via email + IMAP OTP; no accounts file needed:
+#   python -m qoder_farm --mode register --count 5 \
+#     --email-source yourdomain.com --register-password 'Passw0rd!' --json-progress
+# Or re-drive signup for specific emails (email|password lines above) with:
+#   python -m qoder_farm --mode register -f accounts.txt
+# Requires QODER_IMAP_HOST/USER/PASS in .env to read the verification code.

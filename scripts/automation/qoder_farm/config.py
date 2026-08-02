@@ -78,7 +78,22 @@ class Config:
     debug: bool
     json_progress: bool
 
+    # IMAP for email-signup (register) mode. Empty in GSuite/SSO mode.
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_pass: str = ""
+    register_password: str = ""
+    # email_source: catch-all "domain.com" (random local part) or gmail base
+    # "you@gmail.com" (plus-tags). Empty => provided per-account emails.
+    email_source: str = ""
+    # captcha_mode: auto (solver only), manual (human solves in the window),
+    # auto-then-manual (solver tries, then hands off to human on failure).
+    captcha_mode: str = "auto"
+    captcha_manual_timeout: int = 180
+
     # Qoder endpoints (from etteeum)
+    sign_up_url: str = "https://qoder.com/users/sign-up"
     sign_in_url: str = "https://qoder.com/users/sign-in"
     integrations_url: str = "https://qoder.com/account/integrations"
     device_auth_base: str = "https://qoder.com/device/selectAccounts"
@@ -87,6 +102,10 @@ class Config:
     pat_exchange_url: str = "https://openapi.qoder.sh/api/v1/jobToken/exchange"
     quota_url: str = "https://openapi.qoder.sh/api/v2/quota/usage"
     plan_url: str = "https://openapi.qoder.sh/api/v2/user/plan"
+
+    @property
+    def imap_configured(self) -> bool:
+        return bool(self.imap_host and self.imap_user and self.imap_pass)
 
 
 def load_config() -> Config:
@@ -119,4 +138,13 @@ def load_config() -> Config:
         ui=(_env("QODER_UI", "log") or "log").lower(),
         debug=_env_bool("QODER_DEBUG", False),
         json_progress=_env_bool("QODER_JSON_PROGRESS", False),
+        imap_host=_env("QODER_IMAP_HOST"),
+        imap_port=_env_int("QODER_IMAP_PORT", 993),
+        imap_user=_env("QODER_IMAP_USER"),
+        # Gmail App Passwords display as "abcd efgh ijkl mnop" but IMAP LOGIN rejects spaces.
+        imap_pass=_env("QODER_IMAP_PASS").replace(" ", ""),
+        register_password=_env("QODER_REGISTER_PASSWORD") or _env("QODER_PASSWORD"),
+        email_source=_env("QODER_EMAIL_SOURCE"),
+        captcha_mode=(_env("QODER_CAPTCHA_MODE", "auto") or "auto").lower(),
+        captcha_manual_timeout=_env_int("QODER_CAPTCHA_MANUAL_TIMEOUT", 180),
     )

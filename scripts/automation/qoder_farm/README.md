@@ -21,6 +21,32 @@ GSuite email|password
   -> job end: final re-import of full output (idempotent upsert)
 ```
 
+## Register mode (email + IMAP OTP)
+
+Create fresh accounts without Google SSO:
+
+```
+--count N + --email-source
+  -> Camoufox -> qoder.com/users/sign-up
+  -> name + email + agree -> Continue
+  -> password -> Continue
+  -> Aliyun slide-puzzle captcha (Python gap-detect + humanized drag)
+  -> email verification code via IMAP
+  -> same session gate -> PAT -> exchange -> save
+```
+
+```powershell
+# random local part on a catch-all domain
+python -m qoder_farm --mode register --count 5 `
+  --email-source yourdomain.com --register-password 'Passw0rd!' --json-progress
+# or gmail plus-tags (me+xxxx@gmail.com)
+python -m qoder_farm --mode register --count 5 --email-source me@gmail.com
+```
+
+Requires IMAP env (`QODER_IMAP_HOST/USER/PASS`) to read the OTP, and
+`Pillow`+`numpy` for the slide-puzzle solver. The dashboard passes
+`register:COUNT:SOURCE` as the accounts text (auto-detected).
+
 
 ## Dashboard
 

@@ -31,6 +31,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--mode",
+        choices=("sso", "register"),
+        default="sso",
+        help="sso (default): GSuite/GitHub login. register: create accounts via email+IMAP OTP.",
+    )
+    p.add_argument(
+        "--count",
+        type=int,
+        default=0,
+        help="register mode: number of accounts to create (needs --email-source)",
+    )
+    p.add_argument(
+        "--email-source",
+        default=None,
+        help='register mode: catch-all "domain.com" or gmail base "you@gmail.com" (plus-tags)',
+    )
+    p.add_argument(
+        "--register-password",
+        default=None,
+        help="register mode: password for created accounts (default env QODER_REGISTER_PASSWORD)",
+    )
+    p.add_argument(
+        "--captcha-mode",
+        choices=["auto", "manual", "auto-then-manual"],
+        default=None,
+        help="register mode: auto solver, manual (human solves), or auto-then-manual fallback",
+    )
+    p.add_argument(
         "--pat",
         default=None,
         help="PAT for --inject-only mode (pt-…)",
@@ -184,8 +212,29 @@ def main(argv: list[str] | None = None) -> int:
         overrides["json_progress"] = True
     if args.proxy_file:
         overrides["proxy_file"] = str(args.proxy_file)
+    if args.email_source:
+        overrides["email_source"] = args.email_source
+    if args.register_password:
+        overrides["register_password"] = args.register_password
+    if args.captcha_mode:
+        overrides["captcha_mode"] = args.captcha_mode
     if overrides:
         cfg = replace(cfg, **overrides)
+
+    register_count = int(args.count or 0)
+    register_mode = args.mode == "register"
+    # Dashboard passes accounts text "register:COUNT:SOURCE"; auto-detect it.
+    raw_first = (list(args.accounts or []) + [""])[0]
+    if raw_first.startswith("register:"):
+        parts = raw_first.split(":")
+        register_mode = True
+        if len(parts) >= 2 and parts[1].isdigit():
+            register_count = int(parts[1])
+        if len(parts) >= 3 and parts[2]:
+            cfg = replace(cfg, email_source=parts[2])
+
+    if register_mode:
+        return _run_register_mode(args, cfg, register_count)
 
     accounts = load_accounts(args.file, list(args.accounts or []))
     if not accounts:
@@ -248,6 +297,60 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = sum(1 for r in results if not r.get("ok"))
     return 0 if failed == 0 else 1
+
+
+def _run_register_mode(args, cfg, count: int) -> int:
+    from .register import run_register
+
+    accounts = load_accounts(args.file, [
+        a for a in (args.accounts or []) if not a.startswith("register:")
+    ])
+    if count <= 0 and not accounts:
+        print(
+            "register mode needs --count N with --email-source, or -f accounts.txt "
+            "(email|password lines to re-drive signup).",
+            file=sys.stderr,
+        )
+        return 2
+    if count > 0 and not cfg.email_source:
+        print("register --count needs --email-source (domain or gmail base)", file=sys.stderr)
+        return 2
+    if not cfg.imap_configured:
+        print(
+            "register mode needs IMAP (QODER_IMAP_HOST/USER/PASS) to read the OTP.",
+            file=sys.stderr,
+        )
+        return 2
+
+    prog = Progress(
+        ui=cfg.ui,
+        debug=cfg.debug,
+        json_progress=cfg.json_progress,
+        total=count or len(accounts),
+    )
+    prog.log(
+        f"mode=register count={count} source={cfg.email_source or '(file)'} "
+        f"concurrency={args.concurrency} out={cfg.output}",
+        "INFO",
+        step="start",
+    )
+    results = asyncio.run(
+        run_register(
+            accounts,
+            cfg,
+            prog,
+            count=count,
+            do_device_auth=bool(args.device_auth),
+            skip_exchange=bool(args.skip_exchange),
+            concurrency=max(1, int(args.concurrency)),
+            account_retries=max(1, int(args.account_retries or 1)),
+            account_delay=max(0.0, float(args.account_delay or 0.0)),
+        )
+    )
+    ok = [r for r in results if r.get("ok") and r.get("personalToken")]
+    if ok:
+        print(f"Registered {len(ok)} account(s) -> {cfg.output}")
+    return 0 if all(r.get("ok") for r in results) and results else (0 if ok else 1)
 
 
 if __name__ == "__main__":
