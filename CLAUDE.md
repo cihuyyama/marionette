@@ -210,6 +210,14 @@ Dashboard (`web/src/lib/settings.ts`):
 | PATCH | `/admin/accounts/{id}` | admin |
 | DELETE | `/admin/accounts/{id}` | admin |
 | POST | `/admin/accounts/{id}/refresh` | admin |
+| GET | `/admin/combos` | admin (list combos + targets) |
+| POST | `/admin/combos` | admin (create; body `{slug,name,targets[]}`) |
+| GET | `/admin/combos/{slug}` | admin |
+| PATCH | `/admin/combos/{slug}` | admin (name / is_active; slug immutable) |
+| PUT | `/admin/combos/{slug}/targets` | admin (replace ordered targets) |
+| DELETE | `/admin/combos/{slug}` | admin |
+
+Combo routes use `{slug}` (axum path params don't span `/`); server reconstructs `combo/{slug}` via `combo_id_from_slug`.
 
 Body limit: **32 MiB** (`main.rs` `DefaultBodyLimit`) for large 9Router backups.
 
@@ -227,6 +235,7 @@ Error JSON shape:
 
 - starts with `gcli/` **or** `grok` **or** contains `grok` → `"grok-cli"`
 - starts with `qd/` **or** `qoder` → `"qoder"`
+- starts with `combo/` → virtual combo (no direct provider; `provider_id_for_model` returns None)
 - else → unknown model (400)
 
 `upstream_model()`: strip first `prefix/` if present.
@@ -237,11 +246,25 @@ Error JSON shape:
 
 **Qoder:** `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/lite`, `qd/qmodel_preview` (Qwen3.8-Max-Preview), `qd/qmodel_latest`, `qd/qmodel1`, `qd/kmodel_latest` (Kimi-K3), `qd/kmodel1` (Kimi-K2.7-Code), `qd/gm51model1` (GLM-5.2), `qd/dmodel1`, `qd/dfmodel1`, `qd/mmodel` (MiniMax-M3) — one listed id per live upstream; legacy aliases (`qmodel`, `kmodel`, `gm51model`, …) still route in `model_cfg`
 
+**Combos:** `combo/<slug>` virtual chat models are admin-created (not in `default_models()`); active ones are merged into `/v1/models` + `/admin/models` at request time (`models.rs::models_payload`, `owned_by="combo"`). Targets must be canonical concrete chat catalog ids — no aliases, no `combo/*`, no image-only `*imagine-image*`.
+
 OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_tool_calls` and message `tool_calls` / `tool_call_id`.
 
 ---
 
 ## 10. Pool flow (`src/pool.rs::handle_chat`)
+
+`handle_chat` first dispatches: `combo/*` model → `handle_combo_chat`; otherwise → `handle_concrete_chat` (the per-account loop below).
+
+### Combo dispatch (`handle_combo_chat`)
+
+1. Load combo by slug; 404 if missing/inactive.
+2. Iterate **active targets in order**; each runs `handle_concrete_chat(state, req_retargeted, suppress_error_log=true)`.
+3. Advance to next target on any pre-response failure **except** `BadRequest` / `NotImplemented` / `Unauthorized` / `Forbidden` (client/config errors stop the chain) — predicate `should_fallback_to_next_target`.
+4. No mid-stream fallback: once `ChatOutcome::Stream`/`Json` returns, the target is committed.
+5. On exhaustion: write **one** combo error log (`provider="combo"`, no token/quota usage), with `attempt_trace` JSON of every target tried. `request_logs` records `requested_model=combo/<slug>`, `combo_id`, `fallback_count`.
+
+### Concrete flow (`handle_concrete_chat`)
 
 1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok` or `qoder`).
 2. Loop **up to 8** picks: `db::pick_account(pool, provider_id, &tried)`.
@@ -341,7 +364,9 @@ Tables:
 |-------|---------|
 | `accounts` | id, provider, email, name, is_active, priority, data (JSON), cooldown_until, last_error, last_used_at, timestamps, **quota_limit**, **quota_remaining** |
 | `api_keys` | hashed pool keys |
-| `request_logs` | activity / usage / credits |
+| `request_logs` | activity / usage / credits; **combo cols** `requested_model`, `combo_id`, `fallback_count`, `attempt_trace` (additive nullable, via `migrate_request_log_combo_columns`) |
+| `model_combos` | `id` (`combo/<slug>`), `name`, `is_active`, timestamps |
+| `model_combo_targets` | `combo_id` FK, `position` (0-based order), `model` (concrete id); `COMBO_MAX_TARGETS=5` |
 | `provider_settings` | load_balance strategy, sticky, rr_cursor |
 
 **Grok quota:** `GROK_TOKEN_QUOTA = 1_000_000` tokens per account (kind `tokens`). Qoder: no token budget (`none` / RPM elsewhere).
@@ -512,7 +537,7 @@ Do not modify those repos unless the user explicitly asks.
 | 5.5 Qoder P0 recovery parity | done (force_refresh, classify_qoder, expireTime, same-account retry) |
 | 5.6 Grok billing endpoint | done (`GET /admin/accounts/{id}/grok-billing` → cli-chat-proxy.grok.com/v1/billing; Credits button in AccountList) |
 | 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
-| 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; local QA verified; **not yet deployed**) |
+| 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
 | 6 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

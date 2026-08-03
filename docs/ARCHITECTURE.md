@@ -32,6 +32,7 @@ Client (OpenCode / Hermes / curl)          Admin UI (React+Vite)
 - Normalize stream to `text/event-stream` chat.completion.chunk style unless executor requires otherwise
 - Map upstream errors to stable JSON errors
 - Mask secrets in all admin responses
+- **Combos** (`/admin/combos` CRUD): admin-defined virtual `combo/<slug>` chat models; active ones merge into `/v1/models` at request time
 
 ### Pool
 - Account selection: active + not cooling down + matching provider
@@ -40,6 +41,7 @@ Client (OpenCode / Hermes / curl)          Admin UI (React+Vite)
 - On 429: set `cooldown_until = now + 25h`
 - On 401: try refresh once, else cooldown
 - On 402/403: set inactive (or delete — config flag)
+- **Combo fallback:** `combo/<slug>` requests try each active target (concrete model) in order, advancing on any pre-response failure except client/config errors (`BadRequest`/`NotImplemented`/`Unauthorized`/`Forbidden`); no mid-stream fallback once a response is committed
 
 ### Providers
 Each provider owns:
