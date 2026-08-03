@@ -510,6 +510,8 @@ Do not modify those repos unless the user explicitly asks.
 | 4 Dashboard | done (polish optional) |
 | 5 Qoder port | code done; live smoke needs PATs |
 | 5.5 Qoder P0 recovery parity | done (force_refresh, classify_qoder, expireTime, same-account retry) |
+| 5.6 Grok billing endpoint | done (`GET /admin/accounts/{id}/grok-billing` → cli-chat-proxy.grok.com/v1/billing; Credits button in AccountList) |
+| 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
 | 6 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.
