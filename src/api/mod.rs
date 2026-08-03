@@ -8,7 +8,7 @@ pub mod proxies;
 use crate::state::AppState;
 use axum::{
     Router,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 
 pub fn router(state: AppState) -> Router {
@@ -31,6 +31,17 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/usage", get(admin::usage))
         .route("/admin/requests", get(admin::list_requests))
         .route("/admin/requests/{id}", get(admin::get_request))
+        .route(
+            "/admin/combos",
+            get(admin::list_combos).post(admin::create_combo),
+        )
+        .route(
+            "/admin/combos/{slug}",
+            get(admin::get_combo)
+                .patch(admin::update_combo)
+                .delete(admin::delete_combo),
+        )
+        .route("/admin/combos/{slug}/targets", put(admin::replace_combo_targets))
         .route("/admin/providers", get(admin::list_provider_settings))
         .route(
             "/admin/providers/{provider}",

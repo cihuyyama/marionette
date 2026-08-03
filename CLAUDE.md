@@ -512,6 +512,7 @@ Do not modify those repos unless the user explicitly asks.
 | 5.5 Qoder P0 recovery parity | done (force_refresh, classify_qoder, expireTime, same-account retry) |
 | 5.6 Grok billing endpoint | done (`GET /admin/accounts/{id}/grok-billing` → cli-chat-proxy.grok.com/v1/billing; Credits button in AccountList) |
 | 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
+| 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; local QA verified; **not yet deployed**) |
 | 6 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

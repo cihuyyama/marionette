@@ -228,6 +228,9 @@ pub async fn list_requests(
                 "account_id": r.account_id,
                 "account_email": r.account_email,
                 "error_message": r.error_message,
+                "requested_model": r.requested_model,
+                "combo_id": r.combo_id,
+                "fallback_count": r.fallback_count,
             })
         })
         .collect();
@@ -271,6 +274,10 @@ pub async fn get_request(
         "error_message": r.error_message,
         "request_body": parse_stored_body(r.request_body.as_deref()),
         "response_body": parse_stored_body(r.response_body.as_deref()),
+        "requested_model": r.requested_model,
+        "combo_id": r.combo_id,
+        "fallback_count": r.fallback_count,
+        "attempt_trace": parse_stored_body(r.attempt_trace.as_deref()),
     })))
 }
 
@@ -1337,6 +1344,120 @@ pub async fn refresh_cancel(
     _auth: AdminAuth,
 ) -> AppResult<Json<Value>> {
     Ok(Json(state.refresh.cancel().await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateComboBody {
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+    pub targets: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateComboBody {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+    pub targets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplaceTargetsBody {
+    pub targets: Vec<String>,
+}
+
+fn combo_id_from_slug(slug: &str) -> String {
+    if slug.starts_with("combo/") {
+        slug.to_string()
+    } else {
+        format!("combo/{slug}")
+    }
+}
+
+pub async fn list_combos(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    let combos = db::list_model_combos(&state.pool).await?;
+    Ok(Json(json!({ "combos": combos })))
+}
+
+pub async fn get_combo(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    let id = combo_id_from_slug(&slug);
+    let combo = db::get_model_combo(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("combo {id}")))?;
+    Ok(Json(json!(combo)))
+}
+
+pub async fn create_combo(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(body): Json<CreateComboBody>,
+) -> AppResult<Json<Value>> {
+    let combo = db::create_model_combo(
+        &state.pool,
+        db::NewModelCombo {
+            slug: body.slug,
+            name: body.name,
+            description: body.description,
+            is_active: body.is_active.unwrap_or(true),
+            targets: body.targets,
+        },
+    )
+    .await?;
+    Ok(Json(json!(combo)))
+}
+
+pub async fn update_combo(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(slug): Path<String>,
+    Json(body): Json<UpdateComboBody>,
+) -> AppResult<Json<Value>> {
+    let id = combo_id_from_slug(&slug);
+    let description = body.description.map(Some);
+    let combo = db::update_model_combo(
+        &state.pool,
+        &id,
+        body.name,
+        description,
+        body.is_active,
+        body.targets,
+    )
+    .await?;
+    Ok(Json(json!(combo)))
+}
+
+pub async fn replace_combo_targets(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(slug): Path<String>,
+    Json(body): Json<ReplaceTargetsBody>,
+) -> AppResult<Json<Value>> {
+    let id = combo_id_from_slug(&slug);
+    let combo =
+        db::update_model_combo(&state.pool, &id, None, None, None, Some(body.targets)).await?;
+    Ok(Json(json!(combo)))
+}
+
+pub async fn delete_combo(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    let id = combo_id_from_slug(&slug);
+    let removed = db::delete_model_combo(&state.pool, &id).await?;
+    if !removed {
+        return Err(AppError::NotFound(format!("combo {id}")));
+    }
+    Ok(Json(json!({ "ok": true, "id": id })))
 }
 
 #[cfg(test)]

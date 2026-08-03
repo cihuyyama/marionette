@@ -299,6 +299,127 @@ pub async fn handle_chat(
     state: &AppState,
     req: ChatCompletionRequest,
 ) -> AppResult<ChatOutcome> {
+    if crate::openai::is_combo_model(&req.model) {
+        return handle_combo_chat(state, req).await;
+    }
+    handle_concrete_chat(state, req, false).await
+}
+
+/// A concrete target failed before returning any response; advancing to the
+/// next combo target is safe. Client/config errors (bad request, unknown model,
+/// unimplemented provider) are NOT fallback-worthy: they signal a stored-invalid
+/// combo, not provider unavailability, so they stop the chain immediately.
+fn should_fallback_to_next_target(err: &AppError) -> bool {
+    !matches!(
+        err,
+        AppError::BadRequest(_)
+            | AppError::NotImplemented(_)
+            | AppError::Unauthorized
+            | AppError::Forbidden
+    )
+}
+
+async fn handle_combo_chat(
+    state: &AppState,
+    req: ChatCompletionRequest,
+) -> AppResult<ChatOutcome> {
+    let combo = db::get_model_combo(&state.pool, &req.model)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("combo model {}", req.model)))?;
+    if !combo.is_active {
+        return Err(AppError::BadRequest(format!(
+            "combo model inactive: {}",
+            req.model
+        )));
+    }
+    let targets: Vec<String> = combo
+        .targets
+        .iter()
+        .filter(|t| t.is_active)
+        .map(|t| t.model.clone())
+        .collect();
+    if targets.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "combo model has no active targets: {}",
+            req.model
+        )));
+    }
+
+    let started = Instant::now();
+    let request_body = crate::log_body::prepare_log_body_from_serializable(&req);
+    let mut trace: Vec<Value> = Vec::with_capacity(targets.len());
+    let mut last_err: Option<AppError> = None;
+
+    for (idx, target) in targets.iter().enumerate() {
+        let mut target_req = req.clone();
+        target_req.model = target.clone();
+        let provider = crate::openai::provider_id_for_model(target).unwrap_or("unknown");
+        match handle_concrete_chat(state, target_req, true).await {
+            Ok(outcome) => {
+                trace.push(serde_json::json!({
+                    "i": idx, "model": target, "provider": provider, "outcome": "success"
+                }));
+                info!(
+                    combo = %req.model,
+                    resolved = %target,
+                    fallbacks = idx,
+                    "combo resolved"
+                );
+                return Ok(outcome);
+            }
+            Err(e) => {
+                trace.push(serde_json::json!({
+                    "i": idx, "model": target, "provider": provider,
+                    "outcome": "error", "error": e.to_string()
+                }));
+                let advance = should_fallback_to_next_target(&e) && idx + 1 < targets.len();
+                last_err = Some(e);
+                if advance {
+                    warn!(combo = %req.model, target = %target, "combo target failed; advancing");
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    let err = last_err.unwrap_or_else(|| AppError::NoAccounts(req.model.clone()));
+    let trace_json = serde_json::json!({ "v": 1, "attempts": trace });
+    let fallback_count = trace.len().saturating_sub(1) as i64;
+    let _ = db::insert_request_log(
+        &state.pool,
+        NewRequestLog {
+            provider: "combo".into(),
+            model: Some(req.model.clone()),
+            status: "error".into(),
+            stream: req.stream_enabled(),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            credits_used: None,
+            account_quota_before: None,
+            account_quota_after: None,
+            account_id: None,
+            account_email: None,
+            error_message: Some(err.to_string().chars().take(500).collect()),
+            request_body,
+            response_body: Some(trace_json.to_string()),
+            requested_model: Some(req.model.clone()),
+            combo_id: Some(req.model.clone()),
+            fallback_count: Some(fallback_count),
+            attempt_trace: Some(trace_json.to_string()),
+        },
+    )
+    .await;
+    Err(err)
+}
+
+async fn handle_concrete_chat(
+    state: &AppState,
+    req: ChatCompletionRequest,
+    suppress_error_log: bool,
+) -> AppResult<ChatOutcome> {
     let provider_id = req
         .provider_id()
         .ok_or_else(|| AppError::BadRequest(format!("unknown model: {}", req.model)))?;
@@ -322,27 +443,29 @@ pub async fn handle_chat(
                 Ok(v) => v,
                 Err(e) => {
                     if attempt == 0 {
-                        let _ = log_request(
-                            &state.pool,
-                            provider_id,
-                            &model,
-                            "error",
-                            false,
-                            started.elapsed().as_millis() as i64,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            Some(e.to_string()),
-                            request_body.clone(),
-                            Some(
-                                serde_json::json!({ "error": e.to_string() }).to_string(),
-                            ),
-                        )
-                        .await;
+                        if !suppress_error_log {
+                            let _ = log_request(
+                                &state.pool,
+                                provider_id,
+                                &model,
+                                "error",
+                                false,
+                                started.elapsed().as_millis() as i64,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(e.to_string()),
+                                request_body.clone(),
+                                Some(
+                                    serde_json::json!({ "error": e.to_string() }).to_string(),
+                                ),
+                            )
+                            .await;
+                        }
                         return Err(e);
                     }
                     break;
@@ -444,25 +567,27 @@ pub async fn handle_chat(
     }
 
     let err = last_err.unwrap_or_else(|| AppError::NoAccounts(provider_id.into()));
-    let _ = log_request(
-        &state.pool,
-        provider_id,
-        &model,
-        "error",
-        false,
-        started.elapsed().as_millis() as i64,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        last_account.as_ref(),
-        Some(err.to_string()),
-        request_body,
-        Some(serde_json::json!({ "error": err.to_string() }).to_string()),
-    )
-    .await;
+    if !suppress_error_log {
+        let _ = log_request(
+            &state.pool,
+            provider_id,
+            &model,
+            "error",
+            false,
+            started.elapsed().as_millis() as i64,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            last_account.as_ref(),
+            Some(err.to_string()),
+            request_body,
+            Some(serde_json::json!({ "error": err.to_string() }).to_string()),
+        )
+        .await;
+    }
     Err(err)
 }
 
@@ -851,6 +976,10 @@ async fn log_request(
         error_message: error_message.map(|e| e.chars().take(500).collect()),
         request_body,
         response_body,
+        requested_model: Some(model.into()),
+        combo_id: None,
+        fallback_count: None,
+        attempt_trace: None,
     };
     tokio::spawn(async move {
         if let Err(e) = db::insert_request_log(&pool, new_log).await {
@@ -897,6 +1026,10 @@ async fn log_request_returning_id(
             error_message: error_message.map(|e| e.chars().take(500).collect()),
             request_body,
             response_body,
+            requested_model: Some(model.into()),
+            combo_id: None,
+            fallback_count: None,
+            attempt_trace: None,
         },
     )
     .await
@@ -1010,5 +1143,26 @@ mod tests {
         assert!(!should_local_token_decrement("qoder"));
         assert!(should_server_resync_quota("qoder"));
         assert!(!should_server_resync_quota("grok-cli"));
+    }
+
+    #[test]
+    fn combo_fallback_advances_on_provider_failures_only() {
+        assert!(should_fallback_to_next_target(&AppError::NoAccounts("qoder".into())));
+        assert!(should_fallback_to_next_target(&AppError::Provider("rate limited".into())));
+        assert!(should_fallback_to_next_target(&AppError::Upstream {
+            status: 500,
+            body: "boom".into()
+        }));
+        assert!(should_fallback_to_next_target(&AppError::Provider(
+            "auth expired".into()
+        )));
+    }
+
+    #[test]
+    fn combo_fallback_stops_on_client_and_config_errors() {
+        assert!(!should_fallback_to_next_target(&AppError::BadRequest("bad".into())));
+        assert!(!should_fallback_to_next_target(&AppError::NotImplemented("x".into())));
+        assert!(!should_fallback_to_next_target(&AppError::Unauthorized));
+        assert!(!should_fallback_to_next_target(&AppError::Forbidden));
     }
 }

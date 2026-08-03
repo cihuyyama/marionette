@@ -556,6 +556,67 @@ export function listAdminModels(settings?: Settings) {
   );
 }
 
+export type ComboTarget = {
+  position: number;
+  model: string;
+  is_active: boolean;
+};
+
+export type ModelCombo = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  targets: ComboTarget[];
+};
+
+export type ComboInput = {
+  slug: string;
+  name: string;
+  description?: string | null;
+  is_active?: boolean;
+  targets: string[];
+};
+
+export function listCombos(settings?: Settings) {
+  return request<{ combos: ModelCombo[] }>(
+    "/admin/combos",
+    { auth: "admin" },
+    settings,
+  );
+}
+
+export function createCombo(body: ComboInput, settings?: Settings) {
+  return request<ModelCombo>(
+    "/admin/combos",
+    { method: "POST", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+
+export function updateCombo(
+  slug: string,
+  body: Partial<Omit<ComboInput, "slug">>,
+  settings?: Settings,
+) {
+  return request<ModelCombo>(
+    `/admin/combos/${encodeURIComponent(slug)}`,
+    { method: "PATCH", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+
+export function deleteCombo(slug: string, settings?: Settings) {
+  return request<{ ok: boolean; id: string }>(
+    `/admin/combos/${encodeURIComponent(slug)}`,
+    { method: "DELETE", auth: "admin" },
+    settings,
+  );
+}
+
 export type RequestLog = {
   id: string;
   created_at: string;

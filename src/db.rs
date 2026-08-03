@@ -186,6 +186,26 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           on_dead TEXT NOT NULL DEFAULT 'direct',
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS model_combos (
+          id TEXT PRIMARY KEY,
+          slug TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          description TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS model_combo_targets (
+          id TEXT PRIMARY KEY,
+          combo_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          model TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_combo_targets_combo
+          ON model_combo_targets(combo_id, position);
         "#,
     )
     .execute(pool)
@@ -193,6 +213,25 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     migrate_quota_columns(pool).await?;
     migrate_provider_settings_columns(pool).await?;
     migrate_request_log_body_columns(pool).await?;
+    migrate_request_log_combo_columns(pool).await?;
+    Ok(())
+}
+
+async fn migrate_request_log_combo_columns(pool: &SqlitePool) -> AppResult<()> {
+    let alters = [
+        "ALTER TABLE request_logs ADD COLUMN requested_model TEXT",
+        "ALTER TABLE request_logs ADD COLUMN combo_id TEXT",
+        "ALTER TABLE request_logs ADD COLUMN fallback_count INTEGER",
+        "ALTER TABLE request_logs ADD COLUMN attempt_trace TEXT",
+    ];
+    for sql in alters {
+        if let Err(e) = sqlx::query(sql).execute(pool).await {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -578,6 +617,9 @@ pub struct RequestLog {
     pub account_id: Option<String>,
     pub account_email: Option<String>,
     pub error_message: Option<String>,
+    pub requested_model: Option<String>,
+    pub combo_id: Option<String>,
+    pub fallback_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -600,13 +642,18 @@ pub struct RequestLogDetail {
     pub error_message: Option<String>,
     pub request_body: Option<String>,
     pub response_body: Option<String>,
+    pub requested_model: Option<String>,
+    pub combo_id: Option<String>,
+    pub fallback_count: Option<i64>,
+    pub attempt_trace: Option<String>,
 }
 
 const REQUEST_LOG_LIGHT_COLUMNS: &str = r#"
     id, created_at, provider, model, status, stream, duration_ms,
     prompt_tokens, completion_tokens, total_tokens,
     credits_used, account_quota_before, account_quota_after,
-    account_id, account_email, error_message
+    account_id, account_email, error_message,
+    requested_model, combo_id, fallback_count
 "#;
 
 #[derive(Debug, Clone)]
@@ -627,6 +674,10 @@ pub struct NewRequestLog {
     pub error_message: Option<String>,
     pub request_body: Option<String>,
     pub response_body: Option<String>,
+    pub requested_model: Option<String>,
+    pub combo_id: Option<String>,
+    pub fallback_count: Option<i64>,
+    pub attempt_trace: Option<String>,
 }
 
 pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppResult<String> {
@@ -639,8 +690,9 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
           prompt_tokens, completion_tokens, total_tokens,
           credits_used, account_quota_before, account_quota_after,
           account_id, account_email, error_message,
-          request_body, response_body
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          request_body, response_body,
+          requested_model, combo_id, fallback_count, attempt_trace
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -661,6 +713,10 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
     .bind(&log.error_message)
     .bind(&log.request_body)
     .bind(&log.response_body)
+    .bind(&log.requested_model)
+    .bind(&log.combo_id)
+    .bind(log.fallback_count)
+    .bind(&log.attempt_trace)
     .execute(pool)
     .await?;
     Ok(id)
@@ -674,7 +730,8 @@ pub async fn get_request_log(pool: &SqlitePool, id: &str) -> AppResult<RequestLo
           prompt_tokens, completion_tokens, total_tokens,
           credits_used, account_quota_before, account_quota_after,
           account_id, account_email, error_message,
-          request_body, response_body
+          request_body, response_body,
+          requested_model, combo_id, fallback_count, attempt_trace
         FROM request_logs
         WHERE id = ?
         "#,
@@ -908,6 +965,294 @@ pub fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.with_timezone(&Utc))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelComboTarget {
+    pub position: i64,
+    pub model: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCombo {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub targets: Vec<ModelComboTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewModelCombo {
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub targets: Vec<String>,
+}
+
+pub const COMBO_MAX_TARGETS: usize = 5;
+
+/// Validates a combo slug so `combo/<slug>` is a safe, unambiguous virtual id:
+/// lowercase alphanumerics with single hyphens, never colliding with the
+/// provider-routing substrings `grok`/`qoder` that `provider_id_for_model` keys on.
+pub fn validate_combo_slug(slug: &str) -> AppResult<()> {
+    let s = slug.trim();
+    if s.len() < 2 || s.len() > 40 {
+        return Err(AppError::BadRequest(
+            "combo slug must be 2-40 characters".into(),
+        ));
+    }
+    let ok = s
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
+        return Err(AppError::BadRequest(
+            "combo slug must be lowercase alphanumerics separated by single hyphens".into(),
+        ));
+    }
+    if s.contains("grok") || s.contains("qoder") {
+        return Err(AppError::BadRequest(
+            "combo slug must not contain provider names".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Enforces the combo target contract: 1-5 ordered, unique, canonical chat
+/// model ids, rejecting nested combos and image-only models.
+pub fn validate_combo_targets(targets: &[String]) -> AppResult<()> {
+    if targets.is_empty() {
+        return Err(AppError::BadRequest("combo needs at least 1 target".into()));
+    }
+    if targets.len() > COMBO_MAX_TARGETS {
+        return Err(AppError::BadRequest(format!(
+            "combo allows at most {COMBO_MAX_TARGETS} targets"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for t in targets {
+        if !seen.insert(t.as_str()) {
+            return Err(AppError::BadRequest(format!("duplicate target: {t}")));
+        }
+        if !crate::openai::is_valid_combo_target(t) {
+            return Err(AppError::BadRequest(format!("invalid combo target: {t}")));
+        }
+    }
+    Ok(())
+}
+
+async fn load_combo_targets(pool: &SqlitePool, combo_id: &str) -> AppResult<Vec<ModelComboTarget>> {
+    let rows = sqlx::query_as::<_, (i64, String, i64)>(
+        r#"
+        SELECT position, model, is_active
+        FROM model_combo_targets
+        WHERE combo_id = ?
+        ORDER BY position ASC
+        "#,
+    )
+    .bind(combo_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(position, model, is_active)| ModelComboTarget {
+            position,
+            model,
+            is_active: is_active != 0,
+        })
+        .collect())
+}
+
+pub async fn list_model_combos(pool: &SqlitePool) -> AppResult<Vec<ModelCombo>> {
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, String)>(
+        r#"
+        SELECT id, slug, name, description, is_active, created_at, updated_at
+        FROM model_combos
+        ORDER BY created_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut combos = Vec::with_capacity(rows.len());
+    for (id, slug, name, description, is_active, created_at, updated_at) in rows {
+        let targets = load_combo_targets(pool, &id).await?;
+        combos.push(ModelCombo {
+            id,
+            slug,
+            name,
+            description,
+            is_active: is_active != 0,
+            created_at,
+            updated_at,
+            targets,
+        });
+    }
+    Ok(combos)
+}
+
+pub async fn get_model_combo(pool: &SqlitePool, id: &str) -> AppResult<Option<ModelCombo>> {
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, String)>(
+        r#"
+        SELECT id, slug, name, description, is_active, created_at, updated_at
+        FROM model_combos
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((id, slug, name, description, is_active, created_at, updated_at)) = row else {
+        return Ok(None);
+    };
+    let targets = load_combo_targets(pool, &id).await?;
+    Ok(Some(ModelCombo {
+        id,
+        slug,
+        name,
+        description,
+        is_active: is_active != 0,
+        created_at,
+        updated_at,
+        targets,
+    }))
+}
+
+pub async fn create_model_combo(pool: &SqlitePool, input: NewModelCombo) -> AppResult<ModelCombo> {
+    validate_combo_slug(&input.slug)?;
+    validate_combo_targets(&input.targets)?;
+    let id = format!("combo/{}", input.slug);
+    if get_model_combo(pool, &id).await?.is_some() {
+        return Err(AppError::BadRequest(format!("combo already exists: {id}")));
+    }
+    let now = now_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO model_combos (id, slug, name, description, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(&input.slug)
+    .bind(&input.name)
+    .bind(&input.description)
+    .bind(if input.is_active { 1 } else { 0 })
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    for (position, model) in input.targets.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO model_combo_targets (id, combo_id, position, model, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(position as i64)
+        .bind(model)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    get_model_combo(pool, &id)
+        .await?
+        .ok_or_else(|| AppError::Internal("combo vanished after insert".into()))
+}
+
+pub async fn update_model_combo(
+    pool: &SqlitePool,
+    id: &str,
+    name: Option<String>,
+    description: Option<Option<String>>,
+    is_active: Option<bool>,
+    targets: Option<Vec<String>>,
+) -> AppResult<ModelCombo> {
+    if get_model_combo(pool, id).await?.is_none() {
+        return Err(AppError::NotFound(format!("combo {id}")));
+    }
+    if let Some(t) = targets.as_ref() {
+        validate_combo_targets(t)?;
+    }
+    let now = now_rfc3339();
+    let mut tx = pool.begin().await?;
+    if let Some(name) = name {
+        sqlx::query("UPDATE model_combos SET name = ?, updated_at = ? WHERE id = ?")
+            .bind(&name)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(description) = description {
+        sqlx::query("UPDATE model_combos SET description = ?, updated_at = ? WHERE id = ?")
+            .bind(&description)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(active) = is_active {
+        sqlx::query("UPDATE model_combos SET is_active = ?, updated_at = ? WHERE id = ?")
+            .bind(if active { 1 } else { 0 })
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(targets) = targets {
+        sqlx::query("DELETE FROM model_combo_targets WHERE combo_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for (position, model) in targets.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO model_combo_targets (id, combo_id, position, model, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                "#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(id)
+            .bind(position as i64)
+            .bind(model)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("UPDATE model_combos SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_model_combo(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("combo vanished after update".into()))
+}
+
+pub async fn delete_model_combo(pool: &SqlitePool, id: &str) -> AppResult<bool> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM model_combo_targets WHERE combo_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let res = sqlx::query("DELETE FROM model_combos WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(res.rows_affected() > 0)
 }
 
 impl Account {
@@ -2377,6 +2722,113 @@ mod tests {
         assert_eq!(active[0].id, "row-1");
         let cut = all.iter().find(|a| a.id == "row-2").unwrap();
         assert_eq!(cut.is_active, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn combo_slug_validation() {
+        assert!(validate_combo_slug("coding").is_ok());
+        assert!(validate_combo_slug("fast-code-1").is_ok());
+        assert!(validate_combo_slug("a").is_err());
+        assert!(validate_combo_slug("Coding").is_err());
+        assert!(validate_combo_slug("-lead").is_err());
+        assert!(validate_combo_slug("trail-").is_err());
+        assert!(validate_combo_slug("double--dash").is_err());
+        assert!(validate_combo_slug("grok-fast").is_err());
+        assert!(validate_combo_slug("qoder-mix").is_err());
+    }
+
+    #[test]
+    fn combo_target_validation() {
+        assert!(validate_combo_targets(&["gcli/grok-4.5".into()]).is_ok());
+        assert!(validate_combo_targets(&[]).is_err());
+        let six: Vec<String> = vec![
+            "gcli/grok-4.5".into(),
+            "gcli/grok-4".into(),
+            "gcli/grok-3".into(),
+            "qd/auto".into(),
+            "qd/ultimate".into(),
+            "qd/lite".into(),
+        ];
+        assert!(validate_combo_targets(&six).is_err());
+        assert!(
+            validate_combo_targets(&["qd/auto".into(), "qd/auto".into()]).is_err(),
+            "duplicate targets rejected"
+        );
+        assert!(
+            validate_combo_targets(&["combo/other".into()]).is_err(),
+            "nested combos rejected"
+        );
+        assert!(
+            validate_combo_targets(&["gcli/grok-imagine-image".into()]).is_err(),
+            "image models rejected"
+        );
+        assert!(validate_combo_targets(&["qd/not-real".into()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn combo_crud_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("marionette-combo-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("test.sqlite")).await.unwrap();
+
+        let created = create_model_combo(
+            &pool,
+            NewModelCombo {
+                slug: "coding".into(),
+                name: "Coding".into(),
+                description: Some("grok then qoder".into()),
+                is_active: true,
+                targets: vec!["gcli/grok-4.5".into(), "qd/ultimate".into()],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.id, "combo/coding");
+        assert_eq!(created.targets.len(), 2);
+        assert_eq!(created.targets[0].model, "gcli/grok-4.5");
+        assert_eq!(created.targets[0].position, 0);
+        assert_eq!(created.targets[1].model, "qd/ultimate");
+
+        assert!(
+            create_model_combo(
+                &pool,
+                NewModelCombo {
+                    slug: "coding".into(),
+                    name: "Dup".into(),
+                    description: None,
+                    is_active: true,
+                    targets: vec!["qd/auto".into()],
+                },
+            )
+            .await
+            .is_err(),
+            "duplicate slug rejected"
+        );
+
+        let updated = update_model_combo(
+            &pool,
+            "combo/coding",
+            Some("Coding v2".into()),
+            None,
+            Some(false),
+            Some(vec!["qd/auto".into(), "gcli/grok-4.5".into(), "qd/lite".into()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "Coding v2");
+        assert!(!updated.is_active);
+        assert_eq!(updated.targets.len(), 3);
+        assert_eq!(updated.targets[0].model, "qd/auto");
+        assert_eq!(updated.targets[2].model, "qd/lite");
+
+        let listed = list_model_combos(&pool).await.unwrap();
+        assert_eq!(listed.len(), 1);
+
+        assert!(delete_model_combo(&pool, "combo/coding").await.unwrap());
+        assert!(get_model_combo(&pool, "combo/coding").await.unwrap().is_none());
+        assert!(!delete_model_combo(&pool, "combo/coding").await.unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

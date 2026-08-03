@@ -259,6 +259,43 @@ button {
   margin-top: var(--space-4);
 }
 
+.combo-panel {
+  margin-top: var(--space-4);
+}
+
+.combo-form {
+  margin-top: var(--space-3);
+  gap: var(--space-3);
+}
+
+.combo-targets-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.combo-target-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.combo-target-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--void);
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

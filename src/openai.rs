@@ -50,15 +50,7 @@ impl ChatCompletionRequest {
     }
 
     pub fn provider_id(&self) -> Option<&'static str> {
-        if self.model.starts_with("gcli/") || self.model.starts_with("grok") {
-            Some("grok-cli")
-        } else if self.model.starts_with("qd/") || self.model.starts_with("qoder") {
-            Some("qoder")
-        } else if self.model.contains("grok") {
-            Some("grok-cli")
-        } else {
-            None
-        }
+        provider_id_for_model(&self.model)
     }
 
     pub fn has_tools(&self) -> bool {
@@ -68,6 +60,55 @@ impl ChatCompletionRequest {
             .map(|a| !a.is_empty())
             .unwrap_or(false)
     }
+}
+
+pub const COMBO_PREFIX: &str = "combo/";
+
+/// Returns `None` for combo ids on purpose: combos are expanded in the pool
+/// before concrete routing, so a combo must never resolve to a single provider.
+pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
+    if model.starts_with(COMBO_PREFIX) {
+        None
+    } else if model.starts_with("gcli/") || model.starts_with("grok") {
+        Some("grok-cli")
+    } else if model.starts_with("qd/") || model.starts_with("qoder") {
+        Some("qoder")
+    } else if model.contains("grok") {
+        Some("grok-cli")
+    } else {
+        None
+    }
+}
+
+pub fn is_combo_model(model: &str) -> bool {
+    model.starts_with(COMBO_PREFIX)
+}
+
+pub fn combo_slug(model: &str) -> Option<&str> {
+    model.strip_prefix(COMBO_PREFIX).filter(|s| !s.is_empty())
+}
+
+/// A combo target must route chat completions only: no nested combos, no
+/// image-only models, and it must be a canonical catalog id.
+pub fn is_valid_combo_target(model: &str) -> bool {
+    if is_combo_model(model) {
+        return false;
+    }
+    if is_image_model(model) {
+        return false;
+    }
+    provider_id_for_model(model).is_some() && is_known_chat_model(model)
+}
+
+pub fn is_image_model(model: &str) -> bool {
+    model.contains("imagine-image")
+}
+
+pub fn is_known_chat_model(model: &str) -> bool {
+    default_models()
+        .data
+        .iter()
+        .any(|m| m.id == model && !is_image_model(&m.id))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,5 +428,33 @@ mod tests {
             assert_eq!(m.max_input, Some("256K"), "id={}", m.id);
             assert!(m.vision, "id={} should advertise vision", m.id);
         }
+    }
+
+    #[test]
+    fn combo_ids_do_not_route_to_a_provider() {
+        assert_eq!(provider_id_for_model("combo/coding"), None);
+        assert!(is_combo_model("combo/coding"));
+        assert_eq!(combo_slug("combo/coding"), Some("coding"));
+        assert_eq!(combo_slug("combo/"), None);
+        assert!(!is_combo_model("qd/auto"));
+    }
+
+    #[test]
+    fn concrete_models_still_route_after_combo_change() {
+        assert_eq!(provider_id_for_model("gcli/grok-4.5"), Some("grok-cli"));
+        assert_eq!(provider_id_for_model("qd/ultimate"), Some("qoder"));
+        assert_eq!(provider_id_for_model("grok-3"), Some("grok-cli"));
+        assert_eq!(provider_id_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn combo_target_validation_rejects_bad_targets() {
+        assert!(is_valid_combo_target("gcli/grok-4.5"));
+        assert!(is_valid_combo_target("qd/ultimate"));
+        assert!(!is_valid_combo_target("combo/other"));
+        assert!(!is_valid_combo_target("gcli/grok-imagine-image"));
+        assert!(!is_valid_combo_target("grok-imagine-image"));
+        assert!(!is_valid_combo_target("qd/not-a-real-model"));
+        assert!(!is_valid_combo_target("totally-unknown"));
     }
 }

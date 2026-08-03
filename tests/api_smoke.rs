@@ -244,3 +244,109 @@ async fn models_lists_imagine() {
         "expected gcli/grok-imagine-image in catalog"
     );
 }
+
+#[tokio::test]
+async fn combos_require_admin_key() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/combos")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn post_combo(app: &axum::Router, body: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/combos")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn combo_crud_and_models_listing() {
+    let (app, _dir) = test_app().await;
+
+    let created = post_combo(
+        &app,
+        r#"{"slug":"coding","name":"Coding","targets":["gcli/grok-4.5","qd/ultimate"]}"#,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let v = body_json(created).await;
+    assert_eq!(v["id"], "combo/coding");
+    assert_eq!(v["targets"].as_array().unwrap().len(), 2);
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv = body_json(listed).await;
+    assert!(
+        mv["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"].as_str() == Some("combo/coding") && m["owned_by"] == "combo"),
+        "combo should appear in /v1/models"
+    );
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/admin/combos/coding")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let dv = body_json(deleted).await;
+    assert_eq!(dv["ok"], true);
+    assert_eq!(dv["id"], "combo/coding");
+}
+
+#[tokio::test]
+async fn combo_create_rejects_invalid_target() {
+    let (app, _dir) = test_app().await;
+    let res = post_combo(
+        &app,
+        r#"{"slug":"bad","name":"Bad","targets":["qd/not-real"]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn combo_create_rejects_nested_combo_target() {
+    let (app, _dir) = test_app().await;
+    let res = post_combo(
+        &app,
+        r#"{"slug":"nested","name":"Nested","targets":["combo/other"]}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
