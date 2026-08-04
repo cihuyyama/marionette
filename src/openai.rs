@@ -280,6 +280,17 @@ pub fn default_models() -> ModelsResponse {
                 false,
             ),
             model(
+                "qd/qmodel_38max",
+                "qoder",
+                Some("qmodel_38max"),
+                Some("Qwen3.8-Max"),
+                Some("0.8x"),
+                Some("1M"),
+                true,
+                true,
+                false,
+            ),
+            model(
                 "qd/qmodel_latest",
                 "qoder",
                 Some("qmodel_latest"),
@@ -383,7 +394,7 @@ mod tests {
             .iter()
             .filter(|m| m.owned_by == "qoder")
             .collect();
-        assert_eq!(qoder.len(), 14);
+        assert_eq!(qoder.len(), 15);
 
         let auto = qoder.iter().find(|m| m.id == "qd/auto").unwrap();
         assert_eq!(auto.model_key, Some("auto"));
@@ -412,6 +423,16 @@ mod tests {
         assert_eq!(preview.credit_usage_rate, Some("0.05x"));
         assert_eq!(preview.max_input, Some("180K"));
         assert!(preview.reasoning);
+
+        let max38 = qoder
+            .iter()
+            .find(|m| m.id == "qd/qmodel_38max")
+            .unwrap();
+        assert_eq!(max38.model_key, Some("qmodel_38max"));
+        assert_eq!(max38.display_name, Some("Qwen3.8-Max"));
+        assert_eq!(max38.max_input, Some("1M"));
+        assert!(max38.reasoning);
+        assert!(max38.vision);
 
         let plus = qoder.iter().find(|m| m.id == "qd/qmodel1").unwrap();
         assert_eq!(plus.model_key, Some("qmodel"));

@@ -390,23 +390,23 @@ impl Default for LoadBalance {
 #[serde(rename_all = "snake_case")]
 pub enum QoderPickMode {
     Normal,
-    UltimateFree,
+    Qwen38Free,
 }
 
 impl QoderPickMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
-            Self::UltimateFree => "ultimate_free",
+            Self::Qwen38Free => "qwen38_free",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "normal" | "default" | "credits" | "" => Some(Self::Normal),
-            "ultimate_free" | "ultimate-free" | "ultimate_free_only" | "free_ultimate" => {
-                Some(Self::UltimateFree)
-            }
+            "qwen38_free" | "qwen38-free" | "qwen3.8_free" | "qmodel_38max_free"
+            | "free_qwen38" | "ultimate_free" | "ultimate-free" | "ultimate_free_only"
+            | "free_ultimate" => Some(Self::Qwen38Free),
             _ => None,
         }
     }
@@ -414,17 +414,17 @@ impl QoderPickMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Normal => "Normal (credits + free)",
-            Self::UltimateFree => "Ultimate free only",
+            Self::Qwen38Free => "Qwen3.8-Max free only",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
             Self::Normal => {
-                "Use plan credits and Free Ultimate when available (default)"
+                "Use plan credits and Qwen3.8-Max free calls when available (default)"
             }
-            Self::UltimateFree => {
-                "Only rotate accounts with Free Ultimate left — never spend Pro Trial credits on Ultimate"
+            Self::Qwen38Free => {
+                "Only rotate accounts with Qwen3.8-Max free calls left (qwen38_800_invoke bucket)"
             }
         }
     }
@@ -2035,9 +2035,9 @@ pub async fn list_eligible_accounts(
     if provider == "qoder" {
         let settings = get_provider_settings(pool, provider).await?;
         let mode = QoderPickMode::parse(&settings.pick_mode).unwrap_or_default();
-        if mode == QoderPickMode::UltimateFree {
+        if mode == QoderPickMode::Qwen38Free {
             if let Some(m) = model {
-                if crate::providers::qoder::is_ultimate_free_activity_model(m) {
+                if crate::providers::qoder::is_qwen38_free_activity_model(m) {
                     eligible.retain(|a| {
                         crate::providers::qoder::model_has_free_activity_path(a, m)
                     });
@@ -2419,7 +2419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ultimate_free_pick_skips_credit_only_accounts() {
+    async fn qwen38_free_pick_skips_credit_only_accounts() {
         let dir = std::env::temp_dir().join(format!("marionette-uf-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = connect(&dir.join("test.sqlite")).await.unwrap();
@@ -2450,9 +2450,9 @@ mod tests {
             priority: 0,
             data: r#"{
               "personalToken":"pt",
-              "free_limit":200,
+              "free_limit":800,
               "free_remaining":50,
-              "free_model_keys":["ultimate","quest-ultimate","experts-ultimate"]
+              "free_model_keys":["qmodel_38max"]
             }"#
             .into(),
             cooldown_until: None,
@@ -2466,15 +2466,15 @@ mod tests {
         upsert_account(&pool, &credit_only).await.unwrap();
         upsert_account(&pool, &free_acc).await.unwrap();
 
-        set_provider_pick_mode(&pool, "qoder", QoderPickMode::UltimateFree)
+        set_provider_pick_mode(&pool, "qoder", QoderPickMode::Qwen38Free)
             .await
             .unwrap();
 
-        let ultimate = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+        let free = list_eligible_accounts(&pool, "qoder", Some("qd/qmodel_38max"))
             .await
             .unwrap();
-        assert_eq!(ultimate.len(), 1, "only free Ultimate accounts");
-        assert_eq!(ultimate[0].id, "q-free");
+        assert_eq!(free.len(), 1, "only Qwen3.8-Max free accounts");
+        assert_eq!(free[0].id, "q-free");
 
         let auto = list_eligible_accounts(&pool, "qoder", Some("qd/auto"))
             .await
@@ -2482,21 +2482,21 @@ mod tests {
         assert_eq!(
             auto.len(),
             1,
-            "ultimate_free mode must not filter non-Ultimate models"
+            "qwen38_free mode must not filter non-Qwen3.8-Max models"
         );
         assert_eq!(auto[0].id, "q-credit");
 
         free_acc.data = r#"{
           "personalToken":"pt",
-          "free_limit":200,
+          "free_limit":800,
           "free_remaining":0,
-          "free_model_keys":["ultimate"]
+          "free_model_keys":["qmodel_38max"]
         }"#
         .into();
         free_acc.updated_at = now_rfc3339();
         upsert_account(&pool, &free_acc).await.unwrap();
 
-        let empty = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+        let empty = list_eligible_accounts(&pool, "qoder", Some("qd/qmodel_38max"))
             .await
             .unwrap();
         assert!(
@@ -2510,7 +2510,7 @@ mod tests {
         credit_only.quota_remaining = 100;
         credit_only.updated_at = now_rfc3339();
         upsert_account(&pool, &credit_only).await.unwrap();
-        let normal = list_eligible_accounts(&pool, "qoder", Some("qd/ultimate"))
+        let normal = list_eligible_accounts(&pool, "qoder", Some("qd/qmodel_38max"))
             .await
             .unwrap();
         assert!(
@@ -2571,16 +2571,22 @@ mod tests {
     #[test]
     fn qoder_pick_mode_parse_labels() {
         assert_eq!(
-            QoderPickMode::parse("ultimate_free"),
-            Some(QoderPickMode::UltimateFree)
+            QoderPickMode::parse("qwen38_free"),
+            Some(QoderPickMode::Qwen38Free)
         );
         assert_eq!(
-            QoderPickMode::parse("free_ultimate"),
-            Some(QoderPickMode::UltimateFree)
+            QoderPickMode::parse("free_qwen38"),
+            Some(QoderPickMode::Qwen38Free)
+        );
+        assert_eq!(
+            QoderPickMode::parse("ultimate_free"),
+            Some(QoderPickMode::Qwen38Free),
+            "legacy ultimate_free alias must map to Qwen38Free for back-compat"
         );
         assert_eq!(QoderPickMode::parse("normal"), Some(QoderPickMode::Normal));
         assert!(QoderPickMode::parse("bogus").is_none());
-        assert_eq!(QoderPickMode::UltimateFree.label(), "Ultimate free only");
+        assert_eq!(QoderPickMode::Qwen38Free.label(), "Qwen3.8-Max free only");
+        assert_eq!(QoderPickMode::Qwen38Free.as_str(), "qwen38_free");
     }
 
     #[tokio::test]

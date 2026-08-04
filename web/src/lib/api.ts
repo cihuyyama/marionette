@@ -706,7 +706,7 @@ export type LoadBalanceStrategy =
   | "priority"
   | "random";
 
-export type QoderPickMode = "normal" | "ultimate_free";
+export type QoderPickMode = "normal" | "qwen38_free";
 
 export type ProviderSetting = {
   provider: string;

@@ -630,7 +630,7 @@ async fn qoder_should_optimistic_free(
     match db::get_provider_settings(&state.pool, "qoder").await {
         Ok(s) => {
             db::QoderPickMode::parse(&s.pick_mode).unwrap_or_default()
-                == db::QoderPickMode::UltimateFree
+                == db::QoderPickMode::Qwen38Free
         }
         Err(_) => false,
     }

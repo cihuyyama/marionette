@@ -536,7 +536,7 @@ def parse_dudul_inject_api(data: dict[str, Any] | None) -> dict[str, Any]:
             bits.append(plan)
         if ultimate_claimed or ultimate_activity:
             bits.append(
-                f"ultimate {ultimate_remaining or ultimate_limit or 200} free invokes"
+                f"ultimate {ultimate_remaining or ultimate_limit or 800} free invokes"
             )
         if key_left_n is not None:
             bits.append(f"key_left={key_left_n}")

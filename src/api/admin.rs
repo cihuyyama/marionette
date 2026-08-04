@@ -107,9 +107,9 @@ pub async fn list_provider_settings(
                 "hint": db::QoderPickMode::Normal.hint(),
             },
             {
-                "id": db::QoderPickMode::UltimateFree.as_str(),
-                "label": db::QoderPickMode::UltimateFree.label(),
-                "hint": db::QoderPickMode::UltimateFree.hint(),
+                "id": db::QoderPickMode::Qwen38Free.as_str(),
+                "label": db::QoderPickMode::Qwen38Free.label(),
+                "hint": db::QoderPickMode::Qwen38Free.hint(),
             },
         ],
     })))
@@ -145,7 +145,7 @@ pub async fn patch_provider_settings(
         }
         let mode = db::QoderPickMode::parse(mode_s).ok_or_else(|| {
             AppError::BadRequest(format!(
-                "invalid pick_mode: {mode_s} (use normal|ultimate_free)"
+                "invalid pick_mode: {mode_s} (use normal|qwen38_free)"
             ))
         })?;
         db::set_provider_pick_mode(&state.pool, &provider, mode).await?;

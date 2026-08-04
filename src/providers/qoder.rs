@@ -144,6 +144,13 @@ fn model_cfg(name: &str) -> ModelCfg {
             is_vl: true,
             is_reasoning: true,
         },
+        "qmodel_38max" | "qwen3.8-max" | "qwen3.8max" => ModelCfg {
+            key: "qmodel_38max",
+            display_name: "Qwen3.8-Max",
+            max_input_tokens: 1_000_000,
+            is_vl: true,
+            is_reasoning: true,
+        },
         "qmodel_latest" | "qwen3.7-max" => ModelCfg {
             key: "qmodel_latest",
             display_name: "Qwen3.7-Max",
@@ -1016,8 +1023,25 @@ pub fn is_ultimate_free_activity_model(model: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         bare.as_str(),
-        "ultimate" | "quest-ultimate" | "experts-ultimate"
-    ) || activity_upstream_key(model) == "ultimate"
+        "ultimate" | "quest-ultimate" | "experts-ultimate" | "qmodel_38max" | "qwen3.8-max"
+    ) || matches!(
+        activity_upstream_key(model).as_str(),
+        "ultimate" | "qmodel_38max"
+    )
+}
+
+/// True only for the Qwen3.8-Max free bucket (`qwen38_800_invoke` /
+/// `qmodel_38max`). Used by the Qwen3.8-Max-free-only pick mode so rotation is
+/// scoped to that promo and never the retired Ultimate bucket.
+pub fn is_qwen38_free_activity_model(model: &str) -> bool {
+    let bare = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(bare.as_str(), "qmodel_38max" | "qwen3.8-max" | "qwen3.8max")
+        || activity_upstream_key(model) == "qmodel_38max"
 }
 
 fn write_free_remaining_used(account: &mut Account, remaining: i64, used: i64) {
@@ -1043,6 +1067,7 @@ fn write_free_remaining_used(account: &mut Account, remaining: i64, used: i64) {
                                 sl == "ultimate"
                                     || sl == "quest-ultimate"
                                     || sl == "experts-ultimate"
+                                    || sl == "qmodel_38max"
                             })
                             .unwrap_or(false)
                     })
@@ -1051,7 +1076,7 @@ fn write_free_remaining_used(account: &mut Account, remaining: i64, used: i64) {
             let id_hit = row
                 .get("activityId")
                 .and_then(|x| x.as_str())
-                .map(|s| s == "ultimate_200_free_invoke")
+                .map(|s| s == "ultimate_200_free_invoke" || s == "qwen38_800_invoke")
                 .unwrap_or(false);
             if keys_hit || id_hit {
                 if let Some(map) = row.as_object_mut() {
@@ -1253,9 +1278,10 @@ fn apply_activity_to_account(account: &mut Account, snap: &ActivitySnapshot) {
         .iter()
         .find(|b| {
             b.activity_id == "ultimate_200_free_invoke"
+                || b.activity_id == "qwen38_800_invoke"
                 || b.model_keys
                     .iter()
-                    .any(|k| k.eq_ignore_ascii_case("ultimate"))
+                    .any(|k| k.eq_ignore_ascii_case("ultimate") || k.eq_ignore_ascii_case("qmodel_38max"))
         })
         .or_else(|| snap.activities.first());
 
@@ -3514,6 +3540,128 @@ mod tests {
             free_remaining_for_account_model(&acc, "ultimate"),
             1,
             "cap must not raise remaining"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live: needs QODER_PROBE_PAT; hits real Qoder /activity"]
+    async fn live_probe_activity_raw() {
+        let pat = std::env::var("QODER_PROBE_PAT").expect("set QODER_PROBE_PAT");
+        let provider = QoderProvider::new();
+        let data = json!({ "personalToken": pat });
+        let mut tokens = QoderTokens::from_data(&data).expect("tokens from pat");
+        provider
+            .apply_job_token(&mut tokens)
+            .await
+            .expect("jobToken exchange");
+
+        async fn fetch_activity_raw(provider: &QoderProvider, tokens: &QoderTokens) -> Value {
+            let session = build_cosy_session(tokens).expect("cosy session");
+            let payload_b64 = build_payload_b64(&session.info);
+            let cosy_date = format!("{}", chrono::Utc::now().timestamp());
+            let path_sig = path_sig_from_url(ACTIVITY_URL);
+            let bearer_sig =
+                sign_bearer_request(&payload_b64, &session.cosy_key, &cosy_date, "", &path_sig);
+            let bearer = format!("COSY.{payload_b64}.{bearer_sig}");
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("cosy-data-policy", "agree".parse().unwrap());
+            headers.insert("cosy-machinetype", "5".parse().unwrap());
+            headers.insert("cosy-clienttype", "5".parse().unwrap());
+            headers.insert("cosy-date", cosy_date.parse().unwrap());
+            headers.insert(
+                "cosy-user",
+                tokens.user_id.as_deref().unwrap_or("").parse().unwrap(),
+            );
+            headers.insert("cosy-key", session.cosy_key.parse().unwrap());
+            headers.insert("cache-control", "no-cache".parse().unwrap());
+            headers.insert("cosy-business-product", "cli".parse().unwrap());
+            headers.insert("cosy-business-type", "agent".parse().unwrap());
+            headers.insert("cosy-scene", "assistant".parse().unwrap());
+            headers.insert("accept", "application/json".parse().unwrap());
+            headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+            headers.insert("accept-encoding", "identity".parse().unwrap());
+            headers.insert("cosy-version", COSY_VERSION.parse().unwrap());
+            headers.insert("cosy-machineid", tokens.machine_id.parse().unwrap());
+            headers.insert("cosy-machineos", COSY_MACHINE_OS.parse().unwrap());
+            headers.insert("cosy-machinetoken", tokens.machine_token.parse().unwrap());
+            headers.insert("login-version", "v2".parse().unwrap());
+            headers.insert("user-agent", "Bun/1.3.14".parse().unwrap());
+            let resp = provider
+                .client
+                .get(ACTIVITY_URL)
+                .headers(headers)
+                .send()
+                .await
+                .expect("activity request");
+            let body = resp.text().await.unwrap_or_default();
+            serde_json::from_str::<Value>(&body).unwrap_or(Value::Null)
+        }
+
+        fn bucket_38max(v: &Value) -> Option<(i64, i64)> {
+            v.get("data")?
+                .get("activities")?
+                .as_array()?
+                .iter()
+                .find(|r| {
+                    r.get("activityId").and_then(|x| x.as_str()) == Some("qwen38_800_invoke")
+                })
+                .map(|r| {
+                    (
+                        r.get("used").and_then(|x| x.as_i64()).unwrap_or(-1),
+                        r.get("remaining").and_then(|x| x.as_i64()).unwrap_or(-1),
+                    )
+                })
+        }
+
+        let pre = fetch_activity_raw(&provider, &tokens).await;
+        let pre_uw = bucket_38max(&pre);
+        println!("=== PRE qwen38_800_invoke (used, remaining) = {pre_uw:?} ===");
+
+        let account: Account = serde_json::from_value(json!({
+            "id": "probe",
+            "provider": "qoder",
+            "email": null,
+            "name": null,
+            "is_active": 1,
+            "priority": 0,
+            "data": tokens.to_data().to_string(),
+            "cooldown_until": null,
+            "last_error": null,
+            "last_used_at": null,
+            "created_at": "",
+            "updated_at": "",
+            "quota_limit": 0,
+            "quota_remaining": 0
+        }))
+        .expect("account");
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "qd/qmodel_38max",
+            "messages": [{ "role": "user", "content": "Reply with exactly: OK" }],
+            "stream": false
+        }))
+        .expect("req");
+        match provider.chat(&provider.client, &account, &req).await {
+            Ok(ChatOutcome::Json(v)) => {
+                let reply = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("<no content>");
+                println!("=== CHAT ok, reply: {reply} ===");
+            }
+            Ok(_) => println!("=== CHAT ok (stream) ==="),
+            Err(e) => println!("=== CHAT err: {e} ==="),
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let post = fetch_activity_raw(&provider, &tokens).await;
+        let post_uw = bucket_38max(&post);
+        println!("=== POST qwen38_800_invoke (used, remaining) = {post_uw:?} ===");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&post).unwrap_or_default()
         );
     }
 }

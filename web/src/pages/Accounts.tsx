@@ -198,12 +198,12 @@ function ProviderFreeBar({ counts }: { counts: ProviderCounts }) {
   return (
     <div
       className="provider-credit-bar provider-free-bar"
-      title={`Ultimate free pool · ${fmtPoolFree(counts)} · ${counts.freeClaimed} claimed account${counts.freeClaimed === 1 ? "" : "s"}`}
+      title={`Qwen3.8-Max free pool · ${fmtPoolFree(counts)} · ${counts.freeClaimed} claimed account${counts.freeClaimed === 1 ? "" : "s"}`}
     >
       <div
         className="health-track"
         role="meter"
-        aria-label="Ultimate free calls remaining"
+        aria-label="Qwen3.8-Max free calls remaining"
         aria-valuemin={0}
         aria-valuemax={counts.freeLimit}
         aria-valuenow={counts.freeRemaining}
@@ -421,7 +421,7 @@ export function Accounts() {
           ? e.message
           : e instanceof Error
             ? e.message
-            : "Failed to update Ultimate free pick mode",
+                : "Failed to update Qwen3.8-Max free pick mode",
       );
     } finally {
       setSavingProvider(null);
@@ -454,7 +454,7 @@ export function Accounts() {
                 warmupBusy ||
                 byProvider.qoder.total - byProvider.qoder.inactive <= 0
               }
-              title="Refresh auth + credits + Ultimate free activity for all active Qoder accounts"
+              title="Refresh auth + credits + Qwen3.8-Max free activity for all active Qoder accounts"
               onClick={() => void onWarmupQoder()}
             >
               {warmupBusy
@@ -597,7 +597,7 @@ export function Accounts() {
                       htmlFor={`pick-${provider}`}
                       className="provider-lb-pick-label"
                     >
-                      Ultimate free pick
+                      Qwen3.8-Max free pick
                     </label>
                     <select
                       id={`pick-${provider}`}
@@ -617,8 +617,8 @@ export function Accounts() {
                               hint: "",
                             },
                             {
-                              id: "ultimate_free",
-                              label: "Ultimate free only",
+                              id: "qwen38_free",
+                              label: "Qwen3.8-Max free only",
                               hint: "",
                             },
                           ]

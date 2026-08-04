@@ -1219,9 +1219,9 @@ function readFree(a: Account): FreeInfo | null {
 
 function fmtFreeTitle(a: Account): string {
   const f = readFree(a);
-  if (!f) return "No Ultimate free promo synced — refresh account";
+  if (!f) return "No Qwen3.8-Max free promo synced — refresh account";
   const bits = [
-    f.cliText ?? `Free Ultimate ${f.remaining}/${f.limit}`,
+    f.cliText ?? `Qwen3.8-Max free ${f.remaining}/${f.limit}`,
     f.activityId ? `id ${f.activityId}` : null,
     f.endAt ? `ends ${f.endAt}` : f.endMs ? `ends ms ${f.endMs}` : null,
   ].filter(Boolean);
