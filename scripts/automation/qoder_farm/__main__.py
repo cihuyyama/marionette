@@ -148,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Proxy list file (one URL per line; rotates per browser launch)",
     )
     p.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Force direct connection; ignore all proxy env/file sources",
+    )
+    p.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -212,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["json_progress"] = True
     if args.proxy_file:
         overrides["proxy_file"] = str(args.proxy_file)
+    if args.no_proxy:
+        overrides["no_proxy"] = True
     if args.email_source:
         overrides["email_source"] = args.email_source
     if args.register_password:

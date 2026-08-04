@@ -85,6 +85,10 @@ def _normalize_proxy_url(raw: str) -> str | None:
 
 def load_proxy_pool(cfg: Config) -> list[str]:
     pool: list[str] = []
+    # Master switch: Marionette's "Automation proxy = off" passes --no-proxy,
+    # which must override every env/file source below.
+    if getattr(cfg, "no_proxy", False):
+        return pool
     file_env = (cfg.proxy_file or os.getenv("GROK_PROXY_FILE") or "").strip()
     paths: list[Path] = []
     if file_env:

@@ -1091,35 +1091,37 @@ impl FarmManager {
             std::fs::write(&accounts_path, body)?;
         }
 
-        let mut effective_proxy_file = req.proxy_file.clone();
         let automation_proxy_on = db::get_proxy_settings(&pool)
             .await
             .map(|s| s.automation_mode != "off")
             .unwrap_or(false);
-        if automation_proxy_on
-            && effective_proxy_file
-                .as_deref()
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true)
-        {
-            if let Ok(proxies) = db::list_active_proxies(&pool).await {
-                let live: Vec<_> = proxies
-                    .into_iter()
-                    .filter(|p| p.health != "dead")
-                    .collect();
-                if !live.is_empty() {
-                    let mut pbody = String::new();
-                    for p in &live {
-                        match (&p.username, &p.password) {
-                            (Some(u), Some(pw)) if !u.is_empty() => {
-                                pbody.push_str(&format!("{}:{}:{}:{}\n", p.host, p.port, u, pw));
+        let proxy_plan = plan_farm_proxy(automation_proxy_on, req.proxy_file.as_deref());
+        let mut effective_proxy_file: Option<String> = None;
+        match &proxy_plan {
+            FarmProxyPlan::Disabled => {}
+            FarmProxyPlan::File(f) => {
+                effective_proxy_file = Some(f.clone());
+            }
+            FarmProxyPlan::DbPool => {
+                if let Ok(proxies) = db::list_active_proxies(&pool).await {
+                    let live: Vec<_> = proxies
+                        .into_iter()
+                        .filter(|p| p.health != "dead")
+                        .collect();
+                    if !live.is_empty() {
+                        let mut pbody = String::new();
+                        for p in &live {
+                            match (&p.username, &p.password) {
+                                (Some(u), Some(pw)) if !u.is_empty() => {
+                                    pbody.push_str(&format!("{}:{}:{}:{}\n", p.host, p.port, u, pw));
+                                }
+                                _ => pbody.push_str(&format!("{}:{}\n", p.host, p.port)),
                             }
-                            _ => pbody.push_str(&format!("{}:{}\n", p.host, p.port)),
                         }
+                        let ppath = work.join("proxies.txt");
+                        std::fs::write(&ppath, pbody)?;
+                        effective_proxy_file = Some(ppath.to_string_lossy().to_string());
                     }
-                    let ppath = work.join("proxies.txt");
-                    std::fs::write(&ppath, pbody)?;
-                    effective_proxy_file = Some(ppath.to_string_lossy().to_string());
                 }
             }
         }
@@ -1268,6 +1270,12 @@ impl FarmManager {
             let trimmed = pf.trim();
             if !trimmed.is_empty() {
                 cmd.arg("--proxy-file").arg(trimmed);
+            }
+        }
+        if proxy_plan == FarmProxyPlan::Disabled {
+            cmd.arg("--no-proxy");
+            for key in FARM_PROXY_ENV_KEYS {
+                cmd.env(key, "");
             }
         }
 
@@ -1946,6 +1954,47 @@ impl FarmManager {
     }
 }
 
+/// Where a farm subprocess may get its proxies. Decided authoritatively by the
+/// admin "Automation proxy" toggle so the toggle wins over `req.proxy_file` and
+/// over any farm-side `.env` (`QODER_/GROK_ PROXY_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FarmProxyPlan {
+    /// Toggle off: run direct. Subprocess gets `--no-proxy` and its proxy env
+    /// is neutralized, so a stray `.env` can never re-enable proxying.
+    Disabled,
+    /// Toggle on + explicit request proxy_file: use that file verbatim.
+    File(String),
+    /// Toggle on + no explicit file: build `proxies.txt` from active DB proxies.
+    DbPool,
+}
+
+/// Pure decision: given the automation toggle and the request's optional
+/// proxy_file, choose the proxy plan. No DB or IO so it is unit-testable and is
+/// the single source of truth callers must obey.
+pub fn plan_farm_proxy(automation_on: bool, req_proxy_file: Option<&str>) -> FarmProxyPlan {
+    if !automation_on {
+        return FarmProxyPlan::Disabled;
+    }
+    match req_proxy_file.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) => FarmProxyPlan::File(f.to_string()),
+        None => FarmProxyPlan::DbPool,
+    }
+}
+
+/// Proxy-related env vars a farm subprocess reads. Neutralized (set empty) when
+/// the automation toggle is off so `.env`/inherited values cannot leak through.
+const FARM_PROXY_ENV_KEYS: &[&str] = &[
+    "QODER_PROXY_FILE",
+    "QODER_PROXY_URL",
+    "QODER_PROXY_POOL",
+    "QODER_PROXY_SHUFFLE",
+    "GROK_PROXY_FILE",
+    "GROK_PROXY_URL",
+    "GROK_PROXY_POOL",
+    "GROK_PROXY_SHUFFLE",
+    "BATCHER_PROXY_URL",
+];
+
 fn is_stderr_noise(line: &str) -> bool {
     const NOISE: &[&str] = &[
         "LeakWarning",
@@ -2379,6 +2428,36 @@ mod tests {
             parent.display()
         );
         assert!(package_dir.join("__main__.py").is_file());
+    }
+
+    #[test]
+    fn proxy_plan_off_is_disabled_even_with_file() {
+        assert_eq!(plan_farm_proxy(false, None), FarmProxyPlan::Disabled);
+        assert_eq!(
+            plan_farm_proxy(false, Some("C:/proxies.txt")),
+            FarmProxyPlan::Disabled
+        );
+    }
+
+    #[test]
+    fn proxy_plan_on_with_file_uses_file() {
+        assert_eq!(
+            plan_farm_proxy(true, Some("  C:/proxies.txt  ")),
+            FarmProxyPlan::File("C:/proxies.txt".into())
+        );
+    }
+
+    #[test]
+    fn proxy_plan_on_without_file_uses_db_pool() {
+        assert_eq!(plan_farm_proxy(true, None), FarmProxyPlan::DbPool);
+        assert_eq!(plan_farm_proxy(true, Some("   ")), FarmProxyPlan::DbPool);
+    }
+
+    #[test]
+    fn farm_proxy_env_keys_cover_both_farms() {
+        for k in ["QODER_PROXY_FILE", "GROK_PROXY_FILE", "BATCHER_PROXY_URL"] {
+            assert!(FARM_PROXY_ENV_KEYS.contains(&k), "missing {k}");
+        }
     }
 
     #[test]

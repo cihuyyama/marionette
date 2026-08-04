@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Proxy list file (one URL per line; rotates per browser launch)",
     )
     p.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Force direct connection; ignore all proxy env/file sources",
+    )
+    p.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -143,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["json_progress"] = True
     if args.proxy_file:
         overrides["proxy_file"] = str(args.proxy_file)
+    if args.no_proxy:
+        overrides["no_proxy"] = True
     if args.skip_verify:
         overrides["skip_verify"] = True
     if overrides:
@@ -239,7 +246,7 @@ def _run_register(args, cfg) -> int:
     password = (args.password or os.environ.get("GROK_PASSWORD") or "").strip()
     count = max(1, int(args.count or 1))
     concurrency = max(1, int(args.concurrency or 1))
-    proxy_file = args.proxy_file or cfg.proxy_file or ""
+    proxy_file = "" if getattr(cfg, "no_proxy", False) else (args.proxy_file or cfg.proxy_file or "")
 
     prog = Progress(
         ui=cfg.ui,

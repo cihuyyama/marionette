@@ -64,6 +64,7 @@ class Config:
     proxy_url: str
     proxy_file: str
     proxy_shuffle: bool
+    no_proxy: bool
     humanize: bool
     inject_settle_secs: int
     dudul_inject: bool
@@ -128,6 +129,7 @@ def load_config() -> Config:
         proxy_url=_env("QODER_PROXY_URL"),
         proxy_file=_env("QODER_PROXY_FILE"),
         proxy_shuffle=_env_bool("QODER_PROXY_SHUFFLE", True),
+        no_proxy=_env_bool("QODER_NO_PROXY", False),
         humanize=_env_bool("QODER_HUMANIZE", True),
         inject_settle_secs=_env_int("QODER_INJECT_SETTLE_SECS", 5),
         dudul_inject=_env_bool("QODER_DUDUL_INJECT", True),

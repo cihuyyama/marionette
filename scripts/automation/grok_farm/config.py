@@ -74,6 +74,7 @@ class Config:
     proxy_url: str
     proxy_file: str
     proxy_shuffle: bool
+    no_proxy: bool
     humanize: bool
     humanize_headed: float
     humanize_headless: float
@@ -123,6 +124,7 @@ def load_config() -> Config:
         proxy_url=_env("GROK_PROXY_URL") or _env("BATCHER_PROXY_URL"),
         proxy_file=_env("GROK_PROXY_FILE"),
         proxy_shuffle=_env_bool("GROK_PROXY_SHUFFLE", True),
+        no_proxy=_env_bool("GROK_NO_PROXY", False),
         humanize=_env_bool("GROK_HUMANIZE", True),
         humanize_headed=_env_float("GROK_HUMANIZE_HEADED", 1),
         humanize_headless=_env_float("GROK_HUMANIZE_HEADLESS", 1),
