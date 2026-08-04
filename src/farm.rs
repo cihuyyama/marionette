@@ -408,6 +408,7 @@ impl FarmManager {
         email: Option<&str>,
         headless: bool,
         refresh: bool,
+        pool: SqlitePool,
     ) -> AppResult<Value> {
         self.start_inject_items(
             vec![InjectPatItem {
@@ -417,6 +418,7 @@ impl FarmManager {
             }],
             headless,
             refresh,
+            pool,
         )
         .await
     }
@@ -426,8 +428,9 @@ impl FarmManager {
         items: Vec<InjectPatItem>,
         headless: bool,
         refresh: bool,
+        pool: SqlitePool,
     ) -> AppResult<Value> {
-        self.start_inject_items(items, headless, refresh).await
+        self.start_inject_items(items, headless, refresh, pool).await
     }
 
     async fn start_inject_items(
@@ -435,6 +438,7 @@ impl FarmManager {
         items: Vec<InjectPatItem>,
         headless: bool,
         refresh: bool,
+        pool: SqlitePool,
     ) -> AppResult<Value> {
         if items.is_empty() {
             return Err(AppError::BadRequest(
@@ -550,6 +554,18 @@ impl FarmManager {
         } else {
             cmd.arg("--no-headless");
         }
+        let automation_proxy_on = db::get_proxy_settings(&pool)
+            .await
+            .map(|s| s.automation_mode != "off")
+            .unwrap_or(false);
+        let mut inject_proxy_plan = plan_farm_proxy(automation_proxy_on, None);
+        if inject_proxy_plan == FarmProxyPlan::DbPool {
+            inject_proxy_plan = match write_db_proxies(&pool, &work).await {
+                Some(path) => FarmProxyPlan::File(path),
+                None => FarmProxyPlan::DbPool,
+            };
+        }
+        apply_farm_proxy(&mut cmd, &inject_proxy_plan);
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -1095,35 +1111,12 @@ impl FarmManager {
             .await
             .map(|s| s.automation_mode != "off")
             .unwrap_or(false);
-        let proxy_plan = plan_farm_proxy(automation_proxy_on, req.proxy_file.as_deref());
-        let mut effective_proxy_file: Option<String> = None;
-        match &proxy_plan {
-            FarmProxyPlan::Disabled => {}
-            FarmProxyPlan::File(f) => {
-                effective_proxy_file = Some(f.clone());
-            }
-            FarmProxyPlan::DbPool => {
-                if let Ok(proxies) = db::list_active_proxies(&pool).await {
-                    let live: Vec<_> = proxies
-                        .into_iter()
-                        .filter(|p| p.health != "dead")
-                        .collect();
-                    if !live.is_empty() {
-                        let mut pbody = String::new();
-                        for p in &live {
-                            match (&p.username, &p.password) {
-                                (Some(u), Some(pw)) if !u.is_empty() => {
-                                    pbody.push_str(&format!("{}:{}:{}:{}\n", p.host, p.port, u, pw));
-                                }
-                                _ => pbody.push_str(&format!("{}:{}\n", p.host, p.port)),
-                            }
-                        }
-                        let ppath = work.join("proxies.txt");
-                        std::fs::write(&ppath, pbody)?;
-                        effective_proxy_file = Some(ppath.to_string_lossy().to_string());
-                    }
-                }
-            }
+        let mut proxy_plan = plan_farm_proxy(automation_proxy_on, req.proxy_file.as_deref());
+        if proxy_plan == FarmProxyPlan::DbPool {
+            proxy_plan = match write_db_proxies(&pool, &work).await {
+                Some(path) => FarmProxyPlan::File(path),
+                None => FarmProxyPlan::DbPool,
+            };
         }
 
         if req.skip_existing {
@@ -1266,18 +1259,7 @@ impl FarmManager {
                 cmd.arg("--skip-emails-file").arg(sp);
             }
         }
-        if let Some(ref pf) = effective_proxy_file {
-            let trimmed = pf.trim();
-            if !trimmed.is_empty() {
-                cmd.arg("--proxy-file").arg(trimmed);
-            }
-        }
-        if proxy_plan == FarmProxyPlan::Disabled {
-            cmd.arg("--no-proxy");
-            for key in FARM_PROXY_ENV_KEYS {
-                cmd.env(key, "");
-            }
-        }
+        apply_farm_proxy(&mut cmd, &proxy_plan);
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 
@@ -1981,6 +1963,39 @@ pub fn plan_farm_proxy(automation_on: bool, req_proxy_file: Option<&str>) -> Far
     }
 }
 
+/// Single choke point every farm subprocess (farm AND dudul inject) must call.
+/// Edit here to change proxy behavior for all spawn paths at once. Sets
+/// `--proxy-file` when a file is chosen, or forces `--no-proxy` plus neutralized
+/// proxy env when disabled so a stray `.env` cannot re-enable proxying behind
+/// the operator's toggle. DbPool needs the caller to have written proxies.txt
+/// and pass it as a File; on its own it applies nothing.
+pub fn apply_farm_proxy(cmd: &mut Command, plan: &FarmProxyPlan) {
+    let (args, blank_env) = farm_proxy_cmd_parts(plan);
+    for a in args {
+        cmd.arg(a);
+    }
+    for key in blank_env {
+        cmd.env(key, "");
+    }
+}
+
+/// Pure form of [`apply_farm_proxy`]: returns the CLI args to add and the env
+/// keys to blank, so the decision is unit-testable without a live Command.
+fn farm_proxy_cmd_parts(plan: &FarmProxyPlan) -> (Vec<String>, &'static [&'static str]) {
+    match plan {
+        FarmProxyPlan::File(f) => {
+            let trimmed = f.trim();
+            if trimmed.is_empty() {
+                (Vec::new(), &[])
+            } else {
+                (vec!["--proxy-file".to_string(), trimmed.to_string()], &[])
+            }
+        }
+        FarmProxyPlan::DbPool => (Vec::new(), &[]),
+        FarmProxyPlan::Disabled => (vec!["--no-proxy".to_string()], FARM_PROXY_ENV_KEYS),
+    }
+}
+
 /// Proxy-related env vars a farm subprocess reads. Neutralized (set empty) when
 /// the automation toggle is off so `.env`/inherited values cannot leak through.
 const FARM_PROXY_ENV_KEYS: &[&str] = &[
@@ -2034,6 +2049,29 @@ async fn db_provider_emails(
         }
     }
     Ok(set)
+}
+
+/// Write active, non-dead DB proxies as a `proxies.txt` in the job dir and
+/// return its path, or None when there are no usable proxies. Shared by every
+/// spawn path that resolves a `DbPool` plan.
+async fn write_db_proxies(pool: &SqlitePool, work: &Path) -> Option<String> {
+    let proxies = db::list_active_proxies(pool).await.ok()?;
+    let live: Vec<_> = proxies.into_iter().filter(|p| p.health != "dead").collect();
+    if live.is_empty() {
+        return None;
+    }
+    let mut pbody = String::new();
+    for p in &live {
+        match (&p.username, &p.password) {
+            (Some(u), Some(pw)) if !u.is_empty() => {
+                pbody.push_str(&format!("{}:{}:{}:{}\n", p.host, p.port, u, pw));
+            }
+            _ => pbody.push_str(&format!("{}:{}\n", p.host, p.port)),
+        }
+    }
+    let ppath = work.join("proxies.txt");
+    std::fs::write(&ppath, pbody).ok()?;
+    Some(ppath.to_string_lossy().to_string())
 }
 
 fn success_emails_from_output(path: &Path) -> std::collections::HashSet<String> {
@@ -2458,6 +2496,29 @@ mod tests {
         for k in ["QODER_PROXY_FILE", "GROK_PROXY_FILE", "BATCHER_PROXY_URL"] {
             assert!(FARM_PROXY_ENV_KEYS.contains(&k), "missing {k}");
         }
+    }
+
+    #[test]
+    fn apply_proxy_disabled_forces_no_proxy_and_blanks_env() {
+        let (args, blank) = farm_proxy_cmd_parts(&FarmProxyPlan::Disabled);
+        assert!(args.contains(&"--no-proxy".to_string()));
+        assert!(!args.iter().any(|a| a == "--proxy-file"));
+        assert_eq!(blank, FARM_PROXY_ENV_KEYS);
+    }
+
+    #[test]
+    fn apply_proxy_file_passes_proxy_file_no_no_proxy() {
+        let (args, blank) = farm_proxy_cmd_parts(&FarmProxyPlan::File("  C:/p.txt  ".into()));
+        assert_eq!(args, vec!["--proxy-file".to_string(), "C:/p.txt".to_string()]);
+        assert!(!args.iter().any(|a| a == "--no-proxy"));
+        assert!(blank.is_empty());
+    }
+
+    #[test]
+    fn apply_proxy_dbpool_applies_nothing() {
+        let (args, blank) = farm_proxy_cmd_parts(&FarmProxyPlan::DbPool);
+        assert!(args.is_empty());
+        assert!(blank.is_empty());
     }
 
     #[test]

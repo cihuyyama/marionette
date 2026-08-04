@@ -528,7 +528,7 @@ pub async fn inject_account(
     Ok(Json(
         state
             .farm
-            .start_inject(&id, &pat, email.as_deref(), headless, do_refresh)
+            .start_inject(&id, &pat, email.as_deref(), headless, do_refresh, state.pool.clone())
             .await?,
     ))
 }
@@ -635,7 +635,7 @@ pub async fn inject_bulk(
 
     let mut out = state
         .farm
-        .start_inject_bulk(items, headless, do_refresh)
+        .start_inject_bulk(items, headless, do_refresh, state.pool.clone())
         .await?;
     if let Some(obj) = out.as_object_mut() {
         obj.insert("total".into(), json!(total));

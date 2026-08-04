@@ -471,6 +471,16 @@ def main_inject_only(argv: list[str] | None = None) -> int:
         help="NDJSON progress on stdout",
     )
     p.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Force direct connection; ignore all proxy env/file sources",
+    )
+    p.add_argument(
+        "--proxy-file",
+        default=None,
+        help="Proxy list file (one URL per line; rotates per browser launch)",
+    )
+    p.add_argument(
         "--json-result",
         action="store_true",
         default=True,
@@ -489,6 +499,10 @@ def main_inject_only(argv: list[str] | None = None) -> int:
         overrides["inject_settle_secs"] = max(0, int(args.settle))
     if args.json_progress:
         overrides["json_progress"] = True
+    if args.no_proxy:
+        overrides["no_proxy"] = True
+    if args.proxy_file:
+        overrides["proxy_file"] = str(args.proxy_file)
     cfg = replace(cfg, **overrides)
 
     if args.pats_file:
