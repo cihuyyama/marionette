@@ -8,6 +8,7 @@ const NAV = [
   { to: "/accounts", label: "Accounts" },
   { to: "/models", label: "Models" },
   { to: "/combos", label: "Combos" },
+  { to: "/api-keys", label: "API keys" },
   { to: "/activity", label: "Activity" },
   { to: "/setup", label: "Setup" },
   { to: "/automation", label: "Automation" },

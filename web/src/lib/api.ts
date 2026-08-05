@@ -1104,3 +1104,92 @@ export function updateProxySettings(
     settings,
   );
 }
+
+export type ApiKey = {
+  id: string;
+  name: string | null;
+  key_prefix: string | null;
+  is_active: boolean;
+  rate_limit_rpm: number | null;
+  request_limit: number | null;
+  requests_used: number;
+  token_limit: number | null;
+  tokens_used: number;
+  model_allowlist: string[] | null;
+  last_used_at: string | null;
+  created_at: string;
+};
+
+export type ApiKeyUsageModel = {
+  model: string | null;
+  requests: number;
+  total_tokens: number;
+};
+
+export type ApiKeyUsage = {
+  key_id: string;
+  requests: number;
+  success?: number;
+  errors?: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  by_model?: ApiKeyUsageModel[];
+  models?: ApiKeyUsageModel[];
+};
+
+export function listApiKeys(settings?: Settings) {
+  return request<{ keys: ApiKey[] }>("/admin/keys", { auth: "admin" }, settings);
+}
+
+export function createApiKey(
+  body: {
+    name?: string;
+    rate_limit_rpm?: number;
+    request_limit?: number;
+    token_limit?: number;
+    model_allowlist?: string[];
+  },
+  settings?: Settings,
+) {
+  return request<{ key: string; key_view: ApiKey }>(
+    "/admin/keys",
+    { method: "POST", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+
+export function patchApiKey(
+  id: string,
+  body: {
+    name?: string;
+    is_active?: boolean;
+    rate_limit_rpm?: number | null;
+    request_limit?: number | null;
+    token_limit?: number | null;
+    model_allowlist?: string[] | null;
+  },
+  settings?: Settings,
+) {
+  return request<{ key: ApiKey }>(
+    `/admin/keys/${encodeURIComponent(id)}`,
+    { method: "PATCH", auth: "admin", body: JSON.stringify(body) },
+    settings,
+  );
+}
+
+export function deleteApiKey(id: string, settings?: Settings) {
+  return request<{ deleted: string }>(
+    `/admin/keys/${encodeURIComponent(id)}`,
+    { method: "DELETE", auth: "admin" },
+    settings,
+  );
+}
+
+export function apiKeyUsage(id: string, settings?: Settings) {
+  return request<ApiKeyUsage>(
+    `/admin/keys/${encodeURIComponent(id)}/usage`,
+    { auth: "admin" },
+    settings,
+  );
+}

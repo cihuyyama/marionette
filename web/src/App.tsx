@@ -16,6 +16,9 @@ const ModelsPage = lazy(() =>
 const CombosPage = lazy(() =>
   import("./pages/Combos").then((m) => ({ default: m.CombosPage })),
 );
+const ApiKeysPage = lazy(() =>
+  import("./pages/ApiKeys").then((m) => ({ default: m.ApiKeysPage })),
+);
 const ActivityPage = lazy(() =>
   import("./pages/Activity").then((m) => ({ default: m.ActivityPage })),
 );
@@ -57,6 +60,7 @@ export default function App() {
               <Route path="accounts/:provider" element={<AccountList />} />
               <Route path="models" element={<ModelsPage />} />
               <Route path="combos" element={<CombosPage />} />
+              <Route path="api-keys" element={<ApiKeysPage />} />
               <Route path="activity" element={<ActivityPage />} />
               <Route path="setup" element={<SetupPage />} />
               <Route
