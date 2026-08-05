@@ -296,6 +296,15 @@ button {
   background: var(--void);
 }
 
+.combo-edit-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, listAdminModels, type ModelObject } from "../lib/api";
 import { labelProvider } from "../lib/providers";
-import { ComboManager } from "../components/ComboManager";
 import { Link } from "react-router-dom";
 
 function FlagCell({ on, label }: { on: boolean; label: string }) {
@@ -209,8 +208,6 @@ export function ModelsPage() {
           </table>
         </div>
       )}
-
-      <ComboManager models={models} />
     </div>
   );
 }

@@ -609,6 +609,18 @@ export function updateCombo(
   );
 }
 
+export function putComboTargets(
+  slug: string,
+  targets: string[],
+  settings?: Settings,
+) {
+  return request<ModelCombo>(
+    `/admin/combos/${encodeURIComponent(slug)}/targets`,
+    { method: "PUT", auth: "admin", body: JSON.stringify({ targets }) },
+    settings,
+  );
+}
+
 export function deleteCombo(slug: string, settings?: Settings) {
   return request<{ ok: boolean; id: string }>(
     `/admin/combos/${encodeURIComponent(slug)}`,
