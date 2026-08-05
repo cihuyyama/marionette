@@ -24,6 +24,12 @@ pub enum AppError {
     Upstream { status: u16, body: String },
     #[error("provider: {0}")]
     Provider(String),
+    #[error("API key {0}")]
+    ApiKeyUnauthorized(String),
+    #[error("API key {0}")]
+    ApiKeyForbidden(String),
+    #[error("API key {0}")]
+    ApiKeyRateLimited(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
     #[error("http client: {0}")]
@@ -39,8 +45,8 @@ pub enum AppError {
 impl AppError {
     pub fn status_code(&self) -> StatusCode {
         match self {
-            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Unauthorized | AppError::ApiKeyUnauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden | AppError::ApiKeyForbidden(_) => StatusCode::FORBIDDEN,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NoAccounts(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -48,6 +54,7 @@ impl AppError {
             AppError::Upstream { status, .. } => {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
             }
+            AppError::ApiKeyRateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
             AppError::Provider(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

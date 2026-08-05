@@ -25,7 +25,11 @@ pub fn extract_bearer(parts: &Parts) -> Option<String> {
         })
 }
 
-pub struct PoolAuth;
+pub struct PoolAuth {
+    /// `None` for the env master key (MARIONETTE_API_KEY), `Some(id)` for a
+    /// database-backed key from `api_keys`.
+    pub key_id: Option<String>,
+}
 pub struct AdminAuth;
 
 impl FromRequestParts<AppState> for PoolAuth {
@@ -37,21 +41,16 @@ impl FromRequestParts<AppState> for PoolAuth {
     ) -> Result<Self, Self::Rejection> {
         let token = extract_bearer(parts).ok_or(AppError::Unauthorized)?;
         if token == state.config.api_key {
-            return Ok(PoolAuth);
+            return Ok(PoolAuth { key_id: None });
         }
-        // optional hashed keys table
         let hash = hash_key(&token);
-        let row = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM api_keys WHERE key_hash = ? AND is_active = 1",
-        )
-        .bind(&hash)
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(0);
-        if row > 0 {
-            Ok(PoolAuth)
-        } else {
-            Err(AppError::Unauthorized)
+        let key_id = crate::db::get_api_key_id_by_hash(&state.pool, &hash)
+            .await
+            .ok()
+            .flatten();
+        match key_id {
+            Some(id) => Ok(PoolAuth { key_id: Some(id) }),
+            None => Err(AppError::Unauthorized),
         }
     }
 }

@@ -42,11 +42,7 @@ impl ChatCompletionRequest {
     }
 
     pub fn upstream_model(&self) -> &str {
-        if let Some((_, rest)) = self.model.split_once('/') {
-            rest
-        } else {
-            &self.model
-        }
+        strip_first_prefix_segment(&self.model)
     }
 
     pub fn provider_id(&self) -> Option<&'static str> {
@@ -63,6 +59,15 @@ impl ChatCompletionRequest {
 }
 
 pub const COMBO_PREFIX: &str = "combo/";
+
+/// Strip the first `prefix/` segment; models without a segment are unchanged.
+pub fn strip_first_prefix_segment(model: &str) -> &str {
+    if let Some((_, rest)) = model.split_once('/') {
+        rest
+    } else {
+        model
+    }
+}
 
 /// Returns `None` for combo ids on purpose: combos are expanded in the pool
 /// before concrete routing, so a combo must never resolve to a single provider.

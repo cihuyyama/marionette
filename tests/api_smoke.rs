@@ -350,3 +350,87 @@ async fn combo_create_rejects_nested_combo_target() {
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn api_key_lifecycle_create_auth_revoke() {
+    let (app, _dir) = test_app().await;
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/keys")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"smoke"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let v = body_json(created).await;
+    let plaintext = v["key"].as_str().expect("plaintext returned once").to_string();
+    assert!(plaintext.starts_with("mk-"));
+    assert!(plaintext.len() >= 43, "mk- + 40+ hex chars");
+    let key_id = v["key_view"]["id"].as_str().unwrap().to_string();
+    assert_eq!(v["key_view"]["key_prefix"], &plaintext[..8]);
+    assert!(v["key_view"].get("key_hash").is_none(), "never leak hash");
+
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, format!("Bearer {plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK, "fresh db key authenticates");
+
+    let revoked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/keys/{key_id}"))
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"is_active":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, format!("Bearer {plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_key_admin_endpoints_require_admin_key() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/keys")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}

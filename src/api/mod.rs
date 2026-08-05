@@ -2,6 +2,7 @@ pub mod admin;
 pub mod chat;
 pub mod health;
 pub mod images;
+pub mod keys;
 pub mod models;
 pub mod proxies;
 
@@ -28,6 +29,15 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/stats", get(admin::stats))
         .route("/admin/connection", get(admin::connection))
         .route("/admin/models", get(models::list_models_admin))
+        .route(
+            "/admin/keys",
+            get(keys::list_keys).post(keys::create_key),
+        )
+        .route(
+            "/admin/keys/{id}",
+            axum::routing::patch(keys::patch_key).delete(keys::delete_key),
+        )
+        .route("/admin/keys/{id}/usage", get(keys::key_usage))
         .route("/admin/usage", get(admin::usage))
         .route("/admin/requests", get(admin::list_requests))
         .route("/admin/requests/{id}", get(admin::get_request))

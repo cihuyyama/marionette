@@ -5,7 +5,9 @@ use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
 use crate::refresh_job::RefreshManager;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,6 +19,8 @@ pub struct AppState {
     pub farm: FarmManager,
     pub refresh: RefreshManager,
     pub proxies: ProxyManager,
+    /// Sliding-window RPM limiter keyed by api_keys id (env master key never enters).
+    pub rate_windows: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
 }
 
 impl AppState {
@@ -43,6 +47,7 @@ impl AppState {
             farm,
             refresh: RefreshManager::new(),
             proxies,
+            rate_windows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

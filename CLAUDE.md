@@ -174,6 +174,8 @@ From `.env.example` / `Config::from_env`:
 | `AdminAuth` | same | **only** `MARIONETTE_ADMIN_KEY` | `/admin/*` |
 | none | — | — | `/health` |
 
+`PoolAuth.key_id`: `None` = env master key (unlimited, zero-cost); `Some(id)` = DB key. Per-key enforcement (`pool::check_and_register_key`, chat + images): revoked → **401**, model allowlist → **403**, request budget / token budget / RPM sliding window → **429** (messages start with `API key …`; combo = one permission unit, inner targets not re-checked). Budget pre-flight can overshoot slightly under concurrency — accepted. Usage lands in `request_logs.api_key_id` + `api_keys.requests_used` / `tokens_used`.
+
 Dashboard (`web/src/lib/settings.ts`):
 
 - localStorage key: `marionette.admin.settings.v1`
@@ -216,6 +218,11 @@ Dashboard (`web/src/lib/settings.ts`):
 | PATCH | `/admin/combos/{slug}` | admin (name / is_active; slug immutable) |
 | PUT | `/admin/combos/{slug}/targets` | admin (replace ordered targets) |
 | DELETE | `/admin/combos/{slug}` | admin |
+| GET | `/admin/keys` | admin (list pool API keys, masked) |
+| POST | `/admin/keys` | admin (create; returns plaintext `mk-…` **once**, stores hash only) |
+| PATCH | `/admin/keys/{id}` | admin (name / is_active / limits / allowlist; explicit `null` clears a limit) |
+| DELETE | `/admin/keys/{id}` | admin (revoke) |
+| GET | `/admin/keys/{id}/usage` | admin (aggregate from request_logs) |
 
 Combo routes use `{slug}` (axum path params don't span `/`); server reconstructs `combo/{slug}` via `combo_id_from_slug`.
 
@@ -417,8 +424,8 @@ UI split:
 | Item | Value |
 |------|--------|
 | Stack | React 19, Vite 6, TS, react-router-dom 7 — **no** component library |
-| Routes | `/` Overview, `/accounts`, `/accounts/:provider`, `/models`, `/activity`, `/setup`, `/automation`, `/smoke`, `/settings` (`/import` → Settings) |
-| Nav (English ops) | Overview · Accounts · Models · Activity · Setup · Automation · Smoke test · Settings |
+| Routes | `/` Overview, `/accounts`, `/accounts/:provider`, `/models`, `/combos`, `/api-keys`, `/activity`, `/setup`, `/automation`, `/smoke`, `/settings` (`/import` → Settings) |
+| Nav (English ops) | Overview · Accounts · Models · Combos · API keys · Activity · Setup · Automation · Smoke test · Settings |
 | Design | `docs/DESIGN.md` / `web/DESIGN.md` — void/ink/parchment/thread gold; dark only |
 | API client | `web/src/lib/api.ts` — `auth: "admin" \| "pool" \| "none"` |
 | Auth gate | `AuthGate` + `marionette-unauthorized` event on 401 |

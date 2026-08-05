@@ -10,6 +10,7 @@ use crate::state::AppState;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::SqlitePool;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
@@ -25,7 +26,13 @@ pub struct ImageJob {
 }
 
 /// Pick grok-cli account, ensure auth, call image generation, apply errors like chat.
-pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
+/// Note: image requests have no usage object, so key token budget decrement is not
+/// applicable; only request budget + rate limit apply (see api/images.rs pre-flight).
+pub async fn handle_image(
+    state: &AppState,
+    job: ImageJob,
+    key_id: Option<String>,
+) -> AppResult<Value> {
     let provider_id = image_provider_id(&job.model).ok_or_else(|| {
         AppError::BadRequest(format!("unknown or unsupported image model: {}", job.model))
     })?;
@@ -70,6 +77,7 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                             Some(e.to_string()),
                             None,
                             None,
+                            key_id.clone(),
                         )
                         .await;
                         return Err(e);
@@ -137,6 +145,7 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                     None,
                     None,
                     None,
+                    key_id.clone(),
                 )
                 .await;
                 let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
@@ -184,6 +193,7 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
                                         None,
                                         None,
                                         None,
+                                        key_id.clone(),
                                     )
                                     .await;
                                     let _ = db::note_pick_success(
@@ -290,6 +300,7 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
         Some(err.to_string()),
         None,
         None,
+        key_id.clone(),
     )
     .await;
     Err(err)
@@ -298,11 +309,117 @@ pub async fn handle_image(state: &AppState, job: ImageJob) -> AppResult<Value> {
 pub async fn handle_chat(
     state: &AppState,
     req: ChatCompletionRequest,
+    key_id: Option<String>,
 ) -> AppResult<ChatOutcome> {
+    // Combo is ONE permission unit: only the requested model string is checked
+    // here, never the combo's inner targets.
+    check_and_register_key(state, key_id.as_deref(), &req.model).await?;
     if crate::openai::is_combo_model(&req.model) {
-        return handle_combo_chat(state, req).await;
+        return handle_combo_chat(state, req, key_id).await;
     }
-    handle_concrete_chat(state, req, false).await
+    handle_concrete_chat(state, req, false, key_id).await
+}
+
+const RPM_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Allowlist semantics: NULL/empty = allow all. Model `m` is allowed iff some
+/// entry `a` satisfies `a == m` or the prefix-stripped upstream ids match
+/// (e.g. `gcli/grok-4.5` allows bare `grok-4.5` and vice versa).
+pub fn model_allowed(allowlist: &[String], model: &str) -> bool {
+    if allowlist.is_empty() {
+        return true;
+    }
+    use crate::openai::strip_first_prefix_segment as upstream;
+    allowlist
+        .iter()
+        .any(|a| a == model || upstream(a) == upstream(model))
+}
+
+fn rpm_admits(
+    windows: &std::sync::Mutex<HashMap<String, VecDeque<Instant>>>,
+    key_id: &str,
+    limit: i64,
+) -> bool {
+    let mut guard = match windows.lock() {
+        Ok(g) => g,
+        // Poisoned lock is fail-open: never hard-block the pool on bookkeeping.
+        Err(_) => return true,
+    };
+    let now = Instant::now();
+    let window = guard.entry(key_id.to_string()).or_default();
+    while let Some(front) = window.front() {
+        if now.duration_since(*front) > RPM_WINDOW {
+            window.pop_front();
+        } else {
+            break;
+        }
+    }
+    if window.len() as i64 >= limit {
+        return false;
+    }
+    window.push_back(now);
+    true
+}
+
+/// Pre-flight per-key enforcement shared by chat and images. Order: revoked →
+/// allowlist → request budget → token budget → RPM. On pass, registers the
+/// request (requests_used + 1, last_used_at) and the RPM slot.
+/// Env master key (`key_id = None`) is zero-cost.
+pub async fn check_and_register_key(
+    state: &AppState,
+    key_id: Option<&str>,
+    model: &str,
+) -> AppResult<()> {
+    let Some(key_id) = key_id else {
+        return Ok(());
+    };
+    let key = db::get_api_key(&state.pool, key_id)
+        .await?
+        .ok_or_else(|| AppError::ApiKeyUnauthorized("not found or revoked".into()))?;
+    if !key.is_enabled() {
+        warn!(key_id = %key.id, "API key revoked");
+        return Err(AppError::ApiKeyUnauthorized("revoked".into()));
+    }
+    if !model_allowed(&key.allowlist_entries(), model) {
+        info!(key_id = %key.id, model = %model, "API key model not allowed");
+        return Err(AppError::ApiKeyForbidden(format!(
+            "model not allowed: {model}"
+        )));
+    }
+    if let Some(limit) = key.request_limit {
+        if key.requests_used >= limit {
+            info!(
+                key_id = %key.id, limit, used = key.requests_used,
+                "API key request budget exhausted"
+            );
+            return Err(AppError::ApiKeyRateLimited(
+                "request budget exhausted".into(),
+            ));
+        }
+    }
+    if let Some(limit) = key.token_limit {
+        if key.tokens_used >= limit {
+            info!(
+                key_id = %key.id, limit, used = key.tokens_used,
+                "API key token budget exhausted"
+            );
+            return Err(AppError::ApiKeyRateLimited(
+                "token budget exhausted".into(),
+            ));
+        }
+    }
+    if let Some(rpm) = key.rate_limit_rpm {
+        if !rpm_admits(&state.rate_windows, key_id, rpm) {
+            info!(key_id = %key.id, rpm, "API key rate limit exceeded");
+            return Err(AppError::ApiKeyRateLimited(format!(
+                "rate limit exceeded: {rpm} requests/min"
+            )));
+        }
+    }
+    // Budget pre-flight check-then-increment can overshoot slightly under
+    // concurrent requests — acceptable.
+    db::record_api_key_request(&state.pool, key_id).await?;
+    Ok(())
 }
 
 /// A concrete target failed before returning any response; advancing to the
@@ -322,6 +439,7 @@ fn should_fallback_to_next_target(err: &AppError) -> bool {
 async fn handle_combo_chat(
     state: &AppState,
     req: ChatCompletionRequest,
+    key_id: Option<String>,
 ) -> AppResult<ChatOutcome> {
     let combo = db::get_model_combo(&state.pool, &req.model)
         .await?
@@ -354,7 +472,7 @@ async fn handle_combo_chat(
         let mut target_req = req.clone();
         target_req.model = target.clone();
         let provider = crate::openai::provider_id_for_model(target).unwrap_or("unknown");
-        match handle_concrete_chat(state, target_req, true).await {
+        match handle_concrete_chat(state, target_req, true, key_id.clone()).await {
             Ok(outcome) => {
                 trace.push(serde_json::json!({
                     "i": idx, "model": target, "provider": provider, "outcome": "success"
@@ -409,6 +527,7 @@ async fn handle_combo_chat(
             combo_id: Some(req.model.clone()),
             fallback_count: Some(fallback_count),
             attempt_trace: Some(trace_json.to_string()),
+            api_key_id: key_id.clone(),
         },
     )
     .await;
@@ -419,6 +538,7 @@ async fn handle_concrete_chat(
     state: &AppState,
     req: ChatCompletionRequest,
     suppress_error_log: bool,
+    key_id: Option<String>,
 ) -> AppResult<ChatOutcome> {
     let provider_id = req
         .provider_id()
@@ -463,6 +583,7 @@ async fn handle_concrete_chat(
                                 Some(
                                     serde_json::json!({ "error": e.to_string() }).to_string(),
                                 ),
+                                key_id.clone(),
                             )
                             .await;
                         }
@@ -510,6 +631,7 @@ async fn handle_concrete_chat(
                     account,
                     outcome,
                     request_body.clone(),
+                    key_id.clone(),
                 )
                 .await;
             }
@@ -534,6 +656,7 @@ async fn handle_concrete_chat(
                                         account,
                                         outcome,
                                         request_body.clone(),
+                                        key_id.clone(),
                                     )
                                     .await;
                                 }
@@ -585,6 +708,7 @@ async fn handle_concrete_chat(
             Some(err.to_string()),
             request_body,
             Some(serde_json::json!({ "error": err.to_string() }).to_string()),
+            key_id.clone(),
         )
         .await;
     }
@@ -648,6 +772,7 @@ async fn qoder_free_path_cap(
     crate::providers::qoder::optimistic_consume_free_call(account, model)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_chat_success(
     state: &AppState,
     provider: Arc<dyn Provider>,
@@ -658,6 +783,7 @@ async fn handle_chat_success(
     mut account: Account,
     outcome: ChatOutcome,
     request_body: Option<String>,
+    key_id: Option<String>,
 ) -> AppResult<ChatOutcome> {
     let duration_ms = started.elapsed().as_millis() as i64;
     match outcome {
@@ -669,6 +795,11 @@ async fn handle_chat_success(
                 (None, Some(c)) => Some(c),
                 _ => None,
             });
+            if let (Some(k), Some(t)) = (key_id.as_deref(), token_spend) {
+                if t > 0 {
+                    let _ = db::add_api_key_tokens(&state.pool, k, t).await;
+                }
+            }
             let (q_before, q_after, used) = apply_success_quota(
                 state,
                 provider.as_ref(),
@@ -704,6 +835,7 @@ async fn handle_chat_success(
                 None,
                 request_body,
                 response_body,
+                key_id.clone(),
             )
             .await;
             let _ = db::note_pick_success(&state.pool, provider_id, strategy, &account.id).await;
@@ -741,6 +873,7 @@ async fn handle_chat_success(
                 None,
                 request_body,
                 response_body,
+                key_id.clone(),
             )
             .await
             {
@@ -767,6 +900,7 @@ async fn handle_chat_success(
             let local_decr = should_local_token_decrement(provider_id);
             let server_sync = should_server_resync_quota(provider_id);
             let started_at = started;
+            let stream_key_id = key_id.clone();
             tokio::spawn(async move {
                 let usage = match usage_rx.await {
                     Ok(Some(u)) => u.normalized(),
@@ -802,6 +936,11 @@ async fn handle_chat_success(
                 } else {
                     usage.prompt_tokens + usage.completion_tokens
                 };
+                if let Some(k) = stream_key_id.as_deref() {
+                    if total > 0 {
+                        let _ = db::add_api_key_tokens(&pool, k, total).await;
+                    }
+                }
                 let mut credits_used = None;
                 let mut q_before = None;
                 let mut q_after = None;
@@ -938,6 +1077,7 @@ fn extract_usage(v: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
     (prompt, completion, total)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn log_request(
     pool: &SqlitePool,
     provider: &str,
@@ -955,6 +1095,7 @@ async fn log_request(
     error_message: Option<String>,
     request_body: Option<String>,
     response_body: Option<String>,
+    api_key_id: Option<String>,
 ) -> AppResult<()> {
     // Fire-and-forget: the caller discards the id, so keep the DB insert off
     // the response path. Owned NewRequestLog moves into the spawned task.
@@ -980,6 +1121,7 @@ async fn log_request(
         combo_id: None,
         fallback_count: None,
         attempt_trace: None,
+        api_key_id,
     };
     tokio::spawn(async move {
         if let Err(e) = db::insert_request_log(&pool, new_log).await {
@@ -989,6 +1131,7 @@ async fn log_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn log_request_returning_id(
     pool: &SqlitePool,
     provider: &str,
@@ -1006,6 +1149,7 @@ async fn log_request_returning_id(
     error_message: Option<String>,
     request_body: Option<String>,
     response_body: Option<String>,
+    api_key_id: Option<String>,
 ) -> AppResult<String> {
     db::insert_request_log(
         pool,
@@ -1030,6 +1174,7 @@ async fn log_request_returning_id(
             combo_id: None,
             fallback_count: None,
             attempt_trace: None,
+            api_key_id,
         },
     )
     .await
@@ -1164,5 +1309,242 @@ mod tests {
         assert!(!should_fallback_to_next_target(&AppError::NotImplemented("x".into())));
         assert!(!should_fallback_to_next_target(&AppError::Unauthorized));
         assert!(!should_fallback_to_next_target(&AppError::Forbidden));
+    }
+
+    #[test]
+    fn allowlist_empty_allows_everything() {
+        assert!(model_allowed(&[], "qd/auto"));
+        assert!(model_allowed(&[], "combo/anything"));
+    }
+
+    #[test]
+    fn allowlist_exact_match() {
+        let list = vec!["qd/auto".to_string()];
+        assert!(model_allowed(&list, "qd/auto"));
+        assert!(!model_allowed(&list, "qd/ultimate"));
+    }
+
+    #[test]
+    fn allowlist_prefix_stripped_equivalence() {
+        let prefixed = vec!["gcli/grok-4.5".to_string()];
+        assert!(model_allowed(&prefixed, "grok-4.5"));
+        assert!(model_allowed(&prefixed, "gcli/grok-4.5"));
+        let bare = vec!["grok-4.5".to_string()];
+        assert!(model_allowed(&bare, "gcli/grok-4.5"));
+        assert!(model_allowed(&bare, "grok-4.5"));
+        assert!(!model_allowed(&bare, "qd/ultimate"));
+    }
+
+    #[test]
+    fn allowlist_combo_checked_as_one_unit() {
+        let list = vec!["combo/coding".to_string()];
+        assert!(
+            model_allowed(&list, "combo/coding"),
+            "combo id itself is the permission unit"
+        );
+        assert!(
+            !model_allowed(&list, "qd/ultimate"),
+            "combo inner targets must never be matched"
+        );
+        assert!(!model_allowed(&list, "gcli/grok-4.5"));
+    }
+
+    #[test]
+    fn rpm_window_admits_until_limit() {
+        let windows = std::sync::Mutex::new(HashMap::new());
+        assert!(rpm_admits(&windows, "k1", 2));
+        assert!(rpm_admits(&windows, "k1", 2));
+        assert!(!rpm_admits(&windows, "k1", 2), "third call inside 60s window");
+        assert!(rpm_admits(&windows, "k2", 2), "per-key windows are independent");
+    }
+
+    async fn test_state(prefix: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("marionette-{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config::from_env();
+        cfg.db_path = dir.join("test.sqlite");
+        cfg.api_key = "test-pool-key".into();
+        cfg.admin_key = "test-admin-key".into();
+        let pool = db::connect(&cfg.db_path).await.unwrap();
+        (AppState::new(pool, cfg), dir)
+    }
+
+    async fn make_key(state: &AppState, limits: db::NewApiKey) -> db::ApiKeyRow {
+        db::create_api_key(&state.pool, limits).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn env_master_key_bypasses_all_checks() {
+        let (state, _dir) = test_state("envbypass").await;
+        check_and_register_key(&state, None, "qd/auto").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_increments_requests_and_sets_last_used() {
+        let (state, _dir) = test_state("register").await;
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-test"),
+                key_prefix: "mk-test".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await;
+        check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap();
+        let after = db::get_api_key(&state.pool, &key.id).await.unwrap().unwrap();
+        assert_eq!(after.requests_used, 1);
+        assert!(after.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn revoked_or_missing_key_is_unauthorized() {
+        let (state, _dir) = test_state("revoked").await;
+        let err = check_and_register_key(&state, Some("nope"), "qd/auto")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyUnauthorized(_)));
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-test2"),
+                key_prefix: "mk-test2".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await;
+        db::update_api_key(
+            &state.pool,
+            &key.id,
+            db::UpdateApiKey {
+                name: None,
+                is_active: Some(false),
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await
+        .unwrap();
+        let err = check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyUnauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn disallowed_model_is_forbidden() {
+        let (state, _dir) = test_state("forbidden").await;
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-al"),
+                key_prefix: "mk-al".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: Some(vec!["qd/auto".into()]),
+            },
+        )
+        .await;
+        let err = check_and_register_key(&state, Some(&key.id), "qd/ultimate")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyForbidden(_)));
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn request_budget_exhausted_is_429() {
+        let (state, _dir) = test_state("reqbudget").await;
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-rb"),
+                key_prefix: "mk-rb".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: Some(1),
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await;
+        check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap();
+        let err = check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyRateLimited(_)));
+        assert_eq!(
+            err.status_code(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn token_budget_exhausted_is_429() {
+        let (state, _dir) = test_state("tokbudget").await;
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-tb"),
+                key_prefix: "mk-tb".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: Some(5),
+                model_allowlist: None,
+            },
+        )
+        .await;
+        db::add_api_key_tokens(&state.pool, &key.id, 5).await.unwrap();
+        let err = check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyRateLimited(_)));
+    }
+
+    #[tokio::test]
+    async fn rpm_limit_rejects_over_window() {
+        let (state, _dir) = test_state("rpmlimit").await;
+        let key = make_key(
+            &state,
+            db::NewApiKey {
+                key_hash: crate::auth::hash_key("mk-rpm"),
+                key_prefix: "mk-rpm".into(),
+                name: None,
+                rate_limit_rpm: Some(2),
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await;
+        check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap();
+        check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap();
+        let err = check_and_register_key(&state, Some(&key.id), "qd/auto")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ApiKeyRateLimited(_)));
+        let after = db::get_api_key(&state.pool, &key.id).await.unwrap().unwrap();
+        assert_eq!(after.requests_used, 2, "rejected request must not count");
     }
 }

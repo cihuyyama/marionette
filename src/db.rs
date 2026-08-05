@@ -56,6 +56,249 @@ pub struct ApiKeyRow {
     pub name: Option<String>,
     pub is_active: i64,
     pub created_at: String,
+    pub rate_limit_rpm: Option<i64>,
+    pub request_limit: Option<i64>,
+    pub requests_used: i64,
+    pub token_limit: Option<i64>,
+    pub tokens_used: i64,
+    pub model_allowlist: Option<String>,
+    pub key_prefix: Option<String>,
+    pub last_used_at: Option<String>,
+}
+
+impl ApiKeyRow {
+    pub fn is_enabled(&self) -> bool {
+        self.is_active != 0
+    }
+
+    /// Parse `model_allowlist` JSON text into model ids. Invalid JSON or
+    /// non-string entries are ignored (fail-open). NULL / empty = allow all.
+    pub fn allowlist_entries(&self) -> Vec<String> {
+        match self.model_allowlist.as_deref() {
+            None => Vec::new(),
+            Some(s) if s.trim().is_empty() => Vec::new(),
+            Some(s) => serde_json::from_str::<Vec<String>>(s).unwrap_or_default(),
+        }
+    }
+}
+
+const API_KEY_COLUMNS: &str = r#"
+    id, key_hash, name, is_active, created_at,
+    rate_limit_rpm, request_limit, requests_used,
+    token_limit, tokens_used, model_allowlist, key_prefix, last_used_at
+"#;
+
+#[derive(Debug, Clone)]
+pub struct NewApiKey {
+    pub key_hash: String,
+    pub key_prefix: String,
+    pub name: Option<String>,
+    pub rate_limit_rpm: Option<i64>,
+    pub request_limit: Option<i64>,
+    pub token_limit: Option<i64>,
+    pub model_allowlist: Option<Vec<String>>,
+}
+
+pub async fn create_api_key(pool: &SqlitePool, new_key: NewApiKey) -> AppResult<ApiKeyRow> {
+    let id = Uuid::new_v4().to_string();
+    let created_at = now_rfc3339();
+    let allowlist_json = new_key
+        .model_allowlist
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    sqlx::query(
+        r#"
+        INSERT INTO api_keys (
+          id, key_hash, name, is_active, created_at,
+          rate_limit_rpm, request_limit, requests_used,
+          token_limit, tokens_used, model_allowlist, key_prefix, last_used_at
+        ) VALUES (?, ?, ?, 1, ?, ?, ?, 0, ?, 0, ?, ?, NULL)
+        "#,
+    )
+    .bind(&id)
+    .bind(&new_key.key_hash)
+    .bind(&new_key.name)
+    .bind(&created_at)
+    .bind(new_key.rate_limit_rpm)
+    .bind(new_key.request_limit)
+    .bind(new_key.token_limit)
+    .bind(&allowlist_json)
+    .bind(&new_key.key_prefix)
+    .execute(pool)
+    .await?;
+    get_api_key(pool, &id)
+        .await?
+        .ok_or_else(|| AppError::Internal("api key insert not visible".into()))
+}
+
+pub async fn list_api_keys(pool: &SqlitePool) -> AppResult<Vec<ApiKeyRow>> {
+    let rows = sqlx::query_as::<_, ApiKeyRow>(&format!(
+        "SELECT {API_KEY_COLUMNS} FROM api_keys ORDER BY created_at DESC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn get_api_key(pool: &SqlitePool, id: &str) -> AppResult<Option<ApiKeyRow>> {
+    let row = sqlx::query_as::<_, ApiKeyRow>(&format!(
+        "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn get_api_key_id_by_hash(pool: &SqlitePool, key_hash: &str) -> AppResult<Option<String>> {
+    let id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM api_keys WHERE key_hash = ? AND is_active = 1",
+    )
+    .bind(key_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(id)
+}
+
+pub struct UpdateApiKey {
+    pub name: Option<Option<String>>,
+    pub is_active: Option<bool>,
+    pub rate_limit_rpm: Option<Option<i64>>,
+    pub request_limit: Option<Option<i64>>,
+    pub token_limit: Option<Option<i64>>,
+    pub model_allowlist: Option<Option<Vec<String>>>,
+}
+
+pub async fn update_api_key(
+    pool: &SqlitePool,
+    id: &str,
+    patch: UpdateApiKey,
+) -> AppResult<Option<ApiKeyRow>> {
+    let Some(current) = get_api_key(pool, id).await? else {
+        return Ok(None);
+    };
+    let name = patch.name.unwrap_or(current.name.clone());
+    let is_active = match patch.is_active {
+        Some(v) => {
+            if v {
+                1
+            } else {
+                0
+            }
+        }
+        None => current.is_active,
+    };
+    let rate_limit_rpm = patch.rate_limit_rpm.unwrap_or(current.rate_limit_rpm);
+    let request_limit = patch.request_limit.unwrap_or(current.request_limit);
+    let token_limit = patch.token_limit.unwrap_or(current.token_limit);
+    let model_allowlist = match patch.model_allowlist {
+        Some(list) => list
+            .map(|l| serde_json::to_string(&l))
+            .transpose()?
+            .or(Some("[]".to_string())),
+        None => current.model_allowlist.clone(),
+    };
+    sqlx::query(
+        r#"
+        UPDATE api_keys SET
+          name = ?, is_active = ?, rate_limit_rpm = ?, request_limit = ?,
+          token_limit = ?, model_allowlist = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&name)
+    .bind(is_active)
+    .bind(rate_limit_rpm)
+    .bind(request_limit)
+    .bind(token_limit)
+    .bind(&model_allowlist)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    get_api_key(pool, id).await
+}
+
+pub async fn delete_api_key(pool: &SqlitePool, id: &str) -> AppResult<bool> {
+    let res = sqlx::query("DELETE FROM api_keys WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn record_api_key_request(pool: &SqlitePool, key_id: &str) -> AppResult<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE api_keys SET requests_used = requests_used + 1, last_used_at = ? WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(key_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn add_api_key_tokens(pool: &SqlitePool, key_id: &str, tokens: i64) -> AppResult<()> {
+    if tokens <= 0 {
+        return Ok(());
+    }
+    sqlx::query("UPDATE api_keys SET tokens_used = tokens_used + ? WHERE id = ?")
+        .bind(tokens)
+        .bind(key_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn api_key_usage(pool: &SqlitePool, key_id: &str) -> AppResult<Value> {
+    let totals = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        r#"
+        SELECT
+          COUNT(*) as requests,
+          COALESCE(SUM(prompt_tokens), 0),
+          COALESCE(SUM(completion_tokens), 0),
+          COALESCE(SUM(total_tokens), 0)
+        FROM request_logs
+        WHERE api_key_id = ?
+        "#,
+    )
+    .bind(key_id)
+    .fetch_one(pool)
+    .await?;
+    let by_model = sqlx::query_as::<_, (Option<String>, i64, i64)>(
+        r#"
+        SELECT
+          model,
+          COUNT(*) as requests,
+          COALESCE(SUM(total_tokens), 0) as total_tokens
+        FROM request_logs
+        WHERE api_key_id = ?
+        GROUP BY model
+        ORDER BY requests DESC, total_tokens DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(key_id)
+    .fetch_all(pool)
+    .await?;
+    let models: Vec<Value> = by_model
+        .into_iter()
+        .map(|(model, requests, total_tokens)| {
+            serde_json::json!({
+                "model": model,
+                "requests": requests,
+                "total_tokens": total_tokens,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "requests": totals.0,
+        "prompt_tokens": totals.1,
+        "completion_tokens": totals.2,
+        "total_tokens": totals.3,
+        "models": models,
+    }))
 }
 
 pub async fn connect(db_path: &Path) -> AppResult<SqlitePool> {
@@ -214,6 +457,48 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     migrate_provider_settings_columns(pool).await?;
     migrate_request_log_body_columns(pool).await?;
     migrate_request_log_combo_columns(pool).await?;
+    migrate_api_key_limit_columns(pool).await?;
+    migrate_request_log_api_key_column(pool).await?;
+    Ok(())
+}
+
+async fn migrate_api_key_limit_columns(pool: &SqlitePool) -> AppResult<()> {
+    let alters = [
+        "ALTER TABLE api_keys ADD COLUMN rate_limit_rpm INTEGER",
+        "ALTER TABLE api_keys ADD COLUMN request_limit INTEGER",
+        "ALTER TABLE api_keys ADD COLUMN requests_used INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE api_keys ADD COLUMN token_limit INTEGER",
+        "ALTER TABLE api_keys ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE api_keys ADD COLUMN model_allowlist TEXT",
+        "ALTER TABLE api_keys ADD COLUMN key_prefix TEXT",
+        "ALTER TABLE api_keys ADD COLUMN last_used_at TEXT",
+    ];
+    for sql in alters {
+        if let Err(e) = sqlx::query(sql).execute(pool).await {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_request_log_api_key_column(pool: &SqlitePool) -> AppResult<()> {
+    if let Err(e) = sqlx::query("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT")
+        .execute(pool)
+        .await
+    {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            return Err(e.into());
+        }
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key ON request_logs(api_key_id)",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -620,6 +905,7 @@ pub struct RequestLog {
     pub requested_model: Option<String>,
     pub combo_id: Option<String>,
     pub fallback_count: Option<i64>,
+    pub api_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -646,6 +932,7 @@ pub struct RequestLogDetail {
     pub combo_id: Option<String>,
     pub fallback_count: Option<i64>,
     pub attempt_trace: Option<String>,
+    pub api_key_id: Option<String>,
 }
 
 const REQUEST_LOG_LIGHT_COLUMNS: &str = r#"
@@ -653,7 +940,7 @@ const REQUEST_LOG_LIGHT_COLUMNS: &str = r#"
     prompt_tokens, completion_tokens, total_tokens,
     credits_used, account_quota_before, account_quota_after,
     account_id, account_email, error_message,
-    requested_model, combo_id, fallback_count
+    requested_model, combo_id, fallback_count, api_key_id
 "#;
 
 #[derive(Debug, Clone)]
@@ -678,6 +965,7 @@ pub struct NewRequestLog {
     pub combo_id: Option<String>,
     pub fallback_count: Option<i64>,
     pub attempt_trace: Option<String>,
+    pub api_key_id: Option<String>,
 }
 
 pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppResult<String> {
@@ -691,8 +979,8 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
           credits_used, account_quota_before, account_quota_after,
           account_id, account_email, error_message,
           request_body, response_body,
-          requested_model, combo_id, fallback_count, attempt_trace
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          requested_model, combo_id, fallback_count, attempt_trace, api_key_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -717,6 +1005,7 @@ pub async fn insert_request_log(pool: &SqlitePool, log: NewRequestLog) -> AppRes
     .bind(&log.combo_id)
     .bind(log.fallback_count)
     .bind(&log.attempt_trace)
+    .bind(&log.api_key_id)
     .execute(pool)
     .await?;
     Ok(id)
@@ -731,7 +1020,7 @@ pub async fn get_request_log(pool: &SqlitePool, id: &str) -> AppResult<RequestLo
           credits_used, account_quota_before, account_quota_after,
           account_id, account_email, error_message,
           request_body, response_body,
-          requested_model, combo_id, fallback_count, attempt_trace
+          requested_model, combo_id, fallback_count, attempt_trace, api_key_id
         FROM request_logs
         WHERE id = ?
         "#,
@@ -2837,5 +3126,184 @@ mod tests {
         assert!(!delete_model_combo(&pool, "combo/coding").await.unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn temp_db(prefix: &str) -> (SqlitePool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("marionette-{prefix}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        let pool = connect(&path).await.unwrap();
+        (pool, dir)
+    }
+
+    #[tokio::test]
+    async fn migrations_are_idempotent_for_api_keys_and_logs() {
+        let dir = std::env::temp_dir().join(format!("marionette-migr-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.sqlite");
+        connect(&path).await.unwrap();
+        connect(&path).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn api_key_crud_roundtrip() {
+        let (pool, _dir) = temp_db("keys").await;
+
+        let created = create_api_key(
+            &pool,
+            NewApiKey {
+                key_hash: "hash-a".into(),
+                key_prefix: "mk-aaaa".into(),
+                name: Some("ops".into()),
+                rate_limit_rpm: Some(10),
+                request_limit: Some(100),
+                token_limit: Some(5000),
+                model_allowlist: Some(vec!["qd/auto".into(), "gcli/grok-4.5".into()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.key_hash, "hash-a");
+        assert_eq!(created.key_prefix.as_deref(), Some("mk-aaaa"));
+        assert_eq!(created.requests_used, 0);
+        assert_eq!(created.tokens_used, 0);
+        assert!(created.is_enabled());
+        assert_eq!(
+            created.allowlist_entries(),
+            vec!["qd/auto".to_string(), "gcli/grok-4.5".to_string()]
+        );
+        assert_eq!(created.rate_limit_rpm, Some(10));
+        assert_eq!(created.request_limit, Some(100));
+        assert_eq!(created.token_limit, Some(5000));
+
+        assert_eq!(list_api_keys(&pool).await.unwrap().len(), 1);
+        assert_eq!(
+            get_api_key_id_by_hash(&pool, "hash-a").await.unwrap(),
+            Some(created.id.clone())
+        );
+        assert!(get_api_key_id_by_hash(&pool, "nope").await.unwrap().is_none());
+
+        let updated = update_api_key(
+            &pool,
+            &created.id,
+            UpdateApiKey {
+                name: Some(Some("renamed".into())),
+                is_active: Some(false),
+                rate_limit_rpm: Some(None),
+                request_limit: None,
+                token_limit: Some(None),
+                model_allowlist: Some(None),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(updated.name.as_deref(), Some("renamed"));
+        assert!(!updated.is_enabled());
+        assert_eq!(updated.rate_limit_rpm, None);
+        assert_eq!(updated.token_limit, None);
+        assert_eq!(updated.request_limit, Some(100), "absent field unchanged");
+        assert!(
+            updated.allowlist_entries().is_empty(),
+            "explicit null clears allowlist"
+        );
+        assert!(
+            get_api_key_id_by_hash(&pool, "hash-a").await.unwrap().is_none(),
+            "revoked key never resolves"
+        );
+
+        assert!(delete_api_key(&pool, &created.id).await.unwrap());
+        assert!(!delete_api_key(&pool, &created.id).await.unwrap());
+        assert!(get_api_key(&pool, &created.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_counters_increment() {
+        let (pool, _dir) = temp_db("keycount").await;
+        let key = create_api_key(
+            &pool,
+            NewApiKey {
+                key_hash: "hash-b".into(),
+                key_prefix: "mk-bbbb".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(key.last_used_at.is_none());
+
+        record_api_key_request(&pool, &key.id).await.unwrap();
+        record_api_key_request(&pool, &key.id).await.unwrap();
+        add_api_key_tokens(&pool, &key.id, 120).await.unwrap();
+        add_api_key_tokens(&pool, &key.id, 0).await.unwrap();
+
+        let after = get_api_key(&pool, &key.id).await.unwrap().unwrap();
+        assert_eq!(after.requests_used, 2);
+        assert_eq!(after.tokens_used, 120);
+        assert!(after.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn api_key_usage_aggregates_request_logs() {
+        let (pool, _dir) = temp_db("keyusage").await;
+        let key = create_api_key(
+            &pool,
+            NewApiKey {
+                key_hash: "hash-c".into(),
+                key_prefix: "mk-cccc".into(),
+                name: None,
+                rate_limit_rpm: None,
+                request_limit: None,
+                token_limit: None,
+                model_allowlist: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        for (model, total) in [("qd/auto", 100i64), ("qd/auto", 40), ("gcli/grok-4.5", 60)] {
+            insert_request_log(
+                &pool,
+                NewRequestLog {
+                    provider: "qoder".into(),
+                    model: Some(model.into()),
+                    status: "success".into(),
+                    stream: false,
+                    duration_ms: Some(10),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: Some(total),
+                    credits_used: None,
+                    account_quota_before: None,
+                    account_quota_after: None,
+                    account_id: None,
+                    account_email: None,
+                    error_message: None,
+                    request_body: None,
+                    response_body: None,
+                    requested_model: Some(model.into()),
+                    combo_id: None,
+                    fallback_count: None,
+                    attempt_trace: None,
+                    api_key_id: Some(key.id.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let usage = api_key_usage(&pool, &key.id).await.unwrap();
+        assert_eq!(usage["requests"], 3);
+        assert_eq!(usage["total_tokens"], 200);
+        let models = usage["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        let auto = models.iter().find(|m| m["model"] == "qd/auto").unwrap();
+        assert_eq!(auto["requests"], 2);
+        assert_eq!(auto["total_tokens"], 140);
     }
 }
