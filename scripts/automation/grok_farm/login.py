@@ -11,24 +11,70 @@ from .progress import Progress
 
 
 async def dismiss_cookie_banner(page: Any) -> None:
-    """OneTrust cookie modal blocks clicks — accept/reject early."""
-    for sel in (
-        "#onetrust-accept-btn-handler",
-        "#onetrust-reject-all-handler",
-        "#accept-recommended-btn-handler",
-    ):
+    """Dismiss accounts.x.ai cookie consent.
+
+    accounts.x.ai stacks TWO layers: a visible custom banner (buttons
+    labelled exactly "Reject All" / "Accept All" / "Cookie Settings", no
+    ids) on top of the hidden OneTrust modal (#onetrust-* ids). The old
+    OneTrust-id-first + "Accept All Cookies" fallback never matched the
+    visible layer, leaving the banner blocking the signup buttons.
+
+    Strategy: click any VISIBLE instance of the consent labels, several
+    passes, until no cookie text remains. OneTrust-only pages still work
+    via the id-based selectors.
+    """
+    async def _click_visible_keyword(kw: str) -> bool:
         try:
-            btn = page.locator(sel).first
-            if await btn.count() > 0 and await btn.is_visible():
-                await _hard_click_locator(page, btn)
-                await asyncio.sleep(0.4)
-                return
+            loc = page.get_by_role("button", name=re.compile(rf"^{re.escape(kw)}$", re.I))
+            n = await loc.count()
+            for i in range(n):
+                el = loc.nth(i)
+                try:
+                    if await el.is_visible():
+                        await _hard_click_locator(page, el)
+                        return True
+                except Exception:
+                    continue
         except Exception:
-            continue
-    try:
-        await click_text_button(page, ["Accept All Cookies", "Reject All", "Allow All"])
-    except Exception:
-        pass
+            pass
+        return False
+
+    for _ in range(4):
+        clicked = False
+        # Visible xAI custom layer first (exact labels), then OneTrust labels.
+        for kw in ("Reject All", "Accept All", "Accept All Cookies", "Reject All Cookies"):
+            if await _click_visible_keyword(kw):
+                clicked = True
+                break
+        if not clicked:
+            # OneTrust-only variant: ids, visibility-checked per instance.
+            for sel in (
+                "#onetrust-reject-all-handler",
+                "#onetrust-accept-btn-handler",
+                "#accept-recommended-btn-handler",
+            ):
+                try:
+                    loc = page.locator(sel)
+                    n = await loc.count()
+                    for i in range(n):
+                        el = loc.nth(i)
+                        if await el.is_visible():
+                            await _hard_click_locator(page, el)
+                            clicked = True
+                            break
+                except Exception:
+                    continue
+                if clicked:
+                    break
+        if not clicked:
+            break
+        await asyncio.sleep(0.8)
+        try:
+            body = await page.evaluate("() => document.body.innerText")
+            if "essential cookies" not in (body or "").lower():
+                break
+        except Exception:
+            break
 
 
 async def _hard_click_locator(page: Any, loc: Any, *, double: bool = False) -> bool:
