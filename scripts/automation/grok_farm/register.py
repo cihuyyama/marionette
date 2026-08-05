@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import castle
+from . import mail_provider
 from .activate import activate_grok_if_needed
 from .browser import _normalize_proxy_url, _proxy_dict
 from .config import Config
@@ -339,6 +340,32 @@ async def _shot(page: Any, cfg: Config, email: str, tag: str, prog: Progress) ->
         pass
 
 
+async def _click_resend(page: Any, prog: Progress, email: str) -> None:
+    btn = page.get_by_role("button", name=re.compile(r"resend", re.I))
+    try:
+        if await btn.count() > 0 and await btn.first.is_visible():
+            await btn.first.click(timeout=3000)
+            prog.log("clicked resend", "DBG", email=email, step="wait_otp")
+    except Exception:
+        pass
+
+
+async def _wait_otp(
+    page: Any, cfg: Config, email: str, prog: Progress, mail_session: Any
+) -> str | None:
+    loop = asyncio.get_event_loop()
+    if mail_session is not None:
+        waited = 0
+        while waited < 180:
+            otp = await loop.run_in_executor(None, mail_session.poll_otp, 30)
+            if otp:
+                return otp
+            waited += 30
+            await _click_resend(page, prog, email)
+        return None
+    return await loop.run_in_executor(None, read_otp_imap, cfg, email, 180)
+
+
 async def register_one(
     page: Any,
     email: str,
@@ -346,6 +373,7 @@ async def register_one(
     cfg: Config,
     prog: Progress,
     proxy_url: str = "",
+    mail_session: Any = None,
 ) -> dict | None:
     prog.step(email, "signup_open", "Opening sign-up page")
     try:
@@ -376,10 +404,8 @@ async def register_one(
         await _shot(page, cfg, email, "fail_signup_email", prog)
         return None
 
-    prog.step(email, "wait_otp", "Waiting for OTP via IMAP")
-    otp = await asyncio.get_event_loop().run_in_executor(
-        None, read_otp_imap, cfg, email, 180
-    )
+    prog.step(email, "wait_otp", "Waiting for OTP")
+    otp = await _wait_otp(page, cfg, email, prog, mail_session)
     if not otp:
         prog.log("OTP timeout (180s)", "ERR", email=email, step="wait_otp")
         return None
@@ -525,7 +551,16 @@ async def run_register(
     is_plus_trick = domain.startswith("plus:")
     email_source = domain[5:] if is_plus_trick else domain
 
-    if not email_source:
+    use_cf_mail = cfg.mail_mode == "cf" or (
+        cfg.mail_mode == "auto" and mail_provider.cf_mail_configured(cfg)
+    )
+    if cfg.mail_mode == "cf" and not mail_provider.cf_mail_configured(cfg):
+        prog.log(
+            "GROK_MAIL_MODE=cf but GROK_CF_MAIL_* not configured", "ERR", step="start"
+        )
+        return []
+
+    if not email_source and not use_cf_mail:
         prog.log("no email source configured (domain or gmail base)", "ERR", step="start")
         return []
     if not password:
@@ -553,10 +588,34 @@ async def run_register(
     save_lock = asyncio.Lock()
     proxy_idx = 0
 
+    if use_cf_mail:
+        prog.log(
+            f"signup mail via temp-mail worker ({cfg.cf_mail_domain})", "INFO", step="start"
+        )
+
     async def worker(idx: int) -> None:
         nonlocal proxy_idx
         async with sem:
-            email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
+            mail_session: Any = None
+            if use_cf_mail:
+                try:
+                    client = mail_provider.create_cf_client(cfg)
+                    addr, jwt, addr_id = await asyncio.get_event_loop().run_in_executor(
+                        None, client.create_address
+                    )
+                    email = addr
+                    mail_session = mail_provider.TempMailSession(
+                        email=addr, jwt=jwt, address_id=addr_id,
+                        client=client, extract_otp=_extract_otp,
+                    )
+                    prog.log(f"temp-mail {addr}", "INFO", step="start")
+                except Exception as exc:
+                    prog.log(f"temp-mail create failed: {exc}", "ERR", step="start")
+                    if cfg.mail_mode == "cf":
+                        return
+                    email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
+            else:
+                email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
             proxy_url = ""
             if proxies:
                 proxy_url = proxies[proxy_idx % len(proxies)]
@@ -582,7 +641,7 @@ async def run_register(
                 async with AsyncCamoufox(**launch_kwargs) as browser:
                     page = await browser.new_page()
                     prog.step(email, "register", "filling signup form")
-                    result = await register_one(page, email, password, cfg, prog, proxy_url)
+                    result = await register_one(page, email, password, cfg, prog, proxy_url, mail_session)
                     if result and result.get("stage") == "tokens":
                         async with save_lock:
                             results.append(result)
@@ -618,6 +677,14 @@ async def run_register(
                 else:
                     hint = err[:150]
                 prog.mark_fail(email, hint)
+            finally:
+                if mail_session is not None:
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, mail_session.cleanup
+                        )
+                    except Exception:
+                        pass
 
     tasks = [worker(i) for i in range(count)]
     await asyncio.gather(*tasks, return_exceptions=True)

@@ -100,6 +100,13 @@ class Config:
     imap_port: int = 993
     imap_user: str = ""
     imap_pass: str = ""
+    # Signup OTP mailbox backend: auto (cf_temp_email if configured, else IMAP),
+    # cf (force temp-mail worker), imap (force IMAP).
+    mail_mode: str = "auto"
+    cf_mail_base_url: str = ""
+    cf_mail_admin_password: str = ""
+    cf_mail_domain: str = ""
+    cf_mail_site_password: str = ""
 
     @property
     def imap_configured(self) -> bool:
@@ -151,4 +158,9 @@ def load_config() -> Config:
         imap_user=_env("GROK_IMAP_USER"),
         # Gmail App Passwords display as "abcd efgh ijkl mnop" but IMAP LOGIN rejects spaces.
         imap_pass=_env("GROK_IMAP_PASS").replace(" ", ""),
+        mail_mode=(_env("GROK_MAIL_MODE", "auto") or "auto").lower(),
+        cf_mail_base_url=_env("GROK_CF_MAIL_BASE_URL"),
+        cf_mail_admin_password=_env("GROK_CF_MAIL_ADMIN_PASSWORD"),
+        cf_mail_domain=_env("GROK_CF_MAIL_DOMAIN"),
+        cf_mail_site_password=_env("GROK_CF_MAIL_SITE_PASSWORD"),
     )

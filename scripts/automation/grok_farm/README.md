@@ -105,13 +105,40 @@ cargo run --bin marionette-import -- --file scripts/automation/grok_farm/results
 
 Matches `src/import_util.rs` `build_grok_data` field names.
 
-## OTP / IMAP
+## Signup / register mode (temp-mail OTP)
 
-If xAI shows an OTP form:
+Signup flow (`run_register`) needs to receive the xAI confirmation code
+(`XXX-XXX` format) for the fresh address. Two mailbox backends, selected by
+`GROK_MAIL_MODE`:
 
-- Headed + no IMAP: waits ~60s for manual entry
-- IMAP configured (`GROK_IMAP_*`): thin inbox scan for a code
-- Headless + no IMAP: clear error (no silent hang)
+| Mode | Backend | Config |
+|------|---------|--------|
+| `cf` | Self-hosted **cloudflare_temp_email** Worker (dreamhunter2333) | `GROK_CF_MAIL_BASE_URL`, `GROK_CF_MAIL_ADMIN_PASSWORD`, `GROK_CF_MAIL_DOMAIN` |
+| `imap` | Own-domain inbox over IMAP | `GROK_IMAP_*` |
+| `auto` (default) | `cf` if `GROK_CF_MAIL_*` configured, else `imap` | both |
+
+**Why temp-mail over IMAP:** no pre-provisioned inboxes needed — the farm
+creates a fresh mailbox per signup via the worker's admin API, polls
+`/api/parsed_mails` for the code, then deletes the address. The Worker is
+catch-all on `bibib.my.id`, so address creation never blocks delivery.
+
+The deployed worker (2026-08) is `marionette-temp-email` on
+`https://tempmail.bibib.my.id` (custom domain; a `workers.dev` mirror also
+exists). Redacted wrangler config lives in `cf_temp_email/wrangler.toml.example`
+— regenerate secrets and redeploy from a
+[dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)
+clone if it ever needs rebuilding.
+
+Two provider-specific traps discovered in integration testing:
+
+1. **Cloudflare WAF blocks the default `Python-urllib` User-Agent** on the
+   custom domain (error 1010). The farm client sends a browser UA — keep it.
+2. **xAI blocks some disposable domains** (esp. multi-level subdomains).
+   Use a clean own domain like `bibib.my.id`; do not switch to cheap temp-mail
+   TLDs.
+
+The signup page also stacks **two cookie banners** (a visible custom xAI layer
+over a hidden OneTrust modal). `dismiss_cookie_banner` handles both layers.
 
 ## Turnstile (login)
 

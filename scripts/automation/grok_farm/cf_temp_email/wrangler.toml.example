@@ -1,0 +1,27 @@
+name = "marionette-temp-email"
+main = "src/worker.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = [ "nodejs_compat" ]
+keep_vars = true
+workers_dev = true
+
+routes = [
+	{ pattern = "tempmail.bibib.my.id", custom_domain = true },
+]
+
+[vars]
+PREFIX = ""
+DEFAULT_DOMAINS = ["bibib.my.id"]
+DOMAINS = ["bibib.my.id"]
+JWT_SECRET = "REDACTED_JWT_SECRET"
+ADMIN_PASSWORDS = ["REDACTED_ADMIN_PASSWORD"]
+ENABLE_USER_CREATE_EMAIL = false
+ENABLE_USER_DELETE_EMAIL = true
+# E2E_TEST_MODE = true
+ENABLE_AUTO_REPLY = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "marionette_temp_email"
+database_id = "c829d28d-c376-4a55-946b-87f1592a73d9"
+
