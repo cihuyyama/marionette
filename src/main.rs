@@ -10,6 +10,12 @@ use tower_http::trace::TraceLayer;
 use axum::extract::DefaultBodyLimit;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+// glibc malloc grows to one 64 MB arena per worker thread and never returns
+// freed pages to the OS (3 arenas = ~240 MB RSS observed). mimalloc releases
+// pages back to the OS and keeps a long-running pool service small.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
