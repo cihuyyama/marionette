@@ -256,6 +256,48 @@ export function exportQoderPats(accountIds: string[], settings?: Settings) {
   );
 }
 
+export type ExportAccountsError = {
+  id: string;
+  email?: string | null;
+  error: string;
+};
+
+export type ExportAccountsResult = {
+  count: number;
+  total: number;
+  errors: ExportAccountsError[];
+  backup: {
+    providerConnections: Record<string, unknown>[];
+    exportedAt: string;
+    source: string;
+    count: number;
+  };
+};
+
+export function exportAccounts(accountIds: string[], settings?: Settings) {
+  return request<ExportAccountsResult>(
+    `/admin/accounts/export`,
+    {
+      method: "POST",
+      auth: "admin",
+      body: JSON.stringify({ account_ids: accountIds }),
+    },
+    settings,
+  );
+}
+
+export function downloadJson(filename: string, text: string) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export type RefreshJob = {
   id: string;
   provider: string;
@@ -509,8 +551,16 @@ export function warmupQoderAccounts(
   );
 }
 
-export function importAccounts(body: unknown, replace = false, settings?: Settings) {
-  const qs = replace ? "?replace=true" : "";
+export function importAccounts(
+  body: unknown,
+  replace = false,
+  settings?: Settings,
+  skipExisting = false,
+) {
+  const params = new URLSearchParams();
+  if (replace) params.set("replace", "true");
+  if (skipExisting) params.set("skip_existing", "true");
+  const qs = params.toString() ? `?${params.toString()}` : "";
   return request<ImportResult>(
     `/admin/accounts${qs}`,
     {
@@ -526,8 +576,12 @@ export function importAccountsFile(
   file: Blob,
   replace = false,
   settings?: Settings,
+  skipExisting = false,
 ) {
-  const qs = replace ? "?replace=true" : "";
+  const params = new URLSearchParams();
+  if (replace) params.set("replace", "true");
+  if (skipExisting) params.set("skip_existing", "true");
+  const qs = params.toString() ? `?${params.toString()}` : "";
   return request<ImportResult>(
     `/admin/accounts${qs}`,
     {

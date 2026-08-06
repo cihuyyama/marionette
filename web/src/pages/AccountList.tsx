@@ -14,6 +14,7 @@ import {
 import { AddAccountModal } from "../components/AddAccountModal";
 import { BulkInjectModal } from "../components/BulkInjectModal";
 import { ExportPatModal } from "../components/ExportPatModal";
+import { ExportAccountsModal } from "../components/ExportAccountsModal";
 import { InjectModal } from "../components/InjectModal";
 import { StatusChip } from "../components/StatusChip";
 import { isProviderId, labelProvider, type ProviderId } from "../lib/providers";
@@ -59,6 +60,7 @@ export function AccountList() {
   } | null>(null);
   const [bulkInjectOpen, setBulkInjectOpen] = useState(false);
   const [exportPatOpen, setExportPatOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!provider) return;
@@ -489,6 +491,15 @@ export function AccountList() {
                 Export PAT ({selectedIds.size})
               </button>
             )}
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={bulkBusy}
+              title="Export selected accounts as backup JSON (re-import on another instance)"
+              onClick={() => setExportOpen(true)}
+            >
+              Export JSON ({selectedIds.size})
+            </button>
             <button
               type="button"
               className="btn btn-sm btn-danger"
@@ -1095,6 +1106,12 @@ export function AccountList() {
           onClose={() => setExportPatOpen(false)}
         />
       )}
+
+      <ExportAccountsModal
+        open={exportOpen}
+        accountIds={Array.from(selectedIds)}
+        onClose={() => setExportOpen(false)}
+      />
     </div>
   );
 }

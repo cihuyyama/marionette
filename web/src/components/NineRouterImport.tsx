@@ -24,6 +24,7 @@ export function NineRouterImport() {
   const [loading, setLoading] = useState(false);
   const [drag, setDrag] = useState(false);
   const [replace, setReplace] = useState(false);
+  const [skipExisting, setSkipExisting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   function pickFile(f: File) {
@@ -46,7 +47,7 @@ export function NineRouterImport() {
     setResult(null);
     setLoading(true);
     try {
-      const res = await importAccountsFile(file, replace);
+      const res = await importAccountsFile(file, replace, undefined, skipExisting);
       setResult(res);
     } catch (err) {
       setError(
@@ -138,11 +139,29 @@ export function NineRouterImport() {
           <input
             type="checkbox"
             checked={replace}
-            onChange={(e) => setReplace(e.target.checked)}
+            onChange={(e) => {
+              setReplace(e.target.checked);
+              if (e.target.checked) setSkipExisting(false);
+            }}
           />
           <span>
             Replace all — wipe existing grok-cli and qoder accounts before
             importing
+          </span>
+        </label>
+
+        <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+          <input
+            type="checkbox"
+            checked={skipExisting}
+            onChange={(e) => {
+              setSkipExisting(e.target.checked);
+              if (e.target.checked) setReplace(false);
+            }}
+          />
+          <span>
+            Skip existing — only import accounts whose provider+email is not
+            already in the pool
           </span>
         </label>
 
