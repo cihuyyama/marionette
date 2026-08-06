@@ -23,6 +23,7 @@ import {
   clearGrokRegisterPreset,
   loadGrokRegisterPreset,
   saveGrokRegisterPreset,
+  type GrokRegisterMethod,
 } from "../lib/grokRegister";
 import {
   clearQoderRegisterPreset,
@@ -868,7 +869,7 @@ function needsGrokRelogin(acc: Account): boolean {
 function GrokRegisterFarm() {
   const preset = useRef(loadGrokRegisterPreset()).current;
   const [status, setStatus] = useState<FarmStatus | null>(null);
-  const [method, setMethod] = useState<"imap" | "plus_trick">(preset.method);
+  const [method, setMethod] = useState<GrokRegisterMethod>(preset.method);
   const [count, setCount] = useState(preset.count);
   const [domain, setDomain] = useState(preset.domain);
   const [imapHost, setImapHost] = useState(preset.imapHost);
@@ -992,10 +993,12 @@ function GrokRegisterFarm() {
     e.preventDefault();
     setError(null);
     setNotice(null);
-    const target = method === "imap" ? domain.trim() : gmailBase.trim();
-    if (!target) {
-      setError(method === "imap" ? "Catch-all domain is required" : "Gmail address is required");
-      return;
+    if (method !== "temp_mail") {
+      const target = method === "imap" ? domain.trim() : gmailBase.trim();
+      if (!target) {
+        setError(method === "imap" ? "Catch-all domain is required" : "Gmail address is required");
+        return;
+      }
     }
     if (!password.trim()) {
       setError("Password is required for all new accounts");
@@ -1009,7 +1012,12 @@ function GrokRegisterFarm() {
     try {
       const workers = Math.max(1, Math.min(maxWorkers, Math.floor(concurrency) || 1));
       const n = Math.max(1, Math.floor(count) || 1);
-      const emailSource = method === "imap" ? target : `plus:${target}`;
+      const emailSource =
+        method === "temp_mail"
+          ? domain.trim() || "tempmail"
+          : method === "imap"
+            ? domain.trim()
+            : `plus:${gmailBase.trim()}`;
       const res = await startFarmJob({
         provider: "grok-cli",
         accounts: `register:${n}:${emailSource}`,
@@ -1024,12 +1032,13 @@ function GrokRegisterFarm() {
               imap_pass: imapPass,
             }
           : {}),
+        ...(method === "temp_mail" ? { mail_mode: "cf" } : {}),
       });
       setJob(res.job);
       jobIdRef.current = res.job.id;
       afterRef.current = 0;
       setEvents([]);
-      setNotice(`Job ${res.job.id.slice(0, 8)}… · ${n} account(s) · ${workers} worker(s) · ${method === "imap" ? "OTP IMAP" : "Gmail plus-trick"}`);
+      setNotice(`Job ${res.job.id.slice(0, 8)}… · ${n} account(s) · ${workers} worker(s) · ${method === "temp_mail" ? "Temp mail (Cloudflare)" : method === "imap" ? "OTP IMAP" : "Gmail plus-trick"}`);
       await refreshStatus();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Start failed");
@@ -1107,6 +1116,18 @@ function GrokRegisterFarm() {
                   <span className="muted">user+tag@gmail.com — all OTP lands in one inbox</span>
                 </span>
               </label>
+              <label className="radio-card">
+                <input
+                  type="radio"
+                  name="email-method"
+                  checked={method === "temp_mail"}
+                  onChange={() => setMethod("temp_mail")}
+                />
+                <span className="radio-card-body">
+                  <strong>Temp mail (Cloudflare)</strong>
+                  <span className="muted">Self-hosted worker creates a fresh inbox per signup — no IMAP needed</span>
+                </span>
+              </label>
             </div>
           </div>
 
@@ -1114,6 +1135,17 @@ function GrokRegisterFarm() {
             {method === "imap" ? (
               <label>
                 <span className="label">Catch-all domain</span>
+                <input
+                  type="text"
+                  value={domain}
+                  onChange={(e) => setDomain(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+            ) : method === "temp_mail" ? (
+              <label>
+                <span className="label">Email domain (optional — leave empty for random)</span>
                 <input
                   type="text"
                   value={domain}
@@ -1196,6 +1228,12 @@ function GrokRegisterFarm() {
               />
             </label>
           </div>
+
+          {method === "temp_mail" && (
+            <p className="muted" style={{ marginTop: 12 }}>
+              Mailbox: tempmail.bibib.my.id (configured in .env)
+            </p>
+          )}
 
           <div className="form-row" style={{ marginTop: 16, gap: 20 }}>
             <label className="checkbox-label">

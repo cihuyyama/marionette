@@ -1,6 +1,6 @@
 const KEY = "marionette.grok.register.preset.v1";
 
-export type GrokRegisterMethod = "imap" | "plus_trick";
+export type GrokRegisterMethod = "imap" | "plus_trick" | "temp_mail";
 
 export type GrokRegisterPreset = {
   method: GrokRegisterMethod;
@@ -19,7 +19,7 @@ export type GrokRegisterPreset = {
 };
 
 export const GROK_REGISTER_DEFAULTS: GrokRegisterPreset = {
-  method: "imap",
+  method: "temp_mail",
   count: 5,
   concurrency: 1,
   headless: false,
@@ -39,7 +39,12 @@ export function loadGrokRegisterPreset(): GrokRegisterPreset {
     if (!raw) return { ...GROK_REGISTER_DEFAULTS };
     const p = JSON.parse(raw) as Partial<GrokRegisterPreset>;
     return {
-      method: p.method === "plus_trick" ? "plus_trick" : "imap",
+      method:
+        p.method === "temp_mail"
+          ? "temp_mail"
+          : p.method === "plus_trick"
+            ? "plus_trick"
+            : "imap",
       count: clampInt(p.count, GROK_REGISTER_DEFAULTS.count, 1, 100),
       concurrency: clampInt(p.concurrency, GROK_REGISTER_DEFAULTS.concurrency, 1, 64),
       headless: p.headless ?? GROK_REGISTER_DEFAULTS.headless,

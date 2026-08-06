@@ -119,6 +119,8 @@ pub struct StartFarmRequest {
     pub imap_pass: Option<String>,
     #[serde(default)]
     pub captcha_mode: Option<String>,
+    #[serde(default)]
+    pub mail_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1188,6 +1190,14 @@ impl FarmManager {
             if let Some(p) = req.imap_pass.as_deref().filter(|s| !s.trim().is_empty()) {
                 cmd.env(format!("{imap_prefix}_IMAP_PASS"), p);
             }
+            if let Some(m) = req
+                .mail_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                cmd.env(format!("{imap_prefix}_MAIL_MODE"), m);
+            }
         }
         if !is_grok {
             if let Some(mode) = req
@@ -1926,6 +1936,7 @@ impl FarmManager {
             imap_user: None,
             imap_pass: None,
             captcha_mode: None,
+            mail_mode: None,
         };
         let mut out = self.start(req, pool).await?;
         if let Some(obj) = out.as_object_mut() {

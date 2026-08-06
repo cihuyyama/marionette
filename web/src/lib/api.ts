@@ -900,6 +900,7 @@ export function startFarmJob(
     imap_user?: string;
     imap_pass?: string;
     captcha_mode?: string;
+    mail_mode?: string;
   },
   settings?: Settings,
 ) {
