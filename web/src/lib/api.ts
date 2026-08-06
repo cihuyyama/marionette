@@ -586,6 +586,28 @@ export function importAccountsFile(
   );
 }
 
+export type ProcessUsage = {
+  pid?: number;
+  cpu_percent?: number;
+  mem_bytes?: number;
+  automation_cpu_percent?: number;
+  automation_mem_bytes?: number;
+  automation_procs?: number;
+  automation_running?: boolean;
+  logical_cores?: number;
+  total_mem_bytes?: number;
+  used_mem_bytes?: number;
+  updated_at?: string;
+};
+
+export function getProcessUsage(settings?: Settings, signal?: AbortSignal) {
+  return request<ProcessUsage>(
+    "/health/usage",
+    { auth: "none", signal },
+    settings,
+  );
+}
+
 export function listModels(settings?: Settings, signal?: AbortSignal) {
   return request<{ object: string; data: ModelObject[] }>(
     "/v1/models",

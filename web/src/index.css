@@ -435,6 +435,50 @@ button {
   box-shadow: 0 0 6px rgba(139, 46, 58, 0.4);
 }
 
+.health-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+@media (max-width: 760px) {
+  .health-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.health-card {
+  background: var(--void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.health-card .label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.health-value-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.health-value-row .value {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  line-height: 1;
+  margin: 0;
+  color: var(--parchment);
+}
+
 .health-meta {
   font-size: 11px;
   white-space: nowrap;

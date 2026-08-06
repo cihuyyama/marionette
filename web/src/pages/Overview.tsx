@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, getStats, listAccounts, type Account, type PoolStats } from "../lib/api";
+import {
+  ApiError,
+  getProcessUsage,
+  getStats,
+  listAccounts,
+  type Account,
+  type PoolStats,
+  type ProcessUsage,
+} from "../lib/api";
 import { StatusChip } from "../components/StatusChip";
 import { statusTooltip } from "../lib/status";
 
 export function Overview() {
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [errors, setErrors] = useState<Account[]>([]);
+  const [usage, setUsage] = useState<ProcessUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -38,6 +47,25 @@ export function Overview() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Resource usage polls independently — cheap, no auth, every 2s.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const u = await getProcessUsage();
+        if (!cancelled) setUsage(u);
+      } catch {
+        // non-fatal: keep last snapshot
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   return (
     <div>
@@ -72,6 +100,115 @@ export function Overview() {
         <StatCard label="Cut" value={stats?.cut} tone="seal" />
         <StatCard label="Fallen" value={stats?.fallen} tone="blood" />
       </div>
+
+      <section className="panel" style={{ marginTop: 24 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 12 }}>
+          <h2
+            style={{
+              margin: 0,
+              fontFamily: "var(--font-display)",
+              fontWeight: 400,
+              fontSize: "1.25rem",
+            }}
+          >
+            Health
+          </h2>
+          <span className="muted" style={{ fontSize: 12 }}>
+            Runtime resource usage · refreshed every 2s
+          </span>
+        </div>
+
+        {!usage || usage.pid === undefined ? (
+          <p className="muted">
+            <span className="spinner inline-spinner" /> First sample in…
+          </p>
+        ) : (
+          <div className="health-cards">
+            <div className="health-card">
+              <p className="label">CPU usage</p>
+              <div className="health-value-row">
+                <span className="value">{(usage.cpu_percent ?? 0).toFixed(1)}%</span>
+                <span className="chip chip-bound" title="Sampler is running">
+                  <span className="chip-dot" />
+                  Live
+                </span>
+              </div>
+              <div className="health-row">
+                <span className="health-tag">proc</span>
+                <div className="health-track">
+                  <div
+                    className={`health-fill health-${cpuTone(usage.cpu_percent ?? 0)}`}
+                    style={{
+                      width: `${Math.min(100, ((usage.cpu_percent ?? 0) / Math.max(1, usage.logical_cores ?? 1)) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <span className="mono muted">{(usage.cpu_percent ?? 0).toFixed(1)}%</span>
+              </div>
+              {usage.automation_running && (
+                <div className="health-row">
+                  <span className="health-tag">auto</span>
+                  <div className="health-track">
+                    <div
+                      className={`health-fill health-${cpuTone(usage.automation_cpu_percent ?? 0)}`}
+                      style={{
+                        width: `${Math.min(100, ((usage.automation_cpu_percent ?? 0) / Math.max(1, usage.logical_cores ?? 1)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="mono muted">
+                    {(usage.automation_cpu_percent ?? 0).toFixed(1)}%
+                  </span>
+                </div>
+              )}
+              <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+                PID {usage.pid} · {usage.logical_cores} logical core
+                {usage.logical_cores === 1 ? "" : "s"}
+              </p>
+            </div>
+
+            <div className="health-card">
+              <p className="label">RAM usage</p>
+              <div className="health-value-row">
+                <span className="value">{fmtBytes(usage.mem_bytes ?? 0)}</span>
+                <span className="mono muted" style={{ fontSize: 12 }}>RSS</span>
+              </div>
+              <div className="health-row">
+                <span className="health-tag">proc</span>
+                <div className="health-track">
+                  <div
+                    className={`health-fill health-${memTone(usage.mem_bytes ?? 0, usage.total_mem_bytes ?? 0)}`}
+                    style={{
+                      width: `${Math.min(100, ((usage.mem_bytes ?? 0) / Math.max(1, usage.total_mem_bytes ?? 1)) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <span className="mono muted">{fmtBytes(usage.mem_bytes ?? 0)}</span>
+              </div>
+              {usage.automation_running && (
+                <div className="health-row">
+                  <span className="health-tag">auto</span>
+                  <div className="health-track">
+                    <div
+                      className={`health-fill health-${memTone(usage.automation_mem_bytes ?? 0, usage.total_mem_bytes ?? 0)}`}
+                      style={{
+                        width: `${Math.min(100, ((usage.automation_mem_bytes ?? 0) / Math.max(1, usage.total_mem_bytes ?? 1)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="mono muted">{fmtBytes(usage.automation_mem_bytes ?? 0)}</span>
+                </div>
+              )}
+              <p className="muted" style={{ fontSize: 12, margin: "8px 0 0" }}>
+                System: {fmtBytes(usage.used_mem_bytes ?? 0)} / {fmtBytes(usage.total_mem_bytes ?? 0)}
+                {usage.automation_running
+                  ? ` · automation: ${usage.automation_procs} process${usage.automation_procs === 1 ? "" : "es"}`
+                  : ""}
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
 
       <section className="panel" style={{ marginTop: 24 }}>
         <h2
@@ -202,4 +339,26 @@ function formatShort(iso: string | null | undefined): string {
   } catch {
     return iso;
   }
+}
+
+function fmtBytes(n: number): string {
+  if (n <= 0) return "0 MB";
+  const mb = n / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(mb < 100 ? 1 : 0)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+// Process CPU can exceed 100% of one core; warn near one full core, crit at two.
+function cpuTone(pct: number): "ok" | "warn" | "crit" {
+  if (pct >= 200) return "crit";
+  if (pct >= 100) return "warn";
+  return "ok";
+}
+
+function memTone(bytes: number, total: number): "ok" | "warn" | "crit" {
+  if (total <= 0) return "ok";
+  const pct = (bytes / total) * 100;
+  if (pct >= 35) return "crit";
+  if (pct >= 15) return "warn";
+  return "ok";
 }
