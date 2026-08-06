@@ -48,7 +48,7 @@ export function loadQoderRegisterPreset(): QoderRegisterPreset {
     const p = JSON.parse(raw) as Partial<QoderRegisterPreset>;
     return {
       method: p.method === "plus_trick" ? "plus_trick" : "imap",
-      count: clampInt(p.count, QODER_REGISTER_DEFAULTS.count, 1, 100),
+      count: clampInt(p.count, QODER_REGISTER_DEFAULTS.count, 1, 1000),
       concurrency: clampInt(p.concurrency, QODER_REGISTER_DEFAULTS.concurrency, 1, 64),
       headless: p.headless ?? QODER_REGISTER_DEFAULTS.headless,
       autoImport: p.autoImport ?? QODER_REGISTER_DEFAULTS.autoImport,

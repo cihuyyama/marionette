@@ -1416,7 +1416,7 @@ function GrokRegisterFarm() {
               <input
                 type="number"
                 min={1}
-                max={100}
+                max={1000}
                 value={count}
                 onChange={(e) => setCount(Number(e.target.value))}
               />
@@ -1883,7 +1883,7 @@ function QoderRegisterFarm() {
               <input
                 type="number"
                 min={1}
-                max={100}
+                max={1000}
                 value={count}
                 onChange={(e) => setCount(Number(e.target.value))}
               />

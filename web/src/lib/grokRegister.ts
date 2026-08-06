@@ -45,7 +45,7 @@ export function loadGrokRegisterPreset(): GrokRegisterPreset {
           : p.method === "plus_trick"
             ? "plus_trick"
             : "imap",
-      count: clampInt(p.count, GROK_REGISTER_DEFAULTS.count, 1, 100),
+      count: clampInt(p.count, GROK_REGISTER_DEFAULTS.count, 1, 1000),
       concurrency: clampInt(p.concurrency, GROK_REGISTER_DEFAULTS.concurrency, 1, 64),
       headless: p.headless ?? GROK_REGISTER_DEFAULTS.headless,
       autoImport: p.autoImport ?? GROK_REGISTER_DEFAULTS.autoImport,
