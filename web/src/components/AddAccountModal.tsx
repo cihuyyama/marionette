@@ -34,6 +34,8 @@ export function AddAccountModal({
   const [clientId, setClientId] = useState("");
   const [personalToken, setPersonalToken] = useState("");
   const [bulkText, setBulkText] = useState("");
+  const [replace, setReplace] = useState(false);
+  const [skipExisting, setSkipExisting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -47,6 +49,8 @@ export function AddAccountModal({
     setClientId("");
     setPersonalToken("");
     setBulkText("");
+    setReplace(false);
+    setSkipExisting(false);
     setError(null);
     setLoading(false);
   }, [open, modes, provider]);
@@ -82,7 +86,7 @@ export function AddAccountModal({
         personalToken,
         bulkText,
       });
-      const res = await importAccounts(body);
+      const res = await importAccounts(body, replace, undefined, skipExisting);
       onImported(res);
       onClose();
     } catch (err) {
@@ -278,17 +282,48 @@ export function AddAccountModal({
             </div>
           )}
 
+          {replace && (
+            <div className="alert alert-error" role="alert">
+              Replace all wipes every existing grok-cli and qoder account before
+              importing this payload.
+            </div>
+          )}
+
+          <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={replace}
+              onChange={(e) => {
+                setReplace(e.target.checked);
+                if (e.target.checked) setSkipExisting(false);
+              }}
+            />
+            <span>Replace all — wipe existing grok-cli and qoder accounts first</span>
+          </label>
+
+          <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={skipExisting}
+              onChange={(e) => {
+                setSkipExisting(e.target.checked);
+                if (e.target.checked) setReplace(false);
+              }}
+            />
+            <span>Skip existing — ignore rows whose provider+email is already in the pool</span>
+          </label>
+
           <div className="btn-row" style={{ justifyContent: "flex-end" }}>
             <button type="button" className="btn btn-sm" onClick={onClose} disabled={loading}>
               Cancel
             </button>
             <button
               type="submit"
-              className="btn btn-sm btn-primary"
+              className={`btn btn-sm ${replace ? "btn-danger" : "btn-primary"}`}
               disabled={loading || !canSubmit}
             >
               {loading ? <span className="spinner inline-spinner" /> : null}
-              {mode === "single" ? "Add account" : "Import"}
+              {replace ? "Replace & import" : mode === "single" ? "Add account" : "Import"}
             </button>
           </div>
         </form>
