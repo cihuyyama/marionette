@@ -500,7 +500,7 @@ pub async fn export_qoder_pats(
 /// through POST /admin/accounts. Returns Err(reason) when the account lacks a
 /// usable token for its provider.
 fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
-    let mut data = acc.data_json();
+    let data = acc.data_json();
 
     // Refuse accounts whose tokens are already masked — re-importing a masked
     // export would silently create dead rows.
