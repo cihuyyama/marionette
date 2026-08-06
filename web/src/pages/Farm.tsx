@@ -5,14 +5,17 @@ import {
   cancelFarmJob,
   getFarmEvents,
   getFarmStatus,
+  getMailSettings,
   importFarmJob,
   listAccounts,
+  patchMailSettings,
   retryFailedFarmJob,
   startFarmJob,
   type Account,
   type FarmEvent,
   type FarmJob,
   type FarmStatus,
+  type MailSettings,
 } from "../lib/api";
 import {
   getAutomationMethod,
@@ -866,6 +869,187 @@ function needsGrokRelogin(acc: Account): boolean {
   );
 }
 
+function TempMailSettingsModal({
+  open,
+  current,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  current: MailSettings | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState("");
+  const [domain, setDomain] = useState("");
+  const [adminPass, setAdminPass] = useState("");
+  const [sitePass, setSitePass] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setBaseUrl(current?.base_url ?? "");
+    setDomain(current?.domain ?? "");
+    setAdminPass("");
+    setSitePass("");
+    setError(null);
+    setSaving(false);
+  }, [open, current]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const adminMasked = current?.admin_password ?? "";
+  const siteMasked = current?.site_password ?? "";
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const url = baseUrl.trim();
+    const dom = domain.trim();
+    if (!url) {
+      setError("Worker URL is required");
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      setError("Worker URL must start with http:// or https://");
+      return;
+    }
+    if (!dom) {
+      setError("Domain is required");
+      return;
+    }
+    setSaving(true);
+    try {
+      const body: {
+        base_url?: string;
+        domain?: string;
+        admin_password?: string;
+        site_password?: string;
+      } = { base_url: url, domain: dom };
+      if (adminPass.trim()) body.admin_password = adminPass.trim();
+      if (sitePass.trim()) body.site_password = sitePass.trim();
+      await patchMailSettings(body);
+      onSaved();
+      onClose();
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Save failed",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose} />
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Temp mail worker settings"
+      >
+        <div className="modal-head">
+          <div>
+            <h2>Temp mail worker</h2>
+            <p className="muted" style={{ margin: 0 }}>
+              Cloudflare worker that creates fresh inboxes for Grok signup
+            </p>
+          </div>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        {error && (
+          <div className="alert alert-error" role="alert">
+            {error}
+          </div>
+        )}
+
+        <form className="stack-gap" onSubmit={(e) => void onSubmit(e)}>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="mail-base-url">Worker URL</label>
+            <input
+              id="mail-base-url"
+              className="input"
+              type="text"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://tempmail.example.com"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="mail-domain">Domain</label>
+            <input
+              id="mail-domain"
+              className="input"
+              type="text"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              placeholder="example.com"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="mail-admin-pass">Admin password</label>
+            <input
+              id="mail-admin-pass"
+              className="input"
+              type="password"
+              value={adminPass}
+              onChange={(e) => setAdminPass(e.target.value)}
+              placeholder={adminMasked || "admin password"}
+              autoComplete="new-password"
+            />
+            <span className="hint">Leave empty to keep the current password.</span>
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="mail-site-pass">Site password (optional)</label>
+            <input
+              id="mail-site-pass"
+              className="input"
+              type="password"
+              value={sitePass}
+              onChange={(e) => setSitePass(e.target.value)}
+              placeholder={siteMasked || "site password"}
+              autoComplete="new-password"
+            />
+            <span className="hint">Leave empty to keep the current password.</span>
+          </div>
+
+          <div className="btn-row" style={{ justifyContent: "flex-end" }}>
+            <button type="button" className="btn btn-sm" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-sm btn-primary" disabled={saving}>
+              {saving ? <span className="spinner inline-spinner" /> : null}
+              Save
+            </button>
+          </div>
+        </form>
+      </div>
+    </>
+  );
+}
+
 function GrokRegisterFarm() {
   const preset = useRef(loadGrokRegisterPreset()).current;
   const [status, setStatus] = useState<FarmStatus | null>(null);
@@ -889,10 +1073,30 @@ function GrokRegisterFarm() {
   const afterRef = useRef(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const jobIdRef = useRef<string | null>(null);
+  const [mailCfg, setMailCfg] = useState<MailSettings | null>(null);
+  const [mailError, setMailError] = useState<string | null>(null);
+  const [mailOpen, setMailOpen] = useState(false);
 
   const packageOk = status?.info.packages?.["grok-cli"]?.package_present ?? false;
   const maxWorkers = Math.max(1, status?.info.max_concurrency ?? 8);
   const busy = status?.busy ?? false;
+
+  const refreshMail = useCallback(async () => {
+    try {
+      const cfg = await getMailSettings();
+      setMailCfg(cfg);
+      setMailError(null);
+    } catch (e) {
+      setMailCfg(null);
+      setMailError(
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Failed to load mail settings",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMail();
+  }, [refreshMail]);
 
   useEffect(() => {
     saveGrokRegisterPreset({
@@ -1230,9 +1434,42 @@ function GrokRegisterFarm() {
           </div>
 
           {method === "temp_mail" && (
-            <p className="muted" style={{ marginTop: 12 }}>
-              Mailbox: tempmail.bibib.my.id (configured in .env)
-            </p>
+            <div
+              style={{
+                marginTop: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              {mailError ? (
+                <p className="muted" style={{ margin: 0 }} title={mailError}>
+                  Could not load mail settings
+                </p>
+              ) : mailCfg === null ? (
+                <p className="muted" style={{ margin: 0 }}>
+                  Loading mail settings…
+                </p>
+              ) : mailCfg.configured ? (
+                <p className="muted" style={{ margin: 0 }}>
+                  Mailbox worker: <span className="mono">{mailCfg.base_url}</span>
+                  {" · domain "}
+                  <span className="mono">{mailCfg.domain}</span>
+                </p>
+              ) : (
+                <p style={{ margin: 0, color: "#d4b56a" }}>
+                  Temp mail worker not configured yet — click Configure to set it up.
+                </p>
+              )}
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setMailOpen(true)}
+              >
+                Configure
+              </button>
+            </div>
           )}
 
           <div className="form-row" style={{ marginTop: 16, gap: 20 }}>
@@ -1306,6 +1543,16 @@ function GrokRegisterFarm() {
           </div>
         </div>
       )}
+
+      <TempMailSettingsModal
+        open={mailOpen}
+        current={mailCfg}
+        onClose={() => setMailOpen(false)}
+        onSaved={() => {
+          void refreshMail();
+          setNotice("Temp mail settings saved");
+        }}
+      />
     </div>
   );
 }

@@ -915,6 +915,35 @@ export function startFarmJob(
   );
 }
 
+export type MailSettings = {
+  base_url: string;
+  domain: string;
+  admin_password: string;
+  site_password: string;
+  configured: boolean;
+  updated_at: string;
+};
+
+export function getMailSettings(settings?: Settings) {
+  return request<MailSettings>("/admin/mail-settings", { auth: "admin" }, settings);
+}
+
+export function patchMailSettings(
+  body: {
+    base_url?: string;
+    domain?: string;
+    admin_password?: string;
+    site_password?: string;
+  },
+  settings?: Settings,
+) {
+  return request<MailSettings>(
+    "/admin/mail-settings",
+    { method: "PATCH", body: JSON.stringify(body), auth: "admin" },
+    settings,
+  );
+}
+
 export function retryFailedFarmJob(
   id: string,
   body?: {
