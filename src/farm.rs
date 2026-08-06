@@ -1198,6 +1198,26 @@ impl FarmManager {
             {
                 cmd.env(format!("{imap_prefix}_MAIL_MODE"), m);
             }
+            // Temp-mail worker config lives in the DB (admin-editable via
+            // /admin/mail-settings) and takes precedence over the package .env
+            // (Python _load_dotenv uses setdefault, so cmd.env wins). When the
+            // DB row is not configured we inject nothing and fall back to .env.
+            if is_grok {
+                if let Ok(mail) = db::get_mail_settings(&pool).await {
+                    if !mail.base_url.trim().is_empty()
+                        && !mail.domain.trim().is_empty()
+                        && !mail.admin_password.is_empty()
+                    {
+                        cmd.env("GROK_MAIL_MODE", "cf");
+                        cmd.env("GROK_CF_MAIL_BASE_URL", mail.base_url.trim());
+                        cmd.env("GROK_CF_MAIL_DOMAIN", mail.domain.trim());
+                        cmd.env("GROK_CF_MAIL_ADMIN_PASSWORD", &mail.admin_password);
+                        if !mail.site_password.is_empty() {
+                            cmd.env("GROK_CF_MAIL_SITE_PASSWORD", &mail.site_password);
+                        }
+                    }
+                }
+            }
         }
         if !is_grok {
             if let Some(mode) = req

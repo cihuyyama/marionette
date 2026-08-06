@@ -82,6 +82,10 @@ pub fn router(state: AppState) -> Router {
             get(proxies::get_settings).patch(proxies::update_settings),
         )
         .route(
+            "/admin/mail-settings",
+            get(admin::get_mail_settings).patch(admin::update_mail_settings),
+        )
+        .route(
             "/admin/proxies/{id}",
             patch(proxies::toggle_proxy).delete(proxies::delete_proxy),
         )

@@ -1460,6 +1460,64 @@ pub async fn delete_combo(
     Ok(Json(json!({ "ok": true, "id": id })))
 }
 
+fn masked_or_empty(secret: &str) -> String {
+    if secret.is_empty() {
+        String::new()
+    } else {
+        db::mask_token(secret)
+    }
+}
+
+fn mail_settings_json(s: &db::MailSettingsRow) -> Value {
+    json!({
+        "base_url": s.base_url,
+        "domain": s.domain,
+        "admin_password": masked_or_empty(&s.admin_password),
+        "site_password": masked_or_empty(&s.site_password),
+        "configured": !s.base_url.is_empty() && !s.domain.is_empty() && !s.admin_password.is_empty(),
+        "updated_at": s.updated_at,
+    })
+}
+
+pub async fn get_mail_settings(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    let s = db::get_mail_settings(&state.pool).await?;
+    Ok(Json(mail_settings_json(&s)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MailSettingsBody {
+    pub base_url: Option<String>,
+    pub domain: Option<String>,
+    pub admin_password: Option<String>,
+    pub site_password: Option<String>,
+}
+
+pub async fn update_mail_settings(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(body): Json<MailSettingsBody>,
+) -> AppResult<Json<Value>> {
+    if let Some(u) = body.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !(u.starts_with("http://") || u.starts_with("https://")) {
+            return Err(AppError::BadRequest(
+                "base_url must start with http:// or https://".into(),
+            ));
+        }
+    }
+    let s = db::update_mail_settings(
+        &state.pool,
+        body.base_url.as_deref(),
+        body.domain.as_deref(),
+        body.admin_password.as_deref(),
+        body.site_password.as_deref(),
+    )
+    .await?;
+    Ok(Json(mail_settings_json(&s)))
+}
+
 #[cfg(test)]
 mod inject_eligibility_tests {
     use super::*;

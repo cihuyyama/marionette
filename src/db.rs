@@ -429,6 +429,14 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
           on_dead TEXT NOT NULL DEFAULT 'direct',
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mail_settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          base_url TEXT NOT NULL DEFAULT '',
+          domain TEXT NOT NULL DEFAULT '',
+          admin_password TEXT NOT NULL DEFAULT '',
+          site_password TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS model_combos (
           id TEXT PRIMARY KEY,
           slug TEXT NOT NULL UNIQUE,
@@ -2204,6 +2212,67 @@ pub async fn update_proxy_settings(
     get_proxy_settings(pool).await
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct MailSettingsRow {
+    pub id: i64,
+    pub base_url: String,
+    pub domain: String,
+    pub admin_password: String,
+    pub site_password: String,
+    pub updated_at: String,
+}
+
+pub async fn get_mail_settings(pool: &SqlitePool) -> AppResult<MailSettingsRow> {
+    if let Some(row) =
+        sqlx::query_as::<_, MailSettingsRow>("SELECT * FROM mail_settings WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+    {
+        return Ok(row);
+    }
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO mail_settings (id, base_url, domain, admin_password, site_password, updated_at)
+         VALUES (1, '', '', '', '', ?)",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(MailSettingsRow {
+        id: 1,
+        base_url: String::new(),
+        domain: String::new(),
+        admin_password: String::new(),
+        site_password: String::new(),
+        updated_at: now,
+    })
+}
+
+pub async fn update_mail_settings(
+    pool: &SqlitePool,
+    base_url: Option<&str>,
+    domain: Option<&str>,
+    admin_password: Option<&str>,
+    site_password: Option<&str>,
+) -> AppResult<MailSettingsRow> {
+    let cur = get_mail_settings(pool).await?;
+    let base = base_url.map(str::trim).unwrap_or(&cur.base_url);
+    let dom = domain.map(str::trim).unwrap_or(&cur.domain);
+    let admin = admin_password.unwrap_or(&cur.admin_password);
+    let site = site_password.unwrap_or(&cur.site_password);
+    sqlx::query(
+        "UPDATE mail_settings SET base_url=?, domain=?, admin_password=?, site_password=?, updated_at=? WHERE id=1",
+    )
+    .bind(base)
+    .bind(dom)
+    .bind(admin)
+    .bind(site)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    get_mail_settings(pool).await
+}
+
 pub async fn decrement_quota(
     pool: &SqlitePool,
     account_id: &str,
@@ -3246,6 +3315,40 @@ mod tests {
         assert_eq!(after.requests_used, 2);
         assert_eq!(after.tokens_used, 120);
         assert!(after.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn mail_settings_roundtrip_and_defaults() {
+        let (pool, _dir) = temp_db("mailset").await;
+
+        let defaults = get_mail_settings(&pool).await.unwrap();
+        assert_eq!(defaults.id, 1);
+        assert!(defaults.base_url.is_empty());
+        assert!(defaults.domain.is_empty());
+        assert!(defaults.admin_password.is_empty());
+        assert!(defaults.site_password.is_empty());
+
+        let set = update_mail_settings(
+            &pool,
+            Some("https://tempmail.example.dev"),
+            Some("example.dev"),
+            Some("hunter2"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(set.base_url, "https://tempmail.example.dev");
+        assert_eq!(set.domain, "example.dev");
+        assert_eq!(set.admin_password, "hunter2");
+        assert!(set.site_password.is_empty());
+
+        // Partial patch: absent fields keep current values.
+        let patched = update_mail_settings(&pool, None, Some("other.dev"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(patched.base_url, "https://tempmail.example.dev");
+        assert_eq!(patched.domain, "other.dev");
+        assert_eq!(patched.admin_password, "hunter2");
     }
 
     #[tokio::test]
