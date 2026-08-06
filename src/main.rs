@@ -95,8 +95,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let serve_assets = tower::ServiceBuilder::new()
                 .layer(assets_service)
                 .service(ServeDir::new(&assets));
-            let serve = ServeDir::new(&dir)
-                .not_found_service(ServeFile::new(index));
+            // SPA fallback: unknown paths serve index.html with 200 so
+            // client-side routes (/combos, /api-keys, ...) deep-link cleanly.
+            // `fallback` preserves the file's 200; `not_found_service` would
+            // force 404 (tower-http semantics).
+            let serve = ServeDir::new(&dir).fallback(ServeFile::new(index));
             app = app
                 .nest_service("/assets", serve_assets)
                 .fallback_service(serve);
