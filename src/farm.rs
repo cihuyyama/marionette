@@ -535,7 +535,8 @@ impl FarmManager {
         cmd.current_dir(&work)
             .env("PYTHONPATH", &pythonpath)
             .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONIOENCODING", "utf-8");
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("PYTHONUTF8", "1");
         if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
             if !k.trim().is_empty() {
                 cmd.env("QODER_DUDUL_ACCESS_KEY", k);
@@ -1172,7 +1173,8 @@ impl FarmManager {
         cmd.current_dir(&work)
             .env("PYTHONPATH", &pythonpath)
             .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONIOENCODING", "utf-8");
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("PYTHONUTF8", "1");
         if is_register_mode {
             let imap_prefix = if is_grok { "GROK" } else { "QODER" };
             if let Some(pw) = default_pw {

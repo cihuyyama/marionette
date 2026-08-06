@@ -387,8 +387,8 @@ async def _attempt_oidc(
     label: str,
 ) -> dict[str, Any]:
     """
-    PKCE authorize → email sign-in / consent → capture code via route to
-    127.0.0.1:56121 → exchange_code_for_tokens. One attempt.
+    PKCE authorize -> email sign-in / consent -> capture code via route to
+    127.0.0.1:56121 -> exchange_code_for_tokens. One attempt.
     """
     verifier, challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(24)

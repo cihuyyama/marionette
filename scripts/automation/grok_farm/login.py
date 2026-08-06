@@ -784,7 +784,7 @@ async def drive_email_password_login(
     label: str,
 ) -> bool:
     """
-    Drive accounts.x.ai email login form (Next → password → Turnstile → Login).
+    Drive accounts.x.ai email login form (Next -> password -> Turnstile -> Login).
 
     Active Turnstile mouse path + hard Login click. Always re-fill password after CF remount.
     """

@@ -107,7 +107,7 @@ async def process_one(
     count_result: bool = True,
 ) -> dict[str, Any]:
     """
-    browser → login → oauth PKCE → verify_chat → result dict.
+    browser -> login -> oauth PKCE -> verify_chat -> result dict.
     """
     label = mask_email(email)
     result: dict[str, Any] = {

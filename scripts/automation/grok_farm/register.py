@@ -179,23 +179,55 @@ async def _fill_email_and_submit(page: Any, email: str, prog: Progress) -> bool:
     return False
 
 
+async def _left_otp_page(page: Any) -> bool:
+    # xAI's input-otp auto-submits once the 6th char lands and jumps straight
+    # to the profile step, so "no OTP input anymore" / "profile markers present"
+    # both mean the code was accepted — not a failure.
+    try:
+        body = (await page.evaluate("() => document.body.innerText") or "").lower()
+        if "first name" in body or "complete your sign up" in body or "create a password" in body:
+            return True
+        otp_input = page.locator(
+            'input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"]'
+        )
+        if await otp_input.count() == 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _fill_otp(page: Any, code: str, prog: Progress) -> bool:
     code_clean = re.sub(r"[^A-Za-z0-9]", "", code).upper()
+    otp_sels = (
+        'input[data-input-otp="true"], input[name="code"], '
+        'input[autocomplete="one-time-code"]'
+    )
     for _ in range(5):
+        if await _left_otp_page(page):
+            return True
         try:
-            otp_input = page.locator('input[name="code"], input[autocomplete="one-time-code"]')
+            otp_input = page.locator(otp_sels)
             if await otp_input.count() > 0:
-                await otp_input.first.fill(code_clean)
-                await asyncio.sleep(0.3)
+                await otp_input.first.click()
+                # Type char-by-char: input-otp is a controlled component and
+                # reliably accepts keystrokes, then may auto-submit on completion.
+                await page.keyboard.type(code_clean, delay=80)
+                await asyncio.sleep(1.2)
+                if await _left_otp_page(page):
+                    return True
                 btn = page.get_by_role("button", name=re.compile(r"confirm|verify|continue|submit", re.I))
                 if await btn.count() > 0:
                     await btn.first.click(force=True)
+                    await asyncio.sleep(1.0)
                     return True
             slots = page.locator('input[maxlength="1"]')
             if await slots.count() >= 6:
                 await slots.first.click()
-                await page.keyboard.type(code_clean, delay=50)
-                await asyncio.sleep(0.5)
+                await page.keyboard.type(code_clean, delay=80)
+                await asyncio.sleep(1.2)
+                if await _left_otp_page(page):
+                    return True
                 btn = page.get_by_role("button", name=re.compile(r"confirm|verify|continue|submit", re.I))
                 if await btn.count() > 0:
                     await btn.first.click(force=True)
@@ -203,7 +235,7 @@ async def _fill_otp(page: Any, code: str, prog: Progress) -> bool:
         except Exception:
             pass
         await asyncio.sleep(1)
-    return False
+    return await _left_otp_page(page)
 
 
 async def _fill_profile_and_password(page: Any, password: str, prog: Progress) -> bool:
@@ -466,7 +498,7 @@ async def register_one(
     # Fresh accounts hit "Failed to generate authentication code / Access denied"
     # on PKCE consent, so approve device flow in the already-signed-in browser
     # first (reference's 1000+-account path); fall back to in-page PKCE.
-    prog.step(email, "oauth", "OAuth tokens (device→PKCE)")
+    prog.step(email, "oauth", "OAuth tokens (device -> PKCE)")
     tokens = await _obtain_tokens_with_retry(page, email, password, cfg, prog, proxy_url)
 
     base = {

@@ -195,7 +195,7 @@ def _safe_url_path(url: str) -> str:
 async def _device_page_state(page: Any, *, token_ready: bool = False) -> str:
     """Classify the current device-flow page.
 
-    Priority: token → done → error → login → consent → unknown.
+    Priority: token -> done -> error -> login -> consent -> unknown.
     """
     if token_ready:
         return "token"
