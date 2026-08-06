@@ -13,7 +13,6 @@ function resultSummary(r: ImportResult): string {
   parts.push(`inserted ${r.inserted}`);
   if (r.updated) parts.push(`updated ${r.updated}`);
   if (r.skipped) parts.push(`skipped ${r.skipped}`);
-  if (r.deleted) parts.push(`deleted ${r.deleted}`);
   return parts.join(", ");
 }
 
@@ -23,7 +22,6 @@ export function NineRouterImport() {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [drag, setDrag] = useState(false);
-  const [replace, setReplace] = useState(false);
   const [skipExisting, setSkipExisting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -47,7 +45,7 @@ export function NineRouterImport() {
     setResult(null);
     setLoading(true);
     try {
-      const res = await importAccountsFile(file, replace, undefined, skipExisting);
+      const res = await importAccountsFile(file, undefined, skipExisting);
       setResult(res);
     } catch (err) {
       setError(
@@ -137,27 +135,22 @@ export function NineRouterImport() {
 
         <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
           <input
-            type="checkbox"
-            checked={replace}
-            onChange={(e) => {
-              setReplace(e.target.checked);
-              if (e.target.checked) setSkipExisting(false);
-            }}
+            type="radio"
+            name="import-dedup"
+            checked={!skipExisting}
+            onChange={() => setSkipExisting(false)}
           />
           <span>
-            Replace all — wipe existing grok-cli and qoder accounts before
-            importing
+            Replace existing — overwrite accounts with the same provider+email
           </span>
         </label>
 
         <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
           <input
-            type="checkbox"
+            type="radio"
+            name="import-dedup"
             checked={skipExisting}
-            onChange={(e) => {
-              setSkipExisting(e.target.checked);
-              if (e.target.checked) setReplace(false);
-            }}
+            onChange={() => setSkipExisting(true)}
           />
           <span>
             Skip existing — only import accounts whose provider+email is not
@@ -168,11 +161,11 @@ export function NineRouterImport() {
         <div className="btn-row">
           <button
             type="submit"
-            className={`btn ${replace ? "btn-danger" : "btn-primary"}`}
+            className="btn btn-primary"
             disabled={loading || !file}
           >
             {loading ? <span className="spinner inline-spinner" /> : null}
-            {replace ? "Replace & import backup" : "Import backup"}
+            Import backup
           </button>
           <button
             type="button"

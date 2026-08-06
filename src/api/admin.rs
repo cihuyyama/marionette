@@ -25,7 +25,6 @@ pub struct ListQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct ImportQuery {
-    pub replace: Option<bool>,
     pub skip_existing: Option<bool>,
 }
 
@@ -1169,7 +1168,6 @@ pub async fn import_accounts(
     Query(q): Query<ImportQuery>,
     body: axum::body::Bytes,
 ) -> AppResult<Json<Value>> {
-    let replace = q.replace.unwrap_or(false);
     let skip_existing = q.skip_existing.unwrap_or(false);
     if body.is_empty() {
         return Err(AppError::BadRequest("empty import body".into()));
@@ -1177,28 +1175,17 @@ pub async fn import_accounts(
     let value: Value = serde_json::from_slice(&body).map_err(|e| {
         AppError::BadRequest(format!("invalid JSON: {e}"))
     })?;
-    run_import(&state, value, replace, skip_existing).await
+    run_import(&state, value, skip_existing).await
 }
 
 async fn run_import(
     state: &AppState,
     body: Value,
-    replace: bool,
     skip_existing: bool,
 ) -> AppResult<Json<Value>> {
     if import_util::is_9router_backup(&body) {
         let accounts = import_util::parse_9router_backup(&body);
         let total_parsed = accounts.len();
-
-        let mut deleted = 0u64;
-        if replace {
-            deleted = db::delete_accounts_by_providers(
-                &state.pool,
-                import_util::SUPPORTED_PROVIDERS,
-            )
-            .await?;
-            tracing::info!(deleted, "replace-all: wiped existing accounts");
-        }
 
         let mut inserted = 0u64;
         let mut updated = 0u64;
@@ -1224,18 +1211,7 @@ async fn run_import(
             "inserted": inserted,
             "updated": updated,
             "skipped": skipped,
-            "deleted": deleted,
         })));
-    }
-
-    let mut deleted = 0u64;
-    if replace {
-        deleted = db::delete_accounts_by_providers(
-            &state.pool,
-            import_util::SUPPORTED_PROVIDERS,
-        )
-        .await?;
-        tracing::info!(deleted, "replace-all: wiped existing accounts");
     }
 
     let items = normalize_import_items(&body)?;
@@ -1259,7 +1235,6 @@ async fn run_import(
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
-        "deleted": deleted,
     })))
 }
 

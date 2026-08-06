@@ -553,14 +553,10 @@ export function warmupQoderAccounts(
 
 export function importAccounts(
   body: unknown,
-  replace = false,
   settings?: Settings,
   skipExisting = false,
 ) {
-  const params = new URLSearchParams();
-  if (replace) params.set("replace", "true");
-  if (skipExisting) params.set("skip_existing", "true");
-  const qs = params.toString() ? `?${params.toString()}` : "";
+  const qs = skipExisting ? "?skip_existing=true" : "";
   return request<ImportResult>(
     `/admin/accounts${qs}`,
     {
@@ -574,14 +570,10 @@ export function importAccounts(
 
 export function importAccountsFile(
   file: Blob,
-  replace = false,
   settings?: Settings,
   skipExisting = false,
 ) {
-  const params = new URLSearchParams();
-  if (replace) params.set("replace", "true");
-  if (skipExisting) params.set("skip_existing", "true");
-  const qs = params.toString() ? `?${params.toString()}` : "";
+  const qs = skipExisting ? "?skip_existing=true" : "";
   return request<ImportResult>(
     `/admin/accounts${qs}`,
     {

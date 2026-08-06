@@ -34,7 +34,6 @@ export function AddAccountModal({
   const [clientId, setClientId] = useState("");
   const [personalToken, setPersonalToken] = useState("");
   const [bulkText, setBulkText] = useState("");
-  const [replace, setReplace] = useState(false);
   const [skipExisting, setSkipExisting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,7 +48,6 @@ export function AddAccountModal({
     setClientId("");
     setPersonalToken("");
     setBulkText("");
-    setReplace(false);
     setSkipExisting(false);
     setError(null);
     setLoading(false);
@@ -86,7 +84,7 @@ export function AddAccountModal({
         personalToken,
         bulkText,
       });
-      const res = await importAccounts(body, replace, undefined, skipExisting);
+      const res = await importAccounts(body, undefined, skipExisting);
       onImported(res);
       onClose();
     } catch (err) {
@@ -282,33 +280,22 @@ export function AddAccountModal({
             </div>
           )}
 
-          {replace && (
-            <div className="alert alert-error" role="alert">
-              Replace all wipes every existing grok-cli and qoder account before
-              importing this payload.
-            </div>
-          )}
-
           <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
             <input
-              type="checkbox"
-              checked={replace}
-              onChange={(e) => {
-                setReplace(e.target.checked);
-                if (e.target.checked) setSkipExisting(false);
-              }}
+              type="radio"
+              name="add-dedup"
+              checked={!skipExisting}
+              onChange={() => setSkipExisting(false)}
             />
-            <span>Replace all — wipe existing grok-cli and qoder accounts first</span>
+            <span>Replace existing — overwrite accounts with the same provider+email</span>
           </label>
 
           <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
             <input
-              type="checkbox"
+              type="radio"
+              name="add-dedup"
               checked={skipExisting}
-              onChange={(e) => {
-                setSkipExisting(e.target.checked);
-                if (e.target.checked) setReplace(false);
-              }}
+              onChange={() => setSkipExisting(true)}
             />
             <span>Skip existing — ignore rows whose provider+email is already in the pool</span>
           </label>
@@ -319,11 +306,11 @@ export function AddAccountModal({
             </button>
             <button
               type="submit"
-              className={`btn btn-sm ${replace ? "btn-danger" : "btn-primary"}`}
+              className="btn btn-sm btn-primary"
               disabled={loading || !canSubmit}
             >
               {loading ? <span className="spinner inline-spinner" /> : null}
-              {replace ? "Replace & import" : mode === "single" ? "Add account" : "Import"}
+              {mode === "single" ? "Add account" : "Import"}
             </button>
           </div>
         </form>
