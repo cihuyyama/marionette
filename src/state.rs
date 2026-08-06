@@ -4,6 +4,7 @@ use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
 use crate::refresh_job::RefreshManager;
+use crate::usage::UsageHandle;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,8 @@ pub struct AppState {
     pub proxies: ProxyManager,
     /// Sliding-window RPM limiter keyed by api_keys id (env master key never enters).
     pub rate_windows: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Latest resource-usage snapshot (marionette + automation process tree).
+    pub usage: UsageHandle,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
             refresh: RefreshManager::new(),
             proxies,
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
+            usage: crate::usage::new_handle(),
         }
     }
 }

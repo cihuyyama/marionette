@@ -13,4 +13,5 @@ pub mod providers;
 pub mod proxy;
 pub mod refresh_job;
 pub mod state;
+pub mod usage;
 pub mod workers;

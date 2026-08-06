@@ -15,6 +15,7 @@ use axum::{
 pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health::health))
+        .route("/health/usage", get(health::usage))
         .route("/v1/models", get(models::list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route(

@@ -323,6 +323,34 @@ impl FarmManager {
         }
     }
 
+    /// PIDs of every running automation subprocess (farm job + inject jobs).
+    /// Used by the usage sampler to account for the whole automation tree
+    /// (python + the browsers it spawns), not just the Rust process.
+    pub async fn automation_pids(&self) -> Vec<u32> {
+        let mut pids = Vec::new();
+        {
+            let st = self.inner.lock().await;
+            if let Some(cur) = &st.current {
+                if let Some(child) = &cur.child {
+                    if let Some(pid) = child.id() {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+        {
+            let st = self.inject.lock().await;
+            if let Some(cur) = &st.current {
+                if let Some(child) = &cur.child {
+                    if let Some(pid) = child.id() {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+        pids
+    }
+
     fn package_paths_for(&self, provider: &str) -> (&Path, &Path, &'static str, &'static str) {
         match provider {
             "grok-cli" => (
