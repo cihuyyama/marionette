@@ -23,7 +23,7 @@ from .device_flow import obtain_tokens_via_browser
 from .export import append_pending, drop_pending_email, write_backup
 from .login import dismiss_cookie_banner
 from .oauth import obtain_oidc_tokens
-from .progress import Progress
+from .progress import Progress, mask_email
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up"
 
@@ -683,6 +683,11 @@ async def run_register(
                                     n, path = write_backup([export_row], cfg.output, append=True)
                                     drop_pending_email(email, cfg.output)
                                     prog.log(f"saved -> {path} (+{n})", "INFO", email=email)
+                                    prog.account_ok(
+                                        email=email,
+                                        path=str(path),
+                                        masked_email=mask_email(email),
+                                    )
                                 except Exception as exc:
                                     prog.log(f"save err: {exc}", "ERR", email=email)
                         prog.mark_ok(email, "registered + tokens obtained")
@@ -759,6 +764,11 @@ async def retry_pending(
                 drop_pending_email(email, cfg.output)
                 recovered.append(export_row)
                 prog.log(f"recovered -> {path} (+{n})", "OK", email=email)
+                prog.account_ok(
+                    email=email,
+                    path=str(path),
+                    masked_email=mask_email(email),
+                )
                 prog.mark_ok(email, "recovered from pending")
                 continue
         prog.mark_fail(email, "still no tokens (kept in pending)")
