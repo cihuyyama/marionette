@@ -26,6 +26,7 @@ pub struct ListQuery {
 #[derive(Debug, Deserialize)]
 pub struct ImportQuery {
     pub replace: Option<bool>,
+    pub skip_existing: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,6 +494,122 @@ pub async fn export_qoder_pats(
     }
     let ok = items.iter().filter(|i| i.get("pat").is_some()).count();
     Ok(Json(json!({ "count": ok, "total": items.len(), "items": items })))
+}
+
+/// Emit one account as a flat 9Router-style providerConnection with plaintext
+/// tokens (never the masked public form), so the JSON round-trips losslessly
+/// through POST /admin/accounts. Returns Err(reason) when the account lacks a
+/// usable token for its provider.
+fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
+    let mut data = acc.data_json();
+
+    // Refuse accounts whose tokens are already masked — re-importing a masked
+    // export would silently create dead rows.
+    let masked = |v: &Value, keys: &[&str]| {
+        keys.iter().any(|k| {
+            v.get(*k)
+                .and_then(|x| x.as_str())
+                .map(|s| s.contains('…') || s.contains("..."))
+                .unwrap_or(false)
+        })
+    };
+
+    let mut conn = serde_json::Map::new();
+    conn.insert("id".into(), json!(acc.id));
+    conn.insert("provider".into(), json!(acc.provider));
+    if let Some(e) = &acc.email {
+        conn.insert("email".into(), json!(e));
+    }
+    if let Some(n) = &acc.name {
+        conn.insert("name".into(), json!(n));
+    }
+    conn.insert("isActive".into(), json!(acc.is_active != 0));
+    conn.insert("priority".into(), json!(acc.priority));
+    conn.insert("createdAt".into(), json!(acc.created_at));
+    conn.insert("updatedAt".into(), json!(acc.updated_at));
+    if let Some(lu) = &acc.last_used_at {
+        conn.insert("lastUsedAt".into(), json!(lu));
+    }
+
+    match acc.provider.as_str() {
+        "grok-cli" => {
+            if masked(&data, &["accessToken", "access_token"]) {
+                return Err("grok-cli: accessToken is masked");
+            }
+            let has_access = data
+                .get("accessToken")
+                .or_else(|| data.get("access_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_access {
+                return Err("grok-cli: missing accessToken");
+            }
+            // Flatten data onto the connection (import reads flat fields).
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    if matches!(k.as_str(), "backoffLevel") {
+                        continue;
+                    }
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "qoder" => {
+            if qoder_personal_token(acc).is_none() {
+                return Err("qoder: missing personalToken");
+            }
+            if masked(&data, &["personalToken", "personal_token"]) {
+                return Err("qoder: personalToken is masked");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        _ => return Err("unsupported provider"),
+    }
+
+    Ok(Value::Object(conn))
+}
+
+/// Bulk export selected accounts (any supported provider) as a 9Router-style
+/// backup JSON with plaintext tokens — designed to be re-imported verbatim on
+/// another Marionette instance via POST /admin/accounts.
+pub async fn export_accounts(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(body): Json<ExportPatBody>,
+) -> AppResult<Json<Value>> {
+    if body.account_ids.is_empty() {
+        return Err(AppError::BadRequest("account_ids is empty".into()));
+    }
+    let mut connections = Vec::with_capacity(body.account_ids.len());
+    let mut errors = Vec::new();
+    for id in &body.account_ids {
+        match db::get_account(&state.pool, id).await {
+            Ok(acc) => match account_to_connection(&acc) {
+                Ok(conn) => connections.push(conn),
+                Err(reason) => {
+                    errors.push(json!({ "id": id, "email": acc.email, "error": reason }));
+                }
+            },
+            Err(_) => errors.push(json!({ "id": id, "error": "not found" })),
+        }
+    }
+    let exported_at = db::now_rfc3339();
+    Ok(Json(json!({
+        "count": connections.len(),
+        "total": body.account_ids.len(),
+        "errors": errors,
+        "backup": {
+            "providerConnections": connections,
+            "exportedAt": exported_at,
+            "source": "marionette-export",
+            "count": connections.len(),
+        },
+    })))
 }
 
 pub async fn inject_account(
@@ -1053,16 +1170,22 @@ pub async fn import_accounts(
     body: axum::body::Bytes,
 ) -> AppResult<Json<Value>> {
     let replace = q.replace.unwrap_or(false);
+    let skip_existing = q.skip_existing.unwrap_or(false);
     if body.is_empty() {
         return Err(AppError::BadRequest("empty import body".into()));
     }
     let value: Value = serde_json::from_slice(&body).map_err(|e| {
         AppError::BadRequest(format!("invalid JSON: {e}"))
     })?;
-    run_import(&state, value, replace).await
+    run_import(&state, value, replace, skip_existing).await
 }
 
-async fn run_import(state: &AppState, body: Value, replace: bool) -> AppResult<Json<Value>> {
+async fn run_import(
+    state: &AppState,
+    body: Value,
+    replace: bool,
+    skip_existing: bool,
+) -> AppResult<Json<Value>> {
     if import_util::is_9router_backup(&body) {
         let accounts = import_util::parse_9router_backup(&body);
         let total_parsed = accounts.len();
@@ -1081,6 +1204,10 @@ async fn run_import(state: &AppState, body: Value, replace: bool) -> AppResult<J
         let mut updated = 0u64;
         let mut skipped = 0u64;
         for acc in accounts {
+            if skip_existing && account_exists(state, &acc.provider, acc.email.as_deref()).await? {
+                skipped += 1;
+                continue;
+            }
             match db::upsert_account(&state.pool, &acc).await {
                 Ok(db::UpsertKind::Inserted) => inserted += 1,
                 Ok(db::UpsertKind::Updated) => updated += 1,
@@ -1117,9 +1244,10 @@ async fn run_import(state: &AppState, body: Value, replace: bool) -> AppResult<J
     let mut skipped = 0u64;
 
     for item in items {
-        match upsert_import_item(state, &item).await {
-            Ok(true) => inserted += 1,
-            Ok(false) => updated += 1,
+        match upsert_import_item(state, &item, skip_existing).await {
+            Ok(Some(true)) => inserted += 1,
+            Ok(Some(false)) => updated += 1,
+            Ok(None) => skipped += 1,
             Err(e) => {
                 tracing::warn!(error = %e, "import skip");
                 skipped += 1;
@@ -1133,6 +1261,18 @@ async fn run_import(state: &AppState, body: Value, replace: bool) -> AppResult<J
         "skipped": skipped,
         "deleted": deleted,
     })))
+}
+
+/// Case-insensitive provider+email existence check, mirroring the upsert
+/// dedup key (db::find_account_by_provider_email). Accounts without an email
+/// can never dedupe by email, so they always return false.
+async fn account_exists(state: &AppState, provider: &str, email: Option<&str>) -> AppResult<bool> {
+    let Some(email) = email.filter(|e| !e.trim().is_empty()) else {
+        return Ok(false);
+    };
+    Ok(db::find_account_by_provider_email(&state.pool, provider, email)
+        .await?
+        .is_some())
 }
 
 fn normalize_import_items(body: &Value) -> AppResult<Vec<Value>> {
@@ -1154,7 +1294,11 @@ fn normalize_import_items(body: &Value) -> AppResult<Vec<Value>> {
     ))
 }
 
-async fn upsert_import_item(state: &AppState, item: &Value) -> AppResult<bool> {
+async fn upsert_import_item(
+    state: &AppState,
+    item: &Value,
+    skip_existing: bool,
+) -> AppResult<Option<bool>> {
     let provider = item
         .get("provider")
         .and_then(|v| v.as_str())
@@ -1171,6 +1315,9 @@ async fn upsert_import_item(state: &AppState, item: &Value) -> AppResult<bool> {
         .get("email")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    if skip_existing && account_exists(state, &provider, email.as_deref()).await? {
+        return Ok(None);
+    }
     let name = item
         .get("name")
         .and_then(|v| v.as_str())
@@ -1205,8 +1352,8 @@ async fn upsert_import_item(state: &AppState, item: &Value) -> AppResult<bool> {
         quota_remaining: q_rem,
     };
     match db::upsert_account(&state.pool, &acc).await? {
-        db::UpsertKind::Inserted => Ok(true),
-        db::UpsertKind::Updated => Ok(false),
+        db::UpsertKind::Inserted => Ok(Some(true)),
+        db::UpsertKind::Updated => Ok(Some(false)),
     }
 }
 
