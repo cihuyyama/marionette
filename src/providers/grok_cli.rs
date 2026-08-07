@@ -24,6 +24,35 @@ const CLIENT_VERSION: &str = "0.2.114";
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
 
+/// Returns Some(reason) when the access-token JWT payload marks the account
+/// as a bot ("bfs":1 or "bot_flag_source":1). Flagged accounts have thinking
+/// disabled, so the pool cuts them (AuthInvalid -> is_active=0). Unparseable
+/// tokens return None: never cut on a decode failure, only on an explicit flag.
+pub fn jwt_payload_bot_flag(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let mut seg = payload.to_string();
+    while seg.len() % 4 != 0 {
+        seg.push('=');
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE
+        .decode(seg)
+        .ok()?;
+    let v: Value = serde_json::from_slice(&decoded).ok()?;
+    let flagged = |key: &str| {
+        v.get(key)
+            .map(|x| x == &json!(1) || x == &json!("1"))
+            .unwrap_or(false)
+    };
+    if flagged("bfs") {
+        return Some("bfs=1".to_string());
+    }
+    if flagged("bot_flag_source") {
+        return Some("bot_flag_source=1".to_string());
+    }
+    None
+}
+
 pub struct GrokCliProvider {
     client: Client,
     config: Arc<Config>,
@@ -299,6 +328,14 @@ impl Provider for GrokCliProvider {
         }
         if self.needs_refresh(&data) || Self::access_token(&data).is_none() {
             self.refresh(account).await?;
+        }
+        let data = account.data_json();
+        if let Some(token) = Self::access_token(&data) {
+            if let Some(reason) = jwt_payload_bot_flag(&token) {
+                return Err(ProviderError::AuthInvalid(format!(
+                    "bot-flagged jwt ({reason})"
+                )));
+            }
         }
         Ok(())
     }
@@ -1905,5 +1942,54 @@ mod tests {
         assert_eq!(filled[0]["id"], "call_abc");
         assert_eq!(filled[0]["function"]["name"], "get_weather");
         assert_eq!(filled[0]["function"]["arguments"], "{\"city\":\"Paris\"}");
+    }
+
+    fn b64url(raw: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+    }
+
+    fn jwt_with_payload(payload: &str) -> String {
+        format!("{}.{}.{}", b64url("h"), b64url(payload), "sig")
+    }
+
+    #[test]
+    fn bot_flag_bfs_detected() {
+        let token = jwt_with_payload(r#"{"iss":"https://auth.x.ai/","bfs":1,"jti":"x"}"#);
+        assert_eq!(jwt_payload_bot_flag(&token).as_deref(), Some("bfs=1"));
+    }
+
+    #[test]
+    fn bot_flag_source_detected() {
+        let token = jwt_with_payload(r#"{"iss":"https://auth.x.ai/","bot_flag_source":1}"#);
+        assert_eq!(
+            jwt_payload_bot_flag(&token).as_deref(),
+            Some("bot_flag_source=1")
+        );
+    }
+
+    #[test]
+    fn bot_flag_string_one_detected() {
+        let token = jwt_with_payload(r#"{"iss":"https://auth.x.ai/","bfs":"1"}"#);
+        assert_eq!(jwt_payload_bot_flag(&token).as_deref(), Some("bfs=1"));
+    }
+
+    #[test]
+    fn clean_token_no_flag() {
+        let token = jwt_with_payload(r#"{"iss":"https://auth.x.ai/","principal_type":"User","referrer":"grok-build"}"#);
+        assert_eq!(jwt_payload_bot_flag(&token), None);
+    }
+
+    #[test]
+    fn bfs_zero_is_not_flagged() {
+        let token = jwt_with_payload(r#"{"iss":"https://auth.x.ai/","bfs":0}"#);
+        assert_eq!(jwt_payload_bot_flag(&token), None);
+    }
+
+    #[test]
+    fn unparseable_jwt_never_flags() {
+        assert_eq!(jwt_payload_bot_flag("not-a-jwt"), None);
+        assert_eq!(jwt_payload_bot_flag("a.b.c"), None);
+        assert_eq!(jwt_payload_bot_flag(""), None);
     }
 }
