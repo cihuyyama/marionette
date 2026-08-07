@@ -6,6 +6,27 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+/// PSS of one process in bytes. RSS overcounts multi-process trees because
+/// every browser child reports the full shared footprint (binary, libs, shm),
+/// so summing 150 children can exceed the machine's physical RAM. PSS divides
+/// each shared page among its users, which is why the kernel exposes it.
+/// Linux-only: returns None elsewhere so callers fall back to RSS.
+fn pss_bytes(pid: u32) -> Option<u64> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("Pss:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Best-effort process memory: PSS when available (Linux), RSS otherwise.
+fn proc_mem_bytes(pid: u32, rss: u64) -> u64 {
+    pss_bytes(pid).unwrap_or(rss)
+}
+
 /// One sampled snapshot of resource usage. Refreshed every 2s by the
 /// background sampler and served from cache by /admin/usage/process.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -84,12 +105,14 @@ fn sample(
 
     let self_pid = Pid::from_u32(pid_self);
     let (cpu_percent, mem_bytes) = match procs.get(&self_pid) {
-        Some(p) => (p.cpu_usage(), p.memory()),
+        Some(p) => (p.cpu_usage(), proc_mem_bytes(pid_self, p.memory())),
         None => (0.0, 0),
     };
 
-    // BFS over every automation root, summing CPU + RSS of the whole subtree
-    // (python farm process + every browser it spawned).
+    // BFS over every automation root, summing CPU + PSS of the whole subtree
+    // (python farm process + every browser it spawned). PSS instead of RSS:
+    // browser children share text/shm segments, so summing RSS inflates the
+    // total far beyond physical RAM.
     let mut auto_cpu = 0.0f32;
     let mut auto_mem = 0u64;
     let mut auto_procs = 0u32;
@@ -102,7 +125,7 @@ fn sample(
             }
             if let Some(p) = procs.get(&pid) {
                 auto_cpu += p.cpu_usage();
-                auto_mem += p.memory();
+                auto_mem += proc_mem_bytes(pid.as_u32(), p.memory());
                 auto_procs += 1;
             }
             if let Some(kids) = children.get(&pid) {
