@@ -61,6 +61,7 @@ async fn run_cycle(state: &AppState) -> Result<(), crate::error::AppError> {
                 let email = account.email.clone().unwrap_or_else(|| id.clone());
                 match state.grok.ensure_fresh_auth(&mut account).await {
                     Ok(()) => {
+                        account.last_error = None;
                         account.updated_at = db::now_rfc3339();
                         if let Err(e) = db::update_account(&state.pool, &account).await {
                             warn!(account = %id, error = %e, "refresh persist failed");

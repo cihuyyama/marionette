@@ -405,6 +405,7 @@ pub async fn refresh_account(
             return Err(AppError::BadRequest(format!("unknown provider {other}")));
         }
     }
+    acc.last_error = None;
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
     Ok(Json(json!(acc.to_public())))

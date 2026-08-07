@@ -297,6 +297,7 @@ async fn refresh_one(state: &AppState, account: &mut db::Account, force: bool) -
 
         match res {
             Ok(()) => {
+                account.last_error = None;
                 account.updated_at = db::now_rfc3339();
                 if let Err(e) = db::update_account(&state.pool, account).await {
                     warn!(account = %id, error = %e, "refresh-all persist failed");
