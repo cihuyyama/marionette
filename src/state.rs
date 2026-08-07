@@ -30,11 +30,13 @@ impl AppState {
     pub fn new(pool: SqlitePool, config: Config) -> Self {
         let farm = FarmManager::from_env(&config.db_path);
         let config = Arc::new(config);
+        // Short idle timeout: releases idle TLS connection memory sooner.
+        // The pool reopens connections on demand at negligible cost here.
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .tcp_nodelay(true)
             .build()
             .expect("http client");

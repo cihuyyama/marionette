@@ -86,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = api::router(state)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(cors)
-        .layer(CompressionLayer::new())
+        // gzip only: brotli's encoder state adds memory for negligible gain on
+        // these small JSON/static payloads.
+        .layer(CompressionLayer::new().gzip(true).br(false))
         .layer(TraceLayer::new_for_http());
 
     if let Some(dir) = static_dir {

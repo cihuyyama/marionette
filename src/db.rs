@@ -312,11 +312,15 @@ pub async fn connect(db_path: &Path) -> AppResult<SqlitePool> {
         // WAL + NORMAL is crash-safe yet skips FULL's fsync-per-commit.
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(5))
-        // Negative cache_size = KiB, so -65536 = 64 MiB page cache.
-        .pragma("cache_size", "-65536")
+        // Negative cache_size = KiB, so -2048 = 2 MiB page cache. Queries are
+        // short and the OS page cache serves the rest, so a large SQLite cache
+        // just wastes RAM (was -65536 = 64 MiB).
+        .pragma("cache_size", "-2048")
         .pragma("temp_store", "MEMORY");
+    // Single-process service; 3 connections cover dashboard polling + request
+    // logging + background workers. Was 8 (each holds a thread + cache share).
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
+        .max_connections(3)
         .connect_with(opts)
         .await?;
     migrate(&pool).await?;
