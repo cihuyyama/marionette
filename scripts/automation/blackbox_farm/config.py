@@ -49,6 +49,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(_env(key, str(default)) or default)
+    except ValueError:
+        return default
+
+
 def generate_company_name() -> str:
     """Random, realistic-sounding company name for the key-name field.
 
@@ -103,7 +110,8 @@ class Config:
     headless: bool
     # Per-step browser timeouts (seconds) — novabox request_timeout.
     request_timeout: int
-    # How long to poll the temp-mail for the 6-digit OTP.
+    # How long to poll the temp-mail for the 6-digit OTP (incl. resend loop —
+    # first delivery often needs a Resend click, so budget generously).
     otp_timeout: int
     # Poll cadence for the OTP mailbox (novabox verify_poll_interval).
     otp_poll_interval: float
@@ -114,6 +122,12 @@ class Config:
     screenshot_dir: Path
     debug: bool
     json_progress: bool
+    # Camoufox humanized mouse (same semantics as grok_farm: launch-only,
+    # value = max seconds per mouse move). Full humanize = leave enabled.
+    humanize: bool
+    humanize_headed: float
+    humanize_headless: float
+    browser_os: str
     # Random company-style key name per account (novabox pattern).
     key_name: str = field(default_factory=generate_company_name)
     # Self-hosted cloudflare_temp_email worker (see mail.py). Required for
@@ -137,13 +151,17 @@ def load_config() -> Config:
         blackbox_url=_env("BLACKBOX_URL", DEFAULT_BLACKBOX_URL) or DEFAULT_BLACKBOX_URL,
         headless=_env_bool("BLACKBOX_HEADLESS", True),
         request_timeout=_env_int("BLACKBOX_TIMEOUT", 30),
-        otp_timeout=_env_int("BLACKBOX_OTP_TIMEOUT", 120),
+        otp_timeout=_env_int("BLACKBOX_OTP_TIMEOUT", 240),
         otp_poll_interval=3.0,
         account_timeout=_env_int("BLACKBOX_ACCOUNT_TIMEOUT", 600),
         output=out,
         screenshot_dir=shots,
         debug=_env_bool("BLACKBOX_DEBUG", False),
         json_progress=_env_bool("BLACKBOX_JSON_PROGRESS", False),
+        humanize=_env_bool("BLACKBOX_HUMANIZE", True),
+        humanize_headed=_env_float("BLACKBOX_HUMANIZE_HEADED", 0.8),
+        humanize_headless=_env_float("BLACKBOX_HUMANIZE_HEADLESS", 0.8),
+        browser_os=_env("BLACKBOX_BROWSER_OS", "windows") or "windows",
         cf_mail_base_url=_env("BLACKBOX_CF_MAIL_BASE_URL"),
         cf_mail_admin_password=_env("BLACKBOX_CF_MAIL_ADMIN_PASSWORD"),
         cf_mail_domain=_env("BLACKBOX_CF_MAIL_DOMAIN"),

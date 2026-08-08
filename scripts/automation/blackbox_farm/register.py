@@ -99,9 +99,9 @@ async def run_register(
             acc_password = generate_password()
             started_emails.add(email)
 
-            async def wait_otp(_email: str) -> str:
+            async def poll_otp(_email: str, window: float) -> str:
                 code = await loop.run_in_executor(
-                    None, mail_session.poll_otp, cfg.otp_timeout, cfg.otp_poll_interval
+                    None, mail_session.poll_otp, int(max(5, window)), cfg.otp_poll_interval
                 )
                 if code:
                     prog.log(f"OTP received: {code}", "DBG", email=email, step="wait_otp")
@@ -110,13 +110,16 @@ async def run_register(
             def on_step(msg: str) -> None:
                 prog.step(email, _STEP_NAMES.get(msg, "flow"), msg)
 
-            prog.step(email, "launch", "starting chromium")
-            client = BlackboxClient(cfg)
+            def log_fn(msg: str, level: str) -> None:
+                prog.log(msg, level, email=email, step="flow")
+
+            prog.step(email, "launch", "starting camoufox")
+            client = BlackboxClient(cfg, log_fn=log_fn)
             await client.start()
 
             prog.step(email, "signup", "filling signup form")
             api_key = await client.register_and_create_key(
-                email, acc_password, wait_otp, on_step
+                email, acc_password, poll_otp, on_step
             )
 
             prog.step(email, "validate", "probing key against api.blackbox.ai")

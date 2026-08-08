@@ -1,25 +1,32 @@
-"""Blackbox.ai browser flow driven by plain Playwright Chromium.
+"""Blackbox.ai browser flow driven by Camoufox (anti-detect Firefox).
 
-Ported 1:1 from refs/novabox/providers/blackbox.py (MIT, verified selectors
-against live app.blackbox.ai). One chromium.launch per account; cookies
-persist in a single context from signup through key creation. The signup form
-is a Next.js server action (multipart POST /signup) that requires a real
-browser — httpx cannot reproduce it.
+Flow ported from refs/novabox/providers/blackbox.py (MIT, verified selectors
+against live app.blackbox.ai), then hardened from live runs:
 
-No anti-detect / fingerprint trickery: novabox runs plain headless chromium.
+1. Engine = Camoufox with humanize (plain Chromium got OTP delivery refused).
+2. OTP: the first verification email often never arrives on its own — the
+   "Resend" link on the OTP screen triggers actual delivery. Poll short
+   windows, click resend, repeat until the total OTP budget runs out.
+3. Key creation intermittently returns nothing; retry the modal flow several
+   times (manual testing confirms it takes a few tries).
+4. Console + app.blackbox.ai HTTP traffic is captured and surfaced through
+   the injected log function so failures are diagnosable from the job log.
+
+The signup form is a Next.js server action (multipart POST /signup) that
+requires a real browser — httpx cannot reproduce it.
 """
 from __future__ import annotations
 
 import asyncio
 import re
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 from playwright.async_api import (
     Browser,
     BrowserContext,
     Page,
     TimeoutError as PlaywrightTimeoutError,
-    async_playwright,
 )
 
 from .config import Config
@@ -29,33 +36,57 @@ class BlackboxError(Exception):
     """Raised when a browser step in the Blackbox flow fails (step-prefixed)."""
 
 
-class BlackboxClient:
-    """Owns one Playwright browser/context/page for the whole account flow."""
+_OTP_POLL_WINDOW = 30.0
+_FIRST_DELIVERY_WINDOW = 45.0
+_AFTER_RESEND_WINDOW = 60.0
+_500_RETRY_WAIT = 25.0
 
-    def __init__(self, cfg: Config) -> None:
+
+class BlackboxClient:
+    """Owns one Camoufox browser/context/page for the whole account flow."""
+
+    def __init__(self, cfg: Config, log_fn: Callable[[str, str], None] | None = None) -> None:
         self._cfg = cfg
-        self._playwright = None
+        self._log_fn = log_fn
+        self._manager = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._key_created: asyncio.Event = asyncio.Event()
         self._api_key: str = ""
         self._email: str = ""
+        self._verification_resp: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        from camoufox.async_api import AsyncCamoufox
+
+        humanize_val = self._cfg.humanize_headed if not self._cfg.headless else self._cfg.humanize_headless
+        launch_kwargs: dict[str, Any] = {
+            "headless": self._cfg.headless,
+            "humanize": humanize_val if self._cfg.humanize else False,
+            "os": self._cfg.browser_os,
+            "locale": "en-US",
+            "disable_coop": True,
+            "i_know_what_im_doing": True,
+            # The signup page asks "Allow app.blackbox.ai to access your
+            # location?" — auto-allow it via prefs so the browser-UI prompt
+            # never blocks the flow (Camoufox spoofs the coords anyway).
+            "firefox_user_prefs": {
+                "geo.prompt.testing.always_allow": True,
+                "permissions.default.geo": 1,
+            },
+        }
         try:
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=self._cfg.headless,
-            )
+            self._manager = AsyncCamoufox(**launch_kwargs)
+            self._browser = await self._manager.__aenter__()
             self._context = await self._browser.new_context()
             self._page = await self._context.new_page()
         except Exception as exc:
-            raise BlackboxError(f"launch: chromium launch failed: {exc}") from exc
+            raise BlackboxError(f"launch: camoufox launch failed: {exc}") from exc
 
         # Block images, fonts, media to save RAM and speed up.
         await self._page.route(
@@ -66,29 +97,92 @@ class BlackboxClient:
                 else route.continue_()
             ),
         )
+        self._attach_listeners()
 
     async def stop(self) -> None:
         try:
-            if self._browser is not None:
-                await self._browser.close()
+            if self._manager is not None:
+                await self._manager.__aexit__(None, None, None)
         except Exception:
             pass
         finally:
+            self._manager = None
             self._browser = None
             self._context = None
             self._page = None
-            if self._playwright is not None:
-                try:
-                    await self._playwright.stop()
-                except Exception:
-                    pass
-                self._playwright = None
 
     @property
     def page(self) -> Page:
         if self._page is None:
             raise BlackboxError("launch: client not started")
         return self._page
+
+    # ------------------------------------------------------------------
+    # Instrumentation (console + HTTP visibility for the job log)
+    # ------------------------------------------------------------------
+
+    def _log(self, msg: str, level: str = "INFO") -> None:
+        if self._log_fn is not None:
+            try:
+                self._log_fn(msg, level)
+            except Exception:
+                pass
+
+    def _attach_listeners(self) -> None:
+        page = self.page
+        page.on("console", self._on_console)
+        page.on("response", lambda r: asyncio.create_task(self._on_response(r)))
+        page.on("requestfailed", self._on_request_failed)
+
+    def _on_console(self, msg: Any) -> None:
+        try:
+            mtype = msg.type
+            if mtype not in ("error", "warning"):
+                return
+            text = (msg.text or "")[:220]
+            if text:
+                self._log(f"console[{mtype}] {text}", "WARN")
+        except Exception:
+            pass
+
+    async def _on_response(self, response: Any) -> None:
+        try:
+            url = response.url
+            if "blackbox.ai" not in url:
+                return
+            path = urlparse(url).path or "/"
+            method = response.request.method
+            status = response.status
+            level = "DBG" if status < 400 else "WARN"
+            self._log(f"http {method} {path} -> {status}", level)
+            if "send-verification" in path:
+                # The resend loop needs the live status/body to decide waits.
+                body = ""
+                try:
+                    body = (await response.text())[:200]
+                except Exception:
+                    pass
+                self._verification_resp = {"status": status, "body": body}
+                if status >= 400:
+                    self._log(f"http body: {body}", "WARN")
+            elif status >= 400:
+                try:
+                    body = (await response.text())[:200]
+                    self._log(f"http body: {body}", "WARN")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_request_failed(self, req: Any) -> None:
+        try:
+            url = req.url
+            if "blackbox.ai" not in url:
+                return
+            path = urlparse(url).path or "/"
+            self._log(f"http {req.method} {path} FAILED ({req.failure or 'net'})", "WARN")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Full flow
@@ -98,17 +192,14 @@ class BlackboxClient:
         self,
         email: str,
         password: str,
-        wait_otp: Callable[[str], Awaitable[str]],
+        poll_otp: Callable[[str, float], Awaitable[str]],
         on_step: Callable[[str], None] | None = None,
     ) -> str:
         """Run the entire verified flow and return the sk-... API key.
 
-        Steps:
-          1. Open /signup, fill email+password, submit (server action POST /signup)
-          2. Wait for the OTP mail (wait_otp polls our CF temp-mail worker)
-          3. Enter the code, click Verify, land on /activity
-          4. Navigate to /keys, CREATE KEY, name it, confirm, capture key
-          5. Click DONE to close the modal
+        poll_otp(email, window_seconds) polls the temp-mail worker for up to
+        the given window and returns the code or "". This client drives the
+        resend loop around it.
         """
         self._email = email
         page = self.page
@@ -120,7 +211,7 @@ class BlackboxClient:
 
         if on_step:
             on_step("waiting for otp...")
-        code = await wait_otp(email)
+        code = await self._wait_otp_with_resend(email, poll_otp)
         if not code:
             await self._shot(email, "fail_wait_otp")
             raise BlackboxError(
@@ -138,6 +229,76 @@ class BlackboxClient:
         if on_step:
             on_step("done")
         return api_key
+
+    async def _wait_otp_with_resend(
+        self,
+        email: str,
+        poll_otp: Callable[[str, float], Awaitable[str]],
+    ) -> str:
+        # Live observation: the first verification email frequently never
+        # arrives, but clicking "Resend" on the OTP screen triggers real
+        # delivery. Blackbox rate-limits resend: 500 "Failed to send
+        # verification code" intermittently, then 429 "Too many verification
+        # code requests. Please try again in N minute(s)" — so parse the
+        # cooldown and wait it out instead of spamming.
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + self._cfg.otp_timeout
+        resend_n = 0
+
+        code = await poll_otp(email, _FIRST_DELIVERY_WINDOW)
+        while not code and loop.time() < deadline:
+            resend_n += 1
+            clicked = await self.click_resend()
+            self._log(f"no OTP after window — resend #{resend_n} clicked={clicked}", "WARN")
+
+            wait_s = 3.0
+            resp = self._verification_resp
+            status = resp.get("status", 0)
+            body = resp.get("body", "") or ""
+            if status == 429:
+                m = re.search(r"in (\d+) minute", body)
+                wait_s = min(240.0, (int(m.group(1)) * 60 + 10) if m else 190.0)
+                self._log(f"resend rate-limited (429) — waiting {wait_s:.0f}s", "WARN")
+            elif status == 500:
+                wait_s = _500_RETRY_WAIT
+                self._log(f"resend 500 (upstream send failed) — waiting {wait_s:.0f}s", "WARN")
+            await asyncio.sleep(min(wait_s, max(0.0, deadline - loop.time())))
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            window = min(_AFTER_RESEND_WINDOW, max(10.0, remaining))
+            code = await poll_otp(email, window)
+        return code
+
+    async def click_resend(self) -> bool:
+        """Click the OTP screen's Resend control once it is clickable.
+
+        The control shows "Sending..." while a send is in flight and "Resend"
+        when clickable; clicking it mid-send is a no-op. Wait for the
+        clickable state, then click. Returns True if clicked.
+        """
+        page = self.page
+        deadline = asyncio.get_event_loop().time() + 60
+        while asyncio.get_event_loop().time() < deadline:
+            for sel in (
+                'a:has-text("Resend")',
+                'button:has-text("Resend")',
+                'text=/Resend code/i',
+                'text=/^Resend$/i',
+            ):
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        txt = (await loc.inner_text()).strip().lower()
+                        if "sending" in txt:
+                            continue
+                        await loc.click()
+                        return True
+                except Exception:
+                    continue
+            await asyncio.sleep(1.0)
+        return False
 
     # ------------------------------------------------------------------
     # Step 1 — signup
@@ -215,10 +376,10 @@ class BlackboxClient:
         )
 
     # ------------------------------------------------------------------
-    # Step 3 — API key creation
+    # Step 3 — API key creation (with retries — intermittently flaky)
     # ------------------------------------------------------------------
 
-    async def create_api_key(self, name: str | None = None) -> str:
+    async def create_api_key(self, name: str | None = None, attempts: int = 4) -> str:
         key_name = name or self._cfg.key_name
         page = self.page
 
@@ -230,57 +391,78 @@ class BlackboxClient:
             lambda r: asyncio.create_task(self._capture_key_response(r)),
         )
 
-        try:
-            await page.goto(f"{self._cfg.blackbox_url}/keys", wait_until="domcontentloaded")
-            create_btn = page.locator('button:has-text("CREATE KEY")').first
-            await create_btn.wait_for(state="visible", timeout=30_000)
-            await create_btn.click()
+        for attempt in range(1, attempts + 1):
+            try:
+                await page.goto(f"{self._cfg.blackbox_url}/keys", wait_until="domcontentloaded")
+                create_btn = page.locator('button:has-text("CREATE KEY")').first
+                await create_btn.wait_for(state="visible", timeout=30_000)
+                await create_btn.click()
 
-            # Modal appears with a key-name input (placeholder "e.g. Production")
-            # and a disabled "Create API Key" button until a name is entered.
-            name_locator = page.locator(
-                'input[placeholder*="Production"], input[placeholder*="Key name"], '
-                'input[placeholder*="e.g."]'
-            ).first
-            await name_locator.wait_for(state="visible", timeout=15_000)
-            await name_locator.fill(key_name)
+                # Modal appears with a key-name input (placeholder "e.g. Production")
+                # and a disabled "Create API Key" button until a name is entered.
+                name_locator = page.locator(
+                    'input[placeholder*="Production"], input[placeholder*="Key name"], '
+                    'input[placeholder*="e.g."]'
+                ).first
+                await name_locator.wait_for(state="visible", timeout=15_000)
+                await name_locator.fill(key_name)
 
-            confirm_btn = page.locator(
-                'button:has-text("CREATE API KEY"), button:has-text("Create API Key")'
-            ).first
-            await confirm_btn.wait_for(state="visible", timeout=15_000)
-            # The button starts disabled and enables once the name is non-empty;
-            # wait for it to become enabled before clicking.
-            await page.wait_for_function(
-                """() => {
-                    const btns = [...document.querySelectorAll('button')];
-                    return btns.some(b => /create api key/i.test(b.textContent || '') && !b.disabled);
-                }""",
-                timeout=15_000,
+                confirm_btn = page.locator(
+                    'button:has-text("CREATE API KEY"), button:has-text("Create API Key")'
+                ).first
+                await confirm_btn.wait_for(state="visible", timeout=15_000)
+                # The button starts disabled and enables once the name is non-empty;
+                # wait for it to become enabled before clicking.
+                await page.wait_for_function(
+                    """() => {
+                        const btns = [...document.querySelectorAll('button')];
+                        return btns.some(b => /create api key/i.test(b.textContent || '') && !b.disabled);
+                    }""",
+                    timeout=15_000,
+                )
+                await confirm_btn.click()
+            except Exception as exc:
+                self._log(
+                    f"create_key attempt {attempt}/{attempts} modal flow error: {str(exc)[:120]}",
+                    "WARN",
+                )
+                await asyncio.sleep(2.5)
+                continue
+
+            # The key appears in a modal. Prefer reading it from the network
+            # response, then fall back to scanning the page text.
+            self._key_created = asyncio.Event()
+            api_key = ""
+            try:
+                await asyncio.wait_for(self._key_created.wait(), timeout=15)
+                api_key = self._api_key
+            except asyncio.TimeoutError:
+                pass
+
+            if not api_key:
+                api_key = await self._read_key_from_page()
+
+            if api_key:
+                await self._close_key_modal()
+                return api_key
+
+            # Manual testing shows creation intermittently returns nothing;
+            # record the page state and retry.
+            snippet = ""
+            try:
+                snippet = (await page.locator("body").inner_text())[:160].replace("\n", " ")
+            except Exception:
+                pass
+            self._log(
+                f"create_key attempt {attempt}/{attempts}: no key yet; page={snippet!r}",
+                "WARN",
             )
-            await confirm_btn.click()
-        except Exception as exc:
-            await self._shot(self._email, "fail_create_key")
-            raise BlackboxError(f"create_key: modal flow failed: {exc}") from exc
+            await asyncio.sleep(2.5)
 
-        # The key appears in a modal. Prefer reading it from the network
-        # response, then fall back to scanning the page text.
-        api_key = ""
-        try:
-            await asyncio.wait_for(self._key_created.wait(), timeout=15)
-            api_key = self._api_key
-        except asyncio.TimeoutError:
-            pass
-
-        if not api_key:
-            api_key = await self._read_key_from_page()
-
-        if not api_key:
-            await self._shot(self._email, "fail_key_not_found")
-            raise BlackboxError("create_key: API key not found after creation")
-
-        await self._close_key_modal()
-        return api_key
+        await self._shot(self._email, "fail_key_not_found")
+        raise BlackboxError(
+            f"create_key: API key not found after {attempts} attempts"
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
