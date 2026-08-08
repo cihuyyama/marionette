@@ -7,10 +7,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from .activate import activate_grok_if_needed
 from .browser import recover_page_load_error
 from .config import Config
 from .login import click_login_with_email, click_text_button, dismiss_cookie_banner, drive_email_password_login
-from .oauth import _consent_force_allow, _consent_page_denied, handle_optional_otp
+from .oauth import _consent_force_allow, _consent_page_denied, handle_optional_otp, obtain_oidc_tokens
 
 DEVICE_REFERRER = "grok-build"
 
@@ -468,6 +469,53 @@ async def obtain_tokens_via_browser(
         "scope": token_data.get("scope") or cfg.scope,
         "id_token": id_token,
     }
+
+
+async def obtain_tokens_with_retry(
+    page: Any,
+    email: str,
+    password: str,
+    cfg: Config,
+    prog: Any,
+    proxy_url: str = "",
+) -> dict | None:
+    """Unified token acquisition: browser device flow first, PKCE fallback.
+
+    Shared by register and relogin so both mint tokens through the same
+    path. The browser device flow is preferred for accounts the browser is
+    already signed into (it avoids a second Turnstile round on the PKCE
+    authorize page); PKCE remains the fallback per attempt.
+    """
+    attempts = max(1, cfg.oauth_retries)
+    for attempt in range(1, attempts + 1):
+        try:
+            tokens = await obtain_tokens_via_browser(
+                page, cfg, prog=prog, email=email, password=password, proxy_url=proxy_url
+            )
+            if tokens and tokens.get("access_token"):
+                return tokens
+        except Exception as exc:
+            prog.log(f"device flow error: {exc}", "WARN", email=email, step="oauth")
+        prog.log("device flow miss — falling back to PKCE", "WAIT", email=email, step="oauth")
+        try:
+            tokens = await obtain_oidc_tokens(
+                page, email, password, cfg, prog, email, reprovision=activate_grok_if_needed
+            )
+            if tokens and tokens.get("access_token"):
+                return tokens
+        except Exception as exc:
+            prog.log(f"OAuth failed (device+PKCE): {exc}", "ERR", email=email, step="oauth")
+        if attempt < attempts:
+            backoff = min(15.0, 3.0 * attempt)
+            prog.log(
+                f"oauth retry {attempt}/{attempts - 1} (backoff {backoff:.0f}s)",
+                "WAIT",
+                email=email,
+                step="oauth",
+            )
+            await asyncio.sleep(backoff)
+            await activate_grok_if_needed(page, cfg, prog, email, attempts=2)
+    return None
 
 
 def obtain_tokens(cfg: Config, sso_cookie: str, proxy_url: str = "", prog: Any = None, email: str = "") -> dict | None:

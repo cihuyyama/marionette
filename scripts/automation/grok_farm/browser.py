@@ -198,7 +198,7 @@ async def launch_camoufox(cfg: Config, prog: Progress, email: str = "") -> dict[
     }
 
     if email:
-        prog.log(f"profile {_profile_dir_for(email).name}", "INFO")
+        prog.log(f"profile {_profile_dir_for(email).name}", "INFO", email=email, step="launch")
 
     # Sticky proxy: same email always exits from the same IP
     if email:
@@ -210,7 +210,7 @@ async def launch_camoufox(cfg: Config, prog: Progress, email: str = "") -> dict[
         kwargs["proxy"] = _proxy_dict(proxy_url)
         kwargs["geoip"] = True
         parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
-        prog.log(f"proxy {parsed.hostname}:{parsed.port}", "INFO")
+        prog.log(f"proxy {parsed.hostname}:{parsed.port}", "INFO", email=email or "", step="launch")
 
     manager = AsyncCamoufox(**kwargs)
     browser = await manager.__aenter__()

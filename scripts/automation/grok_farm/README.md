@@ -10,7 +10,7 @@ Python package for **Grok CLI manual thin/mass relogin** inside Marionette.
 | Does | Does not |
 |------|----------|
 | Email+password login on accounts.x.ai | Signup / Turnstile mass create |
-| OAuth PKCE → access + refresh tokens | Write to 9Router SQLite |
+| OAuth device flow (browser) → access + refresh tokens, PKCE fallback | Write to 9Router SQLite |
 | `verify_chat` ACTIVE probe | Playwright in Rust |
 | 9Router-shaped JSON for `marionette-import` | Proactive scheduler (manual CLI only) |
 
@@ -20,7 +20,9 @@ Python package for **Grok CLI manual thin/mass relogin** inside Marionette.
 email|password
   -> Camoufox (humanize 0.8 headed / 1.0 headless)
   -> accounts.x.ai email login (Turnstile mouse path + hard Login click)
-  -> auth.x.ai OAuth PKCE (redirect 127.0.0.1:56121 captured via route)
+  -> grok.com activation (principal entitlement, short budget)
+  -> OAuth device flow in the signed-in browser (shared with register mode)
+  -> PKCE fallback: redirect 127.0.0.1:56121 captured via route
   -> exchange code → accessToken + refreshToken
   -> POST cli-chat-proxy.grok.com  "Reply with exactly ACTIVE"
   -> results/grok-accounts.json  (providerConnections, provider=grok-cli)

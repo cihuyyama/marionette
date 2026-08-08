@@ -7,9 +7,9 @@ from typing import Any
 
 from .browser import close_session, launch_camoufox, save_cookies
 from .config import Config
+from .device_flow import obtain_tokens_with_retry
 from .export import emails_in_output, write_backup, write_failures
 from .login import do_email_login
-from .oauth import obtain_oidc_tokens
 from .activate import activate_grok_if_needed
 from .progress import Progress, mask_email
 from .verify import verify_chat
@@ -107,9 +107,11 @@ async def process_one(
     count_result: bool = True,
 ) -> dict[str, Any]:
     """
-    browser -> login -> oauth PKCE -> verify_chat -> result dict.
+    browser -> login -> activate -> oauth (device -> PKCE) -> verify_chat -> result dict.
     """
-    label = mask_email(email)
+    # Log style matches register mode: full email labels, run steps as
+    # launch -> login -> activate -> oauth -> verify.
+    label = email
     result: dict[str, Any] = {
         "ok": False,
         "email": email,
@@ -126,7 +128,7 @@ async def process_one(
     session: dict[str, Any] | None = None
 
     try:
-        prog.step(label, "browser", "launch camoufox")
+        prog.step(label, "launch", "starting browser")
         session = await launch_camoufox(cfg, prog, email=email)
         page = session["page"]
 
@@ -139,9 +141,14 @@ async def process_one(
         # Ensure account has Grok entitlement (principalId) before OAuth
         await activate_grok_if_needed(page, cfg, prog, label)
 
-        tokens = await obtain_oidc_tokens(page, email, password, cfg, prog, label)
-        access = tokens.get("access_token") or ""
-        refresh = tokens.get("refresh_token") or ""
+        # Same mechanism as register: browser device flow first (browser is
+        # already signed in), PKCE fallback per attempt.
+        prog.step(label, "oauth", "OAuth tokens (device -> PKCE)")
+        tokens = await obtain_tokens_with_retry(
+            page, email, password, cfg, prog, session.get("proxy_url") or ""
+        )
+        access = (tokens or {}).get("access_token") or ""
+        refresh = (tokens or {}).get("refresh_token") or ""
         if not access or not refresh:
             raise RuntimeError("OAuth returned incomplete tokens")
 
@@ -170,9 +177,9 @@ async def process_one(
         result["ok"] = True
         await save_cookies(page, email)
         if count_result:
-            prog.mark_ok(label, "relogin ok")
+            prog.mark_ok(label, "relogin + tokens obtained")
         else:
-            prog.log("relogin ok", "OK", email=label)
+            prog.log("relogin + tokens obtained", "OK", email=label)
         return result
 
     except Exception as exc:
@@ -225,7 +232,7 @@ async def run_relogin(
                 step="skip",
             )
             for email in skipped[:20]:
-                prog.log(f"skip {mask_email(email)}", "WAIT", email=mask_email(email))
+                prog.log(f"skip {email}", "WAIT", email=email, step="skip")
             if len(skipped) > 20:
                 prog.log(f"… +{len(skipped) - 20} more skipped", "INFO")
         prog.total = len(work)
@@ -243,12 +250,11 @@ async def run_relogin(
             r: dict[str, Any] | None = None
             for attempt in range(1, max_attempts + 1):
                 if attempt > 1:
-                    label = mask_email(email)
                     prog.log(
                         f"account retry {attempt}/{max_attempts} after: "
                         f"{(r or {}).get('error') or 'fail'}",
                         "WARN",
-                        email=label,
+                        email=email,
                     )
                     await asyncio.sleep(1.5 + 0.8 * (attempt - 1))
                 is_last = attempt == max_attempts
@@ -261,27 +267,24 @@ async def run_relogin(
                     count_result=False,
                 )
                 if r.get("ok") and r.get("accessToken"):
-                    prog.mark_ok(mask_email(email), "relogin ok")
+                    prog.mark_ok(email, "relogin + tokens obtained")
                     break
                 if is_last:
-                    prog.mark_fail(
-                        mask_email(email),
-                        str(r.get("error") or "relogin failed"),
-                    )
+                    prog.mark_fail(email, str(r.get("error") or "relogin failed"))
             assert r is not None
             async with lock:
                 results.append(r)
                 if r.get("ok") and r.get("accessToken"):
                     try:
                         n, path = write_backup([r], cfg.output, append=True)
-                        prog.log(f"saved -> {path} (+{n})", "INFO")
+                        prog.log(f"saved -> {path} (+{n})", "INFO", email=email)
                         prog.account_ok(
                             email=email,
                             path=str(path),
                             masked_email=mask_email(email),
                         )
                     except Exception as exc:
-                        prog.log(f"save err: {exc}", "ERR")
+                        prog.log(f"save err: {exc}", "ERR", email=email)
             if delay_s > 0 and concurrency == 1:
                 await asyncio.sleep(delay_s)
 
