@@ -9,22 +9,27 @@ from pathlib import Path
 from .config import load_config
 from .progress import Progress
 from .register import run_register
+from .sso import run_google_sso
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m blackbox_farm",
         description=(
-            "Blackbox.ai account farm. register mode: signup new accounts on "
-            "app.blackbox.ai (Playwright Chromium) -> OTP via self-hosted "
-            "cloudflare temp-mail worker -> create + harvest sk-... API key."
+            "Blackbox.ai account farm. Two modes: (1) register — signup new "
+            "accounts (temp-mail OTP) then harvest sk-... API key; "
+            "(2) google-sso — login existing GSuite/Google accounts via "
+            "'Continue with Google' (email|password lines) and harvest the key."
         ),
     )
     p.add_argument(
         "-f",
         "--file",
         dest="file",
-        help="Accounts file. Register mode: single line 'register:COUNT:domain'",
+        help=(
+            "Accounts file. Register mode: single line 'register:COUNT:domain'. "
+            "Google-SSO mode: one 'email|password' per line."
+        ),
     )
     p.add_argument(
         "-o",
@@ -89,6 +94,36 @@ def _parse_register_directive(text: str) -> tuple[int, str] | None:
     return max(1, count), domain
 
 
+def parse_sso_accounts(raw_text: str) -> list[tuple[str, str]]:
+    """Parse email|password lines (same shapes as farm.rs parse_accounts_text)."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" in line:
+            email, _, password = line.partition("|")
+        else:
+            at = line.find("@")
+            if at < 0:
+                continue
+            colon = line.find(":", at)
+            if colon < 0:
+                continue
+            email, password = line[:colon], line[colon + 1 :]
+        email = email.strip()
+        password = password.strip()
+        if not email or not password or "@" not in email:
+            continue
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((email, password))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load_config()
@@ -108,53 +143,80 @@ def main(argv: list[str] | None = None) -> int:
     if overrides:
         cfg = replace(cfg, **overrides)
 
-    # Register mode is the only mode: auto-detect from accounts text.
     raw_text = ""
     if args.file:
         fp = Path(args.file)
         if fp.is_file():
             raw_text = fp.read_text(encoding="utf-8").strip()
+
     directive = _parse_register_directive(raw_text)
-    if directive is None:
+    concurrency = max(1, int(args.concurrency or 1))
+    account_retries = max(1, int(args.account_retries or 1))
+    account_delay = max(0.0, float(args.account_delay or 0.0))
+
+    if directive is not None:
+        count, _domain = directive  # domain reserved; mailbox domain comes from CF worker
+        prog = Progress(
+            ui="log",
+            debug=cfg.debug,
+            json_progress=cfg.json_progress,
+            total=count,
+        )
+        prog.log(
+            f"mode=register count={count} concurrency={concurrency} "
+            f"headless={cfg.headless} account_retries={account_retries} "
+            f"account_delay={account_delay} out={cfg.output}",
+            "INFO",
+            step="start",
+        )
+        results = asyncio.run(
+            run_register(
+                cfg,
+                prog,
+                count=count,
+                concurrency=concurrency,
+                account_retries=account_retries,
+                account_delay=account_delay,
+            )
+        )
+        failed = count - len(results)
+        return 0 if failed == 0 else 1
+
+    accounts = parse_sso_accounts(raw_text)
+    if not accounts:
         print(
-            "No register directive. Put one line in -f accounts.txt:\n"
-            "  register:COUNT:domain\n"
+            "No accounts found. Put one of these in -f accounts.txt:\n"
+            "  register:COUNT:domain            (signup new accounts via temp-mail OTP)\n"
+            "  email|password  (one per line)   (Google SSO login, no OTP)\n"
             "See accounts.txt.example",
             file=sys.stderr,
         )
         return 2
 
-    count, _domain = directive  # domain reserved; mailbox domain comes from CF worker
-    concurrency = max(1, int(args.concurrency or 1))
-    account_retries = max(1, int(args.account_retries or 1))
-    account_delay = max(0.0, float(args.account_delay or 0.0))
-
     prog = Progress(
         ui="log",
         debug=cfg.debug,
         json_progress=cfg.json_progress,
-        total=count,
+        total=len(accounts),
     )
     prog.log(
-        f"mode=register count={count} concurrency={concurrency} "
+        f"mode=google-sso accounts={len(accounts)} concurrency={concurrency} "
         f"headless={cfg.headless} account_retries={account_retries} "
         f"account_delay={account_delay} out={cfg.output}",
         "INFO",
         step="start",
     )
-
     results = asyncio.run(
-        run_register(
+        run_google_sso(
             cfg,
             prog,
-            count=count,
+            accounts,
             concurrency=concurrency,
             account_retries=account_retries,
             account_delay=account_delay,
         )
     )
-
-    failed = count - len(results)
+    failed = len(accounts) - len(results)
     return 0 if failed == 0 else 1
 
 

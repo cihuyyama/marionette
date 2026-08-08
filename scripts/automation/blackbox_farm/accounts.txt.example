@@ -1,7 +1,12 @@
-# Blackbox farm accounts file — one register directive.
-# Format: register:COUNT:domain
+# Blackbox farm accounts file — pick ONE mode.
+#
+# Mode 1 — register (signup new accounts via temp-mail OTP):
+#   Format: register:COUNT:domain
 #   COUNT  = number of accounts to create
 #   domain = reserved (mailbox domain comes from the CF temp-mail worker)
-# The email/password are generated per account; the domain field is kept for
-# runner compatibility with grok_farm's register directive.
-register:1:example.com
+# register:1:example.com
+#
+# Mode 2 — google-sso (login existing GSuite/Google accounts, no OTP):
+#   One 'email|password' per line. 'email:password' also accepted.
+# user@yourworkspace.com|S3cretPassw0rd
+# other@yourworkspace.com|OtherPass123

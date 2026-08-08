@@ -36,6 +36,25 @@ class BlackboxError(Exception):
     """Raised when a browser step in the Blackbox flow fails (step-prefixed)."""
 
 
+class _ProgressLogAdapter:
+    """Minimal prog-shaped logger for the google_sso driver.
+
+    google_sso.drive_google_auth expects an object with
+    .log(msg, level, email=..., step=...) — this adapter forwards to the
+    client's injected log_fn and swallows the extra kwargs.
+    """
+
+    def __init__(self, log_fn: Callable[[str, str], None] | None) -> None:
+        self._log_fn = log_fn
+
+    def log(self, msg: str, level: str = "INFO", **_: Any) -> None:
+        if self._log_fn is not None:
+            try:
+                self._log_fn(msg, level)
+            except Exception:
+                pass
+
+
 _OTP_POLL_WINDOW = 30.0
 _FIRST_DELIVERY_WINDOW = 45.0
 _AFTER_RESEND_WINDOW = 60.0
@@ -229,6 +248,103 @@ class BlackboxClient:
         if on_step:
             on_step("done")
         return api_key
+
+    async def login_with_google_and_create_key(
+        self,
+        email: str,
+        password: str,
+        on_step: Callable[[str], None] | None = None,
+    ) -> str:
+        """GSuite/Google SSO flow: login via "Continue with Google", harvest key.
+
+        No OTP / temp-mail — the Google account password is the only input.
+        Reuses the battle-tested Google-auth driver from google_sso.py
+        (ported from qoder_farm) and the same create_api_key modal flow.
+        """
+        # Lazy import: google_sso is only needed for SSO mode and keeps the
+        # register-mode dependency surface identical to before.
+        from . import google_sso
+
+        self._email = email
+        page = self.page
+        page.set_default_timeout(self._cfg.request_timeout * 1000)
+
+        if on_step:
+            on_step("opening login...")
+        try:
+            await page.goto(
+                f"{self._cfg.blackbox_url}/login", wait_until="domcontentloaded"
+            )
+        except Exception as exc:
+            await self._shot(email, "fail_sso_goto")
+            raise BlackboxError(f"sso: goto /login failed: {exc}") from exc
+        await asyncio.sleep(1.5)
+
+        if on_step:
+            on_step("google sign-in...")
+        prog = _ProgressLogAdapter(self._log_fn)
+        try:
+            pages_before = set(self._context.pages) if self._context else set()
+            await google_sso.click_blackbox_google_button(page, prog, email)
+            auth_target = await self._detect_oauth_popup(pages_before) or page
+            await google_sso.drive_google_auth(auth_target, email, password, prog)
+        except Exception as exc:
+            await self._shot(email, "fail_sso_auth")
+            raise BlackboxError(f"sso: google auth failed: {exc}") from exc
+
+        # After consent the app auto-logs-in. Poll for the SPA landing path
+        # (same targets as verify_otp) instead of wait_for_url, which can
+        # stall on 'load' for an SPA.
+        if on_step:
+            on_step("waiting for app...")
+        deadline = asyncio.get_event_loop().time() + 60
+        landed = False
+        while asyncio.get_event_loop().time() < deadline:
+            if re.search(r"/(activity|dashboard|chat)", page.url):
+                landed = True
+                break
+            # Some accounts may land directly on root after SSO.
+            try:
+                parsed_path = urlparse(page.url).path.rstrip("/")
+            except Exception:
+                parsed_path = ""
+            if google_sso.is_blackbox_host(page.url) and parsed_path in ("", "/"):
+                landed = True
+                break
+            await asyncio.sleep(0.5)
+        if not landed:
+            await self._shot(email, "fail_sso_land")
+            raise BlackboxError(
+                f"sso: did not reach app after google login (still at {page.url})"
+            )
+
+        if on_step:
+            on_step("creating api key...")
+        api_key = await self.create_api_key()
+
+        if on_step:
+            on_step("done")
+        return api_key
+
+    async def _detect_oauth_popup(self, pages_before: set[Any]) -> Page | None:
+        """Some Google SSO integrations open OAuth in a popup instead of
+        redirecting the main tab. Returns the new popup page if one appeared,
+        else None (caller falls back to driving the main page)."""
+        if self._context is None:
+            return None
+        deadline = asyncio.get_event_loop().time() + 5
+        while asyncio.get_event_loop().time() < deadline:
+            for p in self._context.pages:
+                if p in pages_before:
+                    continue
+                try:
+                    url = p.url or ""
+                except Exception:
+                    url = ""
+                if "accounts.google.com" in url or "google." in url:
+                    return p
+            await asyncio.sleep(0.3)
+        return None
 
     async def _wait_otp_with_resend(
         self,
