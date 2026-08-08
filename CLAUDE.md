@@ -8,12 +8,13 @@
 
 ## 1. What this is
 
-Thin **Rust** OpenAI-compatible **proxy pool** with exactly **two** providers:
+Thin **Rust** OpenAI-compatible **proxy pool** with three providers:
 
 | Provider ID | Model prefix | Auth |
 |-------------|--------------|------|
 | `grok-cli` | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | `qoder` | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` + userId/machineId |
+| `blackbox` | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh, no expiry) |
 
 Plus a **React + Vite + TypeScript** admin SPA under `web/` (dark-only, LoTM soft).
 
@@ -25,7 +26,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 
 ## 2. Golden rules (hard constraints)
 
-1. **Only** `grok-cli` and `qoder`. Do not add CodeBuddy/Kiro/Codex/Canva/etc.
+1. **Only** `grok-cli`, `qoder`, and `blackbox`. Do not add CodeBuddy/Kiro/Codex/Canva/etc.
 2. **Do not** port all of etteeum (no full pudidil/compression stack in v1).
 3. **Do not** put Playwright / browser automation in the Rust binary.
 4. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
@@ -35,6 +36,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
    - Grok **402 / PaymentRequired** (spending-limit / fleet credit) → **sealed** cooldown + `quota_remaining=0` (not cut). Auto-restores quota when cooldown ends.
    - Grok **403 / AccessDenied** and **AuthInvalid** (`invalid_grant`) → **cut**.
    - Qoder uses **local** `classify_qoder_status`: 402/403 → `RateLimited` (cooldown), **not** cut.
+   - Blackbox uses **local** `classify_blackbox_status`: 401 → cut (dead key), 402 → sealed+quota-0, **403 → fallen (moderation, never cut/seal)**, 429 → sealed w/ parsed retry-after.
    - **Never change global `classify_http_status` to “fix” Qoder** — keep Qoder classification local.
 7. Dashboard: **React + Vite SPA only** — not Next, TanStack Start, or SSR.
 8. UI: `docs/DESIGN.md` — dark-only, English ops nav, soft LoTM on chips/empty/brand only.
@@ -73,10 +75,11 @@ marionette/
 │   │   ├── mod.rs          # Provider trait, ChatOutcome, classify_http_status, force_refresh default
 │   │   ├── grok_cli.rs     # OAuth refresh + cli-chat-proxy.grok.com
 │   │   ├── qoder.rs        # COSY crypto, jobToken, stream/non-stream (~2k LOC)
+│   │   ├── blackbox.rs     # static sk- key → api.blackbox.ai (no refresh)
 │   │   └── qoder-baseprompt.json
 │   └── workers/
 │       ├── mod.rs
-│       └── refresh.rs      # background Grok token refresh (not Qoder)
+│       └── refresh.rs      # background Grok token refresh (not Qoder/Blackbox)
 ├── tests/api_smoke.rs      # router oneshot + temp sqlite
 ├── web/                    # React admin SPA
 │   ├── src/App.tsx         # routes
@@ -242,6 +245,7 @@ Error JSON shape:
 
 - starts with `gcli/` **or** `grok` **or** contains `grok` → `"grok-cli"`
 - starts with `qd/` **or** `qoder` → `"qoder"`
+- starts with `bb/` **or** `blackbox` → `"blackbox"` (branch **before** grok: upstream ids like `blackboxai/x-ai/grok-4.3` contain "grok")
 - starts with `combo/` → virtual combo (no direct provider; `provider_id_for_model` returns None)
 - else → unknown model (400)
 
@@ -252,6 +256,8 @@ Error JSON shape:
 **Grok:** `gcli/grok-build`, `gcli/grok-4.5`, `-high/-medium/-low`, `gcli/grok-4`, `gcli/grok-4-fast-reasoning`, `gcli/grok-code-fast-1`, `gcli/grok-3`
 
 **Qoder:** `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/lite`, `qd/qmodel_preview` (Qwen3.8-Max-Preview), `qd/qmodel_latest`, `qd/qmodel1`, `qd/kmodel_latest` (Kimi-K3), `qd/kmodel1` (Kimi-K2.7-Code), `qd/gm51model1` (GLM-5.2), `qd/dmodel1`, `qd/dfmodel1`, `qd/mmodel` (MiniMax-M3) — one listed id per live upstream; legacy aliases (`qmodel`, `kmodel`, `gm51model`, …) still route in `model_cfg`
+
+**Blackbox:** `bb/z-ai/glm-5.2`, `bb/blackboxai/moonshotai/kimi-k3`, `bb/blackboxai/x-ai/grok-4.3`, `bb/blackboxai/openai/gpt-5.4`, `bb/blackboxai/anthropic/claude-sonnet-4.5`, `bb/blackboxai/google/gemini-3.5-flash`, `bb/blackboxai/blackbox-pro`, … (~20 curated ids from the live `api.blackbox.ai/v1/models` catalog) — bare `blackboxai/*` and `z-ai/*` upstream ids also route to blackbox
 
 **Combos:** `combo/<slug>` virtual chat models are admin-created (not in `default_models()`); active ones are merged into `/v1/models` + `/admin/models` at request time (`models.rs::models_payload`, `owned_by="combo"`). Targets must be canonical concrete chat catalog ids — no aliases, no `combo/*`, no image-only `*imagine-image*`.
 
@@ -273,7 +279,7 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 
 ### Concrete flow (`handle_concrete_chat`)
 
-1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok` or `qoder`).
+1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok`, `qoder`, or `blackbox`).
 2. Loop **up to 8** picks: `db::pick_account(pool, provider_id, &tried)`.
 3. Push account id to `tried`.
 4. `provider.ensure_fresh_auth(&mut account)` — on fail → `apply_provider_error` + next account.
@@ -382,11 +388,12 @@ Tables:
 
 - grok-cli: `accessToken`, `refreshToken`, `expiresAt`, `expiresIn`, `clientId`, `idToken`, …
 - qoder: `personalToken`, `securityOauthToken` / access job token, `userId`, `machineId`, `expireTime`, …
+- blackbox: `apiKey` (`sk-…` static key), `password` (signup password, kept for key re-creation)
 
 Always use `Account::data_json()` / `set_data_json` for new token JSON I/O.
 
 **Mask keys** (admin public views):  
-`accessToken`, `refreshToken`, `idToken`, `personalToken`, `securityOauthToken`, `machineToken`, snake_case variants.  
+`accessToken`, `refreshToken`, `idToken`, `personalToken`, `securityOauthToken`, `machineToken`, `apiKey`, snake_case variants.  
 `mask_token`: `abcd…wxyz` (or `****` if ≤8 chars).
 
 ---
@@ -499,6 +506,7 @@ Gate before claim-done: `cargo test` + preferably `just preflight`.
 | Path / host | Role |
 |-------------|------|
 | `…/grok-farm` | Farm Grok OAuth tokens |
+| `refs/novabox` | **Blackbox farm reference** (MIT) — signup→OTP→key-harvest flow; our `blackbox_farm` ports it with our CF temp-mail worker |
 | `…/etteum-pool` | Bun multi-provider; **Qoder reference** `src/proxy/providers/qoder.ts` |
 | VPS 9Router DB | token store to import from — not runtime dependency |
 | VPS `grok-refresh` | hygiene for 9Router grok rows |
@@ -545,7 +553,8 @@ Do not modify those repos unless the user explicitly asks.
 | 5.6 Grok billing endpoint | done (`GET /admin/accounts/{id}/grok-billing` → cli-chat-proxy.grok.com/v1/billing; Credits button in AccountList) |
 | 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
 | 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
-| 6 Deploy polish | partial (static serve exists; systemd optional) |
+| 6 Blackbox provider + farm | code complete (provider `bb/`, static `sk-` keys, local classifier, `blackbox_farm` novabox-port w/ our CF temp-mail); live farm validation pending |
+| 7 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.
 

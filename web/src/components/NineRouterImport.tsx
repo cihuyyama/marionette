@@ -65,7 +65,7 @@ export function NineRouterImport() {
       <div className="settings-section-header">
         <h2 id="nine-router-import-heading">9Router import</h2>
         <p className="subtitle muted">
-          Backup JSON → pool (grok-cli + qoder only)
+          Backup JSON → pool (grok-cli + qoder + blackbox only)
         </p>
       </div>
 

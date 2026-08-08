@@ -1,9 +1,10 @@
 # AGENTS.md — Marionette
 
 ## Mission
-Build a **thin Rust OpenAI-compatible proxy pool** with exactly two providers:
+Build a **thin Rust OpenAI-compatible proxy pool** with three providers:
 - `grok-cli` (first, complete)
 - `qoder` (after dashboard)
+- `blackbox` (after qoder; static API keys, farm via temp-mail signup)
 
 Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full etteeum rewrite.
 
@@ -17,6 +18,8 @@ Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full ett
    - 9Router grok-cli executor + token refresh
    - etteeum `src/proxy/providers/qoder.ts` (Phase 5 only — do not invent)
    - grok-farm inject format / grok-refresh-quota rules
+   - novabox (`refs/novabox`, MIT) for the Blackbox signup/key-harvest flow; our own CF temp-mail worker replaces catchmail.io
+   - Blackbox upstream: `api.blackbox.ai/v1/chat/completions` (OpenAI-shaped, Bearer sk-key, no refresh), live-probed
 7. Dashboard stack: **React + Vite + TS SPA only** — not TanStack Start / Next / SSR.
 8. UI design: follow `docs/DESIGN.md` (LoTM soft, dark-only, English ops nav). Use **Impeccable** + `frontend-ui-ux` when implementing `web/`.
 
@@ -26,7 +29,8 @@ Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full ett
 3. Admin JSON `/admin/*` with `MARIONETTE_ADMIN_KEY` (separate from pool key) + CORS for Vite
 4. Dashboard `web/`: scaffold Vite first, then Impeccable craft (Overview, Accounts, Import, Smoke test, Settings)
 5. Qoder auth + chat (port from etteeum)
-6. Deploy polish (serve `web/dist`, systemd optional)
+6. Blackbox provider: static `sk-` API keys, `bb/` model prefix, quota kind none, local error classifier (403 = moderation → fallen, never cut), farm = novabox flow ported with our CF temp-mail worker
+7. Deploy polish (serve `web/dist`, systemd optional)
 
 ## Code style
 **Rust**

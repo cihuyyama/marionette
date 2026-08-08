@@ -296,6 +296,7 @@ export function Accounts() {
     const map: Record<ProviderId, ProviderCounts> = {
       "grok-cli": emptyCounts(),
       qoder: emptyCounts(),
+      blackbox: emptyCounts(),
     };
     for (const p of PROVIDERS) {
       map[p] = countFor(accounts.filter((a) => a.provider === p));

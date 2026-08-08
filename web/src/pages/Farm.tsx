@@ -128,6 +128,10 @@ export function FarmPage() {
     );
   }
 
+  if (provider === "blackbox") {
+    return <BlackboxRegisterFarm />;
+  }
+
   if (provider === "grok-cli") {
     if (method === "register") {
       return <GrokRegisterFarm />;
@@ -1204,10 +1208,6 @@ function GrokRegisterFarm() {
         return;
       }
     }
-    if (!password.trim()) {
-      setError("Password is required for all new accounts");
-      return;
-    }
     if (method === "imap" && (!imapHost.trim() || !imapUser.trim() || !imapPass.trim())) {
       setError("IMAP host, user, and password are required to read OTP codes");
       return;
@@ -1370,13 +1370,14 @@ function GrokRegisterFarm() {
               </label>
             )}
             <label>
-              <span className="label">Password</span>
+              <span className="label">Password (optional)</span>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="new-password"
               />
+              <span className="hint">Leave empty for a unique random password per account (recommended — saved to the output JSON for later relogin).</span>
             </label>
             {method === "imap" && (
               <>
@@ -1500,6 +1501,347 @@ function GrokRegisterFarm() {
           <button type="button" className="btn btn-ghost" onClick={onForgetPreset} disabled={!!running}>
             Forget saved
           </button>
+        </div>
+      </form>
+
+      {job && (
+        <div className="panel" style={{ marginTop: 16 }}>
+          <div className="panel-header">
+            <h3>
+              Job <span className="mono">{job.id.slice(0, 8)}</span>{" "}
+              <span className={`chip chip-${statusTone(job.status)}`}>{job.status}</span>
+            </h3>
+            <span className="muted">
+              {job.ok} ok · {job.fail} fail · {job.total} total
+              {job.current_step ? ` · ${job.current_step}` : ""}
+              {job.current_email ? ` · ${job.current_email}` : ""}
+            </span>
+          </div>
+          <div className="log-box" style={{ maxHeight: 400, overflow: "auto" }}>
+            {events.length === 0 && (
+              <div className="muted" style={{ padding: "12px 0" }}>Waiting for output…</div>
+            )}
+            {events.map((ev) => {
+              const parts = farmLogParts(ev);
+              if (!parts) {
+                return (
+                  <div key={ev.seq} className="log-line">
+                    <span className="muted">{ev.ts.slice(11, 19)}</span> {ev.line}
+                  </div>
+                );
+              }
+              return (
+                <div key={ev.seq} className={`log-line farm-log farm-log-${parts.level.toLowerCase()}`}>
+                  <span className="muted">{parts.time}</span>
+                  <span className="farm-log-icon" aria-hidden>{parts.icon}</span>
+                  {parts.step && <span className="farm-log-step">{parts.step}</span>}
+                  {parts.email && <span className="muted farm-log-email">{parts.email}</span>}
+                  <span className="farm-log-msg">{parts.msg}</span>
+                </div>
+              );
+            })}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
+
+      <TempMailSettingsModal
+        open={mailOpen}
+        current={mailCfg}
+        onClose={() => setMailOpen(false)}
+        onSaved={() => {
+          void refreshMail();
+          setNotice("Temp mail settings saved");
+        }}
+      />
+    </div>
+  );
+}
+
+function BlackboxRegisterFarm() {
+  const [status, setStatus] = useState<FarmStatus | null>(null);
+  const [count, setCount] = useState(5);
+  const [domain, setDomain] = useState("");
+  const [password, setPassword] = useState("");
+  const [headless, setHeadless] = useState(false);
+  const [autoImport, setAutoImport] = useState(true);
+  const [concurrency, setConcurrency] = useState(1);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [events, setEvents] = useState<FarmEvent[]>([]);
+  const [job, setJob] = useState<FarmJob | null>(null);
+  const afterRef = useRef(0);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+  const [mailCfg, setMailCfg] = useState<MailSettings | null>(null);
+  const [mailError, setMailError] = useState<string | null>(null);
+  const [mailOpen, setMailOpen] = useState(false);
+
+  const packageOk = status?.info.packages?.blackbox?.package_present ?? false;
+  const maxWorkers = Math.max(1, status?.info.max_concurrency ?? 8);
+  const busy = status?.busy ?? false;
+
+  const refreshMail = useCallback(async () => {
+    try {
+      const cfg = await getMailSettings();
+      setMailCfg(cfg);
+      setMailError(null);
+    } catch (e) {
+      setMailCfg(null);
+      setMailError(
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Failed to load mail settings",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMail();
+  }, [refreshMail]);
+
+  // Default the signup domain to the configured temp-mail domain.
+  useEffect(() => {
+    setDomain((cur) => (cur.trim() ? cur : (mailCfg?.domain ?? "")));
+  }, [mailCfg]);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await getFarmStatus();
+      setStatus(s);
+      if (s.current && (s.current.provider ?? "") === "blackbox") {
+        setJob(s.current);
+        jobIdRef.current = s.current.id;
+      }
+      setError(null);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Failed to load farm status");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+    const id = window.setInterval(() => void refreshStatus(), 4000);
+    return () => window.clearInterval(id);
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    const jid = jobIdRef.current ?? job?.id;
+    if (!jid) return;
+    let cancelled = false;
+    let id = 0;
+    const isTerminal = (s?: string) => s === "succeeded" || s === "failed" || s === "cancelled";
+    const tick = async () => {
+      try {
+        const res = await getFarmEvents(jid, afterRef.current);
+        if (cancelled) return;
+        setJob(res.job);
+        if (res.events.length) {
+          setEvents((prev) => {
+            const next = [...prev, ...res.events];
+            return next.length > 1500 ? next.slice(-1500) : next;
+          });
+          afterRef.current = res.events[res.events.length - 1].seq;
+        }
+        if (isTerminal(res.job?.status) && id) {
+          window.clearInterval(id);
+          id = 0;
+        }
+      } catch {
+        void 0;
+      }
+    };
+    void tick();
+    id = window.setInterval(() => void tick(), 1500);
+    return () => {
+      cancelled = true;
+      if (id) window.clearInterval(id);
+    };
+  }, [job?.id, status?.busy]);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [events.length]);
+
+  async function onStart(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+    setStarting(true);
+    try {
+      const workers = Math.max(1, Math.min(maxWorkers, Math.floor(concurrency) || 1));
+      const n = Math.max(1, Math.floor(count) || 1);
+      const dom = domain.trim() || mailCfg?.domain || "bibib.my.id";
+      const res = await startFarmJob({
+        provider: "blackbox",
+        accounts: `register:${n}:${dom}`,
+        default_password: password.trim() || undefined,
+        mail_mode: "cf",
+        headless,
+        auto_import: autoImport,
+        concurrency: workers,
+      });
+      setJob(res.job);
+      jobIdRef.current = res.job.id;
+      afterRef.current = 0;
+      setEvents([]);
+      setNotice(
+        `Job ${res.job.id.slice(0, 8)}… · ${n} account(s) · ${workers} worker(s) · Temp mail (Cloudflare)`,
+      );
+      await refreshStatus();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Start failed");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function onCancel() {
+    if (!job) return;
+    setError(null);
+    try {
+      const res = await cancelFarmJob(job.id);
+      setJob(res.job);
+      setNotice("Cancel requested");
+      await refreshStatus();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Cancel failed");
+    }
+  }
+
+  const running = job && !["succeeded", "failed", "cancelled"].includes(job.status);
+  const disabled = !!running || starting;
+
+  return (
+    <div>
+      <header className="page-header">
+        <p className="breadcrumb muted">
+          <Link to="/automation">Automation</Link>
+          <span aria-hidden> / </span>
+          <span>Blackbox</span>
+          <span aria-hidden> / </span>
+          <span>Register</span>
+        </p>
+        <h1>Blackbox · Register</h1>
+        <p className="subtitle">
+          Signup via temp-mail (Cloudflare worker) → OTP → create sk- API key → pool
+        </p>
+      </header>
+
+      {!packageOk && (
+        <div className="alert alert-error" role="alert">
+          Farm package missing — ensure <code className="mono">scripts/automation/blackbox_farm/__main__.py</code> exists and Python is configured.
+        </div>
+      )}
+      {error && <div className="alert alert-error" role="alert">{error}</div>}
+      {notice && <div className="alert alert-ok" role="status">{notice}</div>}
+
+      <form className="panel" onSubmit={onStart}>
+        <fieldset style={{ border: "none", padding: 0, margin: 0 }} disabled={disabled}>
+          <div className="form-grid">
+            <label>
+              <span className="label">Email domain (optional — leave empty for random)</span>
+              <input
+                type="text"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                placeholder="bibib.my.id"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <label>
+              <span className="label">Password (optional)</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+              <span className="hint">Leave empty for a unique random password per account (recommended)</span>
+            </label>
+            <label>
+              <span className="label">Accounts</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={count}
+                onChange={(e) => setCount(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              <span className="label">Concurrency</span>
+              <input
+                type="number"
+                min={1}
+                max={maxWorkers}
+                value={concurrency}
+                onChange={(e) => setConcurrency(Number(e.target.value))}
+              />
+            </label>
+          </div>
+
+          <div
+            style={{
+              marginTop: 12,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            {mailError ? (
+              <p className="muted" style={{ margin: 0 }} title={mailError}>
+                Could not load mail settings
+              </p>
+            ) : mailCfg === null ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Loading mail settings…
+              </p>
+            ) : mailCfg.configured ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Mailbox worker: <span className="mono">{mailCfg.base_url}</span>
+                {" · domain "}
+                <span className="mono">{mailCfg.domain}</span>
+              </p>
+            ) : (
+              <p style={{ margin: 0, color: "#d4b56a" }}>
+                Temp mail worker not configured yet — click Configure to set it up.
+              </p>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setMailOpen(true)}
+            >
+              Configure
+            </button>
+          </div>
+
+          <div className="form-row" style={{ marginTop: 16, gap: 20 }}>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={headless} onChange={(e) => setHeadless(e.target.checked)} />
+              Headless
+            </label>
+            <label className="checkbox-label">
+              <input type="checkbox" checked={autoImport} onChange={(e) => setAutoImport(e.target.checked)} />
+              Auto-import to pool
+            </label>
+          </div>
+        </fieldset>
+
+        <div className="btn-row" style={{ marginTop: 20 }}>
+          <button type="submit" className="btn btn-primary" disabled={disabled || !packageOk || busy}>
+            {starting ? "Starting…" : running ? "Running…" : `Register ${count} account${count !== 1 ? "s" : ""}`}
+          </button>
+          {running && (
+            <button type="button" className="btn btn-danger" onClick={() => void onCancel()}>
+              Cancel
+            </button>
+          )}
+          <Link to="/accounts/blackbox" className="btn">
+            Blackbox accounts
+          </Link>
         </div>
       </form>
 

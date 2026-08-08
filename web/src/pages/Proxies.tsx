@@ -304,6 +304,14 @@ export function ProxiesPage() {
               >
                 qoder
               </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void onAssign("blackbox")}
+                disabled={busy}
+              >
+                blackbox
+              </button>
             </div>
           </div>
         </div>

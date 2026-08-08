@@ -60,6 +60,37 @@
 
 ---
 
+## Blackbox
+
+### Auth
+- [x] Static `sk-…` API key — `Authorization: Bearer`, no refresh/expiry (live-probed 2026-08)
+- [x] Keys harvested at `app.blackbox.ai/keys` (signup → OTP → CREATE KEY)
+- [x] `ensure_fresh_auth` = apiKey presence check only
+
+### Chat upstream
+- [x] `POST https://api.blackbox.ai/v1/chat/completions` — pure OpenAI shape
+- [x] `GET /v1/models` public (no auth), ~123 models mixed chat/image/video
+- [x] SSE standard (`data:` + `data: [DONE]`, usage in final chunk)
+- [x] Models: `bb/<upstream-id>` public, upstream keeps own slashes (`bb/z-ai/glm-5.2` → `z-ai/glm-5.2`)
+- [x] Routing branch **before** grok arm (upstream ids contain "grok")
+
+### Quota / errors
+- [x] quota kind `none` (no token budget; per-key RPM/TPM upstream-side)
+- [x] Local `classify_blackbox_status`: 401→cut, 402→sealed+PaymentRequired, **403→fallen (moderation, never cut)**, 429→sealed w/ parsed `Try again in N seconds`
+- [x] No same-account retry / no refresh worker
+
+### Import / farm
+- [x] `import_util` build_blackbox_data (apiKey required)
+- [x] `blackbox_farm` = novabox flow (Playwright Chromium) + our CF temp-mail worker (OTP 6-digit, body-only scan)
+- [x] Output 9Router-shaped `providerConnections` provider=blackbox; auto-import on `account_ok` NDJSON
+
+### References
+- `refs/novabox` (MIT) — signup/key-harvest flow source
+- `docs.blackbox.ai/api-reference/*` — official error/rate-limit contract
+- 9Router `open-sse/providers/registry/blackbox.js` — same lineage as our grok reference
+
+---
+
 ## Shared OpenAI surface
 - [ ] `messages[]` roles system/user/assistant/tool (v1 can start system+user only)
 - [ ] `stream: true|false`

@@ -6,7 +6,7 @@ import {
 } from "../lib/api";
 import { labelProvider, type ProviderId } from "../lib/providers";
 
-type Mode = "single" | "bulk" | "pat";
+type Mode = "single" | "bulk" | "pat" | "keys";
 
 type Props = {
   provider: ProviderId;
@@ -23,6 +23,7 @@ export function AddAccountModal({
 }: Props) {
   const modes = useMemo<Mode[]>(() => {
     if (provider === "qoder") return ["single", "pat", "bulk"];
+    if (provider === "blackbox") return ["single", "keys", "bulk"];
     return ["single", "bulk"];
   }, [provider]);
 
@@ -33,6 +34,7 @@ export function AddAccountModal({
   const [expiresAt, setExpiresAt] = useState("");
   const [clientId, setClientId] = useState("");
   const [personalToken, setPersonalToken] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [bulkText, setBulkText] = useState("");
   const [skipExisting, setSkipExisting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +49,7 @@ export function AddAccountModal({
     setExpiresAt("");
     setClientId("");
     setPersonalToken("");
+    setApiKey("");
     setBulkText("");
     setSkipExisting(false);
     setError(null);
@@ -65,10 +68,19 @@ export function AddAccountModal({
   if (!open) return null;
 
   const canSubmit = (() => {
-    if (mode === "bulk" || mode === "pat") return Boolean(bulkText.trim());
+    if (mode === "bulk" || mode === "pat" || mode === "keys") {
+      return Boolean(bulkText.trim());
+    }
     if (provider === "qoder") return Boolean(personalToken.trim());
+    if (provider === "blackbox") return Boolean(apiKey.trim());
     return Boolean(accessToken.trim() && refreshToken.trim());
   })();
+
+  const apiKeyLooksOff =
+    provider === "blackbox" &&
+    mode === "single" &&
+    apiKey.trim() !== "" &&
+    !(apiKey.trim().startsWith("sk-") || apiKey.trim().startsWith("bb_"));
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -82,6 +94,7 @@ export function AddAccountModal({
         expiresAt,
         clientId,
         personalToken,
+        apiKey,
         bulkText,
       });
       const res = await importAccounts(body, undefined, skipExisting);
@@ -103,6 +116,7 @@ export function AddAccountModal({
   function modeLabel(m: Mode): string {
     if (m === "single") return "Single";
     if (m === "pat") return "PAT lines";
+    if (m === "keys") return "API key lines";
     return "Bulk JSON";
   }
 
@@ -239,6 +253,40 @@ export function AddAccountModal({
             </>
           )}
 
+          {mode === "single" && provider === "blackbox" && (
+            <>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-email-b">Email (optional)</label>
+                <input
+                  id="add-email-b"
+                  className="input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="account@example.com"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-apikey">API key</label>
+                <input
+                  id="add-apikey"
+                  className="input"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="sk-..."
+                />
+                {apiKeyLooksOff && (
+                  <span className="hint">
+                    Usually starts with sk- or bb_ — double-check before import.
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+
           {mode === "pat" && (
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="add-pat-lines">Personal tokens (one per line)</label>
@@ -256,6 +304,23 @@ export function AddAccountModal({
             </div>
           )}
 
+          {mode === "keys" && (
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label htmlFor="add-key-lines">API keys (one per line)</label>
+              <textarea
+                id="add-key-lines"
+                className="textarea"
+                rows={10}
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                placeholder={"sk-...\nemail@x.com|sk-..."}
+                required
+                spellCheck={false}
+              />
+              <span className="hint">Line = key, or email|key</span>
+            </div>
+          )}
+
           {mode === "bulk" && (
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="add-bulk-json">JSON array or object</label>
@@ -268,7 +333,9 @@ export function AddAccountModal({
                 placeholder={
                   provider === "qoder"
                     ? '[{"email":"a@b.com","personalToken":"..."}]'
-                    : '[{"email":"a@b.com","accessToken":"...","refreshToken":"..."}]'
+                    : provider === "blackbox"
+                      ? '[{"email":"a@b.com","apiKey":"sk-..."}]'
+                      : '[{"email":"a@b.com","accessToken":"...","refreshToken":"..."}]'
                 }
                 required
                 spellCheck={false}
@@ -326,6 +393,7 @@ type Fields = {
   expiresAt: string;
   clientId: string;
   personalToken: string;
+  apiKey: string;
   bulkText: string;
 };
 
@@ -335,6 +403,14 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
       const row: Record<string, string> = {
         provider,
         personalToken: f.personalToken.trim(),
+      };
+      if (f.email.trim()) row.email = f.email.trim();
+      return row;
+    }
+    if (provider === "blackbox") {
+      const row: Record<string, string> = {
+        provider,
+        apiKey: f.apiKey.trim(),
       };
       if (f.email.trim()) row.email = f.email.trim();
       return row;
@@ -350,7 +426,8 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
     return row;
   }
 
-  if (mode === "pat") {
+  if (mode === "pat" || mode === "keys") {
+    const secretKey = mode === "pat" ? "personalToken" : "apiKey";
     const lines = f.bulkText
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -363,10 +440,10 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
         return {
           provider,
           email: email || undefined,
-          personalToken: token,
+          [secretKey]: token,
         };
       }
-      return { provider, personalToken: line };
+      return { provider, [secretKey]: line };
     });
   }
 

@@ -263,6 +263,7 @@ export function ActivityPage() {
             <option value="">All</option>
             <option value="grok-cli">grok-cli</option>
             <option value="qoder">qoder</option>
+            <option value="blackbox">Blackbox</option>
           </select>
         </div>
       </div>

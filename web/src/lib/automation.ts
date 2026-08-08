@@ -71,6 +71,21 @@ export const AUTOMATION_PROVIDERS: AutomationProvider[] = [
       },
     ],
   },
+  {
+    id: "blackbox",
+    label: labelProvider("blackbox"),
+    blurb: "Signup → temp-mail OTP → sk- API key → pool import",
+    status: "ready",
+    methods: [
+      {
+        id: "register",
+        label: "Register",
+        description:
+          "Register + harvest API keys: signup via temp-mail (Cloudflare worker) → OTP → create sk- API key → pool. Playwright Chromium under scripts/automation/blackbox_farm.",
+        status: "ready",
+      },
+    ],
+  },
 ];
 
 export function getAutomationProvider(
@@ -112,5 +127,6 @@ export function methodLabel(id: AutomationMethodId | string): string {
 
 export function farmLivePath(provider?: string | null): string {
   if (provider === "grok-cli") return "/automation/grok-cli/relogin";
+  if (provider === "blackbox") return "/automation/blackbox/register";
   return "/automation/qoder/google-sso";
 }

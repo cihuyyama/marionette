@@ -1,16 +1,17 @@
 ﻿# Marionette
 
-**Thin Rust OpenAI-compatible proxy pool** for exactly two providers — plus a dark admin SPA.
+**Thin Rust OpenAI-compatible proxy pool** for three providers — plus a dark admin SPA.
 
 | Provider | Model prefix | Auth |
 |----------|--------------|------|
 | **grok-cli** | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | **qoder** | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` |
+| **blackbox** | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh) |
 
 **One controller, many puppet accounts** — a focused pool, not a multi-provider zoo. No browser automation in the Rust binary.
 
 ```
-Client (OpenCode / curl)   Bearer pool key  →  /v1/*     →  pool  →  grok-cli | qoder
+Client (OpenCode / curl)   Bearer pool key  →  /v1/*     →  pool  →  grok-cli | qoder | blackbox
 Admin UI / curl            Bearer admin key →  /admin/*
 ```
 
@@ -163,6 +164,7 @@ Browser work lives under `scripts/automation/` — **not** in the Rust binary.
 |---------|------|
 | [`scripts/automation/qoder_farm`](scripts/automation/qoder_farm/) | GSuite SSO → PAT → optional dudul inject |
 | [`scripts/automation/grok_farm`](scripts/automation/grok_farm/) | Relogin + PKCE OAuth for grok-cli |
+| [`scripts/automation/blackbox_farm`](scripts/automation/blackbox_farm/) | Signup (CF temp-mail OTP) → `sk-` API key harvest for blackbox |
 
 Start jobs from **Automation** in the UI (needs farm env + Python), or run packages from the CLI. Secrets stay in package-local `.env` / `accounts.txt` (gitignored).
 

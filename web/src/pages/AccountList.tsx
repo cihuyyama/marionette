@@ -690,23 +690,25 @@ export function AccountList() {
                     </td>
                     <td>
                       <div className="actions-cell">
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          disabled={busy}
-                          title="Refresh auth"
-                          onClick={() =>
-                            void withBusy(
-                              a.id,
-                              async () => {
-                                await refreshAccount(a.id);
-                              },
-                              "Auth refreshed",
-                            )
-                          }
-                        >
-                          Auth
-                        </button>
+                        {provider !== "blackbox" && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Refresh auth"
+                            onClick={() =>
+                              void withBusy(
+                                a.id,
+                                async () => {
+                                  await refreshAccount(a.id);
+                                },
+                                "Auth refreshed",
+                              )
+                            }
+                          >
+                            Auth
+                          </button>
+                        )}
                         {provider === "grok-cli" && (
                           <button
                             type="button"
@@ -968,22 +970,24 @@ export function AccountList() {
                   Reset quota
                 </button>
               )}
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() =>
-                  void withBusy(
-                    detail.id,
-                    async () => {
-                      const updated = await refreshAccount(detail.id);
-                      setDetail(updated);
-                    },
-                    "Auth refreshed",
-                  )
-                }
-              >
-                Refresh auth
-              </button>
+              {provider !== "blackbox" && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() =>
+                    void withBusy(
+                      detail.id,
+                      async () => {
+                        const updated = await refreshAccount(detail.id);
+                        setDetail(updated);
+                      },
+                      "Auth refreshed",
+                    )
+                  }
+                >
+                  Refresh auth
+                </button>
+              )}
               {provider === "qoder" && (
                 <button
                   type="button"
