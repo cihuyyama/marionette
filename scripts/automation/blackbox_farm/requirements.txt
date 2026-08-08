@@ -1,0 +1,4 @@
+# Plain Playwright Chromium (novabox pattern — camoufox NOT used here).
+playwright>=1.40.0
+# Optional: only for the dotenv fallback loader (stdlib parser used otherwise).
+python-dotenv>=1.0.0

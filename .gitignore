@@ -1,6 +1,8 @@
 # Rust
 /target/
 **/*.rs.bk
+**/__pycache__/
+**/*.pyc
 Cargo.lock.bak
 
 # Secrets & data
@@ -16,6 +18,13 @@ data/
 scripts/automation/**/accounts.txt
 scripts/automation/**/accounts*.txt
 !scripts/automation/**/accounts.txt.example
+# Blackbox farm secrets/outputs (scripts/automation/blackbox_farm)
+scripts/automation/blackbox_farm/.env
+scripts/automation/blackbox_farm/screenshots/*
+!scripts/automation/blackbox_farm/screenshots/.gitkeep
+scripts/automation/blackbox_farm/data/
+scripts/automation/blackbox_farm/results/*
+!scripts/automation/blackbox_farm/results/.gitkeep
 # Proxy pool lists (host:port:user:pass) — credentials, never commit.
 **/proxies.txt
 **/*proxy*.txt

@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+results/*
+!results/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+data/
+accounts.txt
+accounts*.txt
+!accounts.txt.example
+*.json
+!package.json
+debug_*.png
+farm.log
+proxies.txt

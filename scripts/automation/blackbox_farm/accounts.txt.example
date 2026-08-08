@@ -1,0 +1,7 @@
+# Blackbox farm accounts file — one register directive.
+# Format: register:COUNT:domain
+#   COUNT  = number of accounts to create
+#   domain = reserved (mailbox domain comes from the CF temp-mail worker)
+# The email/password are generated per account; the domain field is kept for
+# runner compatibility with grok_farm's register directive.
+register:1:example.com
