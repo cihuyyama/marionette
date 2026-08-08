@@ -9,8 +9,8 @@ use uuid::Uuid;
 fn usage() {
     eprintln!(
         "Usage:
-  marionette-import --file <path.json> [--provider grok-cli|qoder] [--replace] [--db path]
-  marionette-import --from-9router <data.sqlite> [--provider grok-cli|qoder] [--replace] [--db path]
+  marionette-import --file <path.json> [--provider grok-cli|qoder|blackbox] [--replace] [--db path]
+  marionette-import --from-9router <data.sqlite> [--provider grok-cli|qoder|blackbox] [--replace] [--db path]
   marionette-import --from-9router-backup <backup.json> [--replace] [--db path]
 
 Env: MARIONETTE_DB (default ./data/marionette.sqlite)
@@ -303,6 +303,7 @@ fn normalize_map(v: &Value) -> Value {
                 "client_id" => "clientId",
                 "id_token" => "idToken",
                 "personal_token" => "personalToken",
+                "api_key" => "apiKey",
                 other => other,
             };
             out.insert(nk.to_string(), val.clone());

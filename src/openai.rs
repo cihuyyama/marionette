@@ -74,6 +74,11 @@ pub fn strip_first_prefix_segment(model: &str) -> &str {
 pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
     if model.starts_with(COMBO_PREFIX) {
         None
+    } else if model.starts_with("bb/") || model.starts_with("blackbox") {
+        // MUST precede the grok branches: some blackbox upstream ids contain
+        // "grok" (e.g. blackboxai/x-ai/grok-4.3) and the grok arm uses
+        // contains("grok"), which would steal them.
+        Some("blackbox")
     } else if model.starts_with("gcli/") || model.starts_with("grok") {
         Some("grok-cli")
     } else if model.starts_with("qd/") || model.starts_with("qoder") {
@@ -173,6 +178,22 @@ fn gcli(id: &'static str, key: &'static str, display: &'static str) -> ModelObje
         Some(display),
         None,
         Some("256K"),
+        false,
+        true,
+        false,
+    )
+}
+
+/// Blackbox public ids are `bb/<upstream-id>`; upstream ids keep their own
+/// slashes/colons (upstream_model strips only the first `bb/` segment).
+fn bb(id: &'static str, display: &'static str) -> ModelObject {
+    model(
+        id,
+        "blackbox",
+        Some(id),
+        Some(display),
+        None,
+        None,
         false,
         true,
         false,
@@ -383,6 +404,32 @@ pub fn default_models() -> ModelsResponse {
                 true,
                 false,
             ),
+            bb("bb/z-ai/glm-5.2", "GLM-5.2"),
+            bb("bb/blackboxai/moonshotai/kimi-k3", "Kimi-K3"),
+            bb("bb/blackboxai/moonshotai/kimi-k2.7-code", "Kimi-K2.7-Code"),
+            bb("bb/blackboxai/x-ai/grok-4.3", "Grok 4.3"),
+            bb(
+                "bb/blackboxai/x-ai/grok-4.1-fast-non-reasoning",
+                "Grok 4.1 Fast Non-Reasoning",
+            ),
+            bb("bb/blackboxai/x-ai/grok-code-fast-1:free", "Grok Code Fast 1 (free)"),
+            bb("bb/blackboxai/openai/gpt-5.4", "GPT-5.4"),
+            bb("bb/blackboxai/openai/gpt-5.3-codex", "GPT-5.3-Codex"),
+            bb("bb/blackboxai/anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5"),
+            bb("bb/blackboxai/anthropic/claude-fable-5", "Claude Fable 5"),
+            bb("bb/blackboxai/deepseek/deepseek-v4-pro", "DeepSeek-V4-Pro"),
+            bb("bb/blackboxai/google/gemini-3.5-flash", "Gemini 3.5 Flash"),
+            bb("bb/blackboxai/minimax/minimax-m2.5", "MiniMax-M2.5"),
+            bb("bb/blackboxai/mistral/devstral-2", "Devstral 2"),
+            bb("bb/blackboxai/mistral/codestral", "Codestral"),
+            bb("bb/blackboxai/nvidia/nemotron-3-ultra", "Nemotron-3-Ultra"),
+            bb(
+                "bb/blackboxai/nvidia/nemotron-3-super-120b-a12b:free",
+                "Nemotron-3-Super-120B-A12B (free)",
+            ),
+            bb("bb/blackboxai/blackbox-pro", "Blackbox Pro"),
+            bb("bb/blackboxai/amazon/nova-2-lite", "Nova 2 Lite"),
+            bb("bb/blackboxai/meta/llama-3.1-70b", "Llama 3.1 70B"),
         ],
     }
 }
@@ -471,6 +518,67 @@ mod tests {
         assert_eq!(provider_id_for_model("qd/ultimate"), Some("qoder"));
         assert_eq!(provider_id_for_model("grok-3"), Some("grok-cli"));
         assert_eq!(provider_id_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn blackbox_models_route_to_blackbox_not_grok() {
+        assert_eq!(provider_id_for_model("bb/z-ai/glm-5.2"), Some("blackbox"));
+        // upstream id contains "grok" — must NOT be stolen by the grok arm
+        assert_eq!(
+            provider_id_for_model("blackboxai/x-ai/grok-4.3"),
+            Some("blackbox")
+        );
+        assert_eq!(
+            provider_id_for_model("bb/blackboxai/x-ai/grok-4.3"),
+            Some("blackbox")
+        );
+        assert_eq!(
+            provider_id_for_model("bb/blackboxai/blackbox-pro"),
+            Some("blackbox")
+        );
+        assert_eq!(provider_id_for_model("gcli/grok-4.5"), Some("grok-cli"));
+        assert_eq!(provider_id_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn blackbox_upstream_model_keeps_inner_slashes() {
+        let req = ChatCompletionRequest {
+            model: "bb/z-ai/glm-5.2".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Value::String("hi".into()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            extra: Value::Object(Default::default()),
+        };
+        assert_eq!(req.provider_id(), Some("blackbox"));
+        assert_eq!(req.upstream_model(), "z-ai/glm-5.2");
+    }
+
+    #[test]
+    fn blackbox_catalog_entries_present() {
+        let models = default_models();
+        let bb_models: Vec<_> = models
+            .data
+            .iter()
+            .filter(|m| m.owned_by == "blackbox")
+            .collect();
+        assert_eq!(bb_models.len(), 20);
+        assert!(bb_models.iter().all(|m| m.id.starts_with("bb/")));
+        let grok43 = bb_models
+            .iter()
+            .find(|m| m.id == "bb/blackboxai/x-ai/grok-4.3")
+            .expect("bb/blackboxai/x-ai/grok-4.3 in catalog");
+        assert!(is_valid_combo_target(&grok43.id));
     }
 
     #[test]

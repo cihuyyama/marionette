@@ -148,6 +148,29 @@ async fn provider_routing() {
 }
 
 #[tokio::test]
+async fn provider_routing_blackbox() {
+    use marionette::openai::provider_id_for_model;
+    assert_eq!(provider_id_for_model("bb/z-ai/glm-5.2"), Some("blackbox"));
+    assert_eq!(
+        provider_id_for_model("bb/blackboxai/blackbox-pro"),
+        Some("blackbox")
+    );
+    // bare blackboxai/* routes to blackbox
+    assert_eq!(
+        provider_id_for_model("blackboxai/x-ai/grok-4.3"),
+        Some("blackbox")
+    );
+    // grok-containing blackbox id must NOT route to grok-cli
+    assert_eq!(
+        provider_id_for_model("bb/blackboxai/x-ai/grok-4.3"),
+        Some("blackbox")
+    );
+    // grok routing unchanged
+    assert_eq!(provider_id_for_model("gcli/grok-4.5"), Some("grok-cli"));
+    assert_eq!(provider_id_for_model("grok-3"), Some("grok-cli"));
+}
+
+#[tokio::test]
 async fn images_generations_requires_key() {
     let (app, _dir) = test_app().await;
     let res = app

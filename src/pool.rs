@@ -547,6 +547,7 @@ async fn handle_concrete_chat(
     let provider: Arc<dyn Provider> = match provider_id {
         "grok-cli" => state.grok.clone() as Arc<dyn Provider>,
         "qoder" => state.qoder.clone() as Arc<dyn Provider>,
+        "blackbox" => state.blackbox.clone() as Arc<dyn Provider>,
         other => return Err(AppError::NotImplemented(other.into())),
     };
 
@@ -1288,6 +1289,13 @@ mod tests {
         assert!(!should_local_token_decrement("qoder"));
         assert!(should_server_resync_quota("qoder"));
         assert!(!should_server_resync_quota("grok-cli"));
+    }
+
+    #[test]
+    fn blackbox_has_no_retry_no_decrement_no_resync() {
+        assert!(!should_retry_same_account("blackbox", &ProviderError::AuthExpired, false));
+        assert!(!should_local_token_decrement("blackbox"));
+        assert!(!should_server_resync_quota("blackbox"));
     }
 
     #[test]

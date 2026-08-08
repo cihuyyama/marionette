@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::farm::FarmManager;
+use crate::providers::blackbox::BlackboxProvider;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
@@ -17,6 +18,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub grok: Arc<GrokCliProvider>,
     pub qoder: Arc<QoderProvider>,
+    pub blackbox: Arc<BlackboxProvider>,
     pub farm: FarmManager,
     pub refresh: RefreshManager,
     pub proxies: ProxyManager,
@@ -42,6 +44,7 @@ impl AppState {
             .expect("http client");
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
         let qoder = Arc::new(QoderProvider::new());
+        let blackbox = Arc::new(BlackboxProvider::new());
         let proxies = ProxyManager::new(pool.clone());
         Self {
             pool,
@@ -49,6 +52,7 @@ impl AppState {
             http,
             grok,
             qoder,
+            blackbox,
             farm,
             refresh: RefreshManager::new(),
             proxies,

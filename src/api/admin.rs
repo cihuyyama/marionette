@@ -121,7 +121,7 @@ pub async fn patch_provider_settings(
     Path(provider): Path<String>,
     Json(body): Json<ProviderLbBody>,
 ) -> AppResult<Json<Value>> {
-    if provider != "grok-cli" && provider != "qoder" {
+    if provider != "grok-cli" && provider != "qoder" && provider != "blackbox" {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
     if body.load_balance.is_none() && body.pick_mode.is_none() {
@@ -401,6 +401,13 @@ pub async fn refresh_account(
                 .await
                 .map_err(AppError::from)?;
         }
+        "blackbox" => {
+            state
+                .blackbox
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
         other => {
             return Err(AppError::BadRequest(format!("unknown provider {other}")));
         }
@@ -561,6 +568,25 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
             }
             if masked(&data, &["personalToken", "personal_token"]) {
                 return Err("qoder: personalToken is masked");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "blackbox" => {
+            if masked(&data, &["apiKey", "api_key"]) {
+                return Err("blackbox: apiKey is masked");
+            }
+            let has_key = data
+                .get("apiKey")
+                .or_else(|| data.get("api_key"))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_key {
+                return Err("blackbox: missing apiKey");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {
@@ -1261,6 +1287,8 @@ fn normalize_import_items(body: &Value) -> AppResult<Vec<Value>> {
     if body.get("accessToken").is_some()
         || body.get("access_token").is_some()
         || body.get("personalToken").is_some()
+        || body.get("apiKey").is_some()
+        || body.get("api_key").is_some()
         || body.get("data").is_some()
     {
         return Ok(vec![body.clone()]);
@@ -1279,7 +1307,9 @@ async fn upsert_import_item(
         .get("provider")
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| {
-            if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
+            if item.get("apiKey").is_some() || item.get("api_key").is_some() {
+                "blackbox"
+            } else if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
                 "qoder"
             } else {
                 "grok-cli"
@@ -1352,6 +1382,7 @@ fn normalize_token_data(v: &Value) -> Value {
                 "client_id" => "clientId",
                 "id_token" => "idToken",
                 "personal_token" => "personalToken",
+                "api_key" => "apiKey",
                 other => other,
             };
             out.insert(nk.to_string(), val.clone());

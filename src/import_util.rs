@@ -9,17 +9,19 @@
 ///       "accessToken": "...", "refreshToken": "...", "expiresAt": "...",
 ///       "idToken": "...", "clientId": "...", ... },
 ///     { "id": "...", "provider": "qoder", ...,
-///       "providerSpecificData": { "personalToken": "...", "machineId": "...", ... } }
+///       "providerSpecificData": { "personalToken": "...", "machineId": "...", ... } },
+///     { "id": "...", "provider": "blackbox", ...,
+///       "apiKey": "sk-...", "password": "..." }
 ///   ]
 /// }
 /// ```
 ///
-/// We support only "grok-cli" and "qoder". Other providers are silently skipped.
+/// We support "grok-cli", "qoder", and "blackbox". Other providers are silently skipped.
 use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "blackbox"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -127,6 +129,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
     match provider {
         "grok-cli" => build_grok_data(item),
         "qoder" => build_qoder_data(item),
+        "blackbox" => build_blackbox_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -221,6 +224,25 @@ fn build_qoder_data(item: &Value) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
+/// blackbox data: a static API key — no OAuth, no refresh. Requires `apiKey`
+/// (accepts the `api_key` alias); optional `password` is kept so the account
+/// can be re-registered upstream if the key is ever rotated.
+fn build_blackbox_data(item: &Value) -> Result<Value, String> {
+    let api_key = item
+        .get("apiKey")
+        .or_else(|| item.get("api_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or("blackbox: missing apiKey")?;
+
+    let mut out = serde_json::Map::new();
+    out.insert("apiKey".into(), json!(api_key));
+    copy_str(item, &mut out, "password");
+
+    Ok(Value::Object(out))
+}
+
 fn copy_str(src: &Value, dst: &mut serde_json::Map<String, Value>, key: &str) {
     if let Some(s) = src.get(key).and_then(|v| v.as_str()) {
         if !s.is_empty() {
@@ -287,6 +309,19 @@ mod tests {
         })
     }
 
+    fn blackbox_item() -> Value {
+        json!({
+            "id": "cccc-3333",
+            "provider": "blackbox",
+            "email": "bb@example.com",
+            "name": "bb worker",
+            "isActive": true,
+            "priority": 2,
+            "apiKey": "sk-blackbox-secret",
+            "password": "signup-password"
+        })
+    }
+
     #[test]
     fn parse_grok_account() {
         let acc = map_connection(&grok_item()).unwrap();
@@ -326,12 +361,51 @@ mod tests {
             "providerConnections": [
                 grok_item(),
                 qoder_item(),
+                blackbox_item(),
                 json!({ "provider": "openai", "id": "x", "accessToken": "y" })
             ]
         });
         let accounts = parse_9router_backup(&backup);
-        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts.len(), 3);
         assert!(accounts.iter().all(|a| SUPPORTED_PROVIDERS.contains(&a.provider.as_str())));
+        assert!(accounts.iter().any(|a| a.provider == "blackbox"));
+    }
+
+    #[test]
+    fn parse_blackbox_account() {
+        let acc = map_connection(&blackbox_item()).unwrap();
+        assert_eq!(acc.provider, "blackbox");
+        assert_eq!(acc.email.as_deref(), Some("bb@example.com"));
+        assert_eq!(acc.is_active, 1);
+        assert_eq!(acc.priority, 2);
+        assert_eq!(acc.quota_limit, 0);
+        assert_eq!(acc.quota_remaining, 0);
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(data["apiKey"], "sk-blackbox-secret");
+        assert_eq!(data["password"], "signup-password");
+        assert!(data.get("email").is_none());
+    }
+
+    #[test]
+    fn blackbox_api_key_alias_accepted() {
+        let mut item = blackbox_item();
+        item.as_object_mut().unwrap().remove("apiKey");
+        item["api_key"] = json!("sk-alias-secret");
+        let acc = map_connection(&item).unwrap();
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(data["apiKey"], "sk-alias-secret");
+    }
+
+    #[test]
+    fn blackbox_missing_api_key_error() {
+        let mut item = blackbox_item();
+        item.as_object_mut().unwrap().remove("apiKey");
+        let err = map_connection(&item).unwrap_err();
+        assert_eq!(err, "blackbox: missing apiKey");
+
+        let mut blank = blackbox_item();
+        blank["apiKey"] = json!("   ");
+        assert_eq!(map_connection(&blank).unwrap_err(), "blackbox: missing apiKey");
     }
 
     #[test]
