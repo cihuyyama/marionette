@@ -16,13 +16,12 @@ from typing import Any
 
 from . import castle
 from . import mail_provider
-from .activate import activate_grok_if_needed
+from .activate import _grok_signed_in, activate_grok_if_needed
 from .browser import _normalize_proxy_url, _proxy_dict
 from .config import Config
-from .device_flow import obtain_tokens_via_browser
+from .device_flow import obtain_tokens_with_retry
 from .export import append_pending, drop_pending_email, write_backup
-from .login import dismiss_cookie_banner
-from .oauth import obtain_oidc_tokens
+from .login import dismiss_cookie_banner, drive_email_password_login
 from .progress import Progress, mask_email
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up"
@@ -473,20 +472,65 @@ async def register_one(
     prog.step(email, "sso_extract", "Extracting SSO cookie")
     sso_cookie = await _poll_sso_cookie(page, prog, email)
     if not sso_cookie:
+        # The account is usually created even when the signup hop never lands
+        # the 'sso' JWT (e.g. the turnstile token expires between solve and
+        # submit), so recover by doing a normal email+password login with the
+        # known credentials instead of dropping the account.
+        prog.log(
+            "SSO cookie not found — recovering via email login",
+            "WAIT",
+            email=email,
+            step="sso_extract",
+        )
+        try:
+            await page.goto(cfg.signin_url, wait_until="domcontentloaded", timeout=45_000)
+        except Exception:
+            try:
+                await page.goto(cfg.signin_url, wait_until="commit", timeout=45_000)
+            except Exception:
+                pass
+        await dismiss_cookie_banner(page)
+        try:
+            if await drive_email_password_login(page, email, password, prog, email):
+                sso_cookie = await _poll_sso_cookie(page, prog, email)
+        except Exception as exc:
+            prog.log(f"SSO recovery login error: {exc}", "WARN", email=email, step="sso_extract")
+    if not sso_cookie:
+        # Last-resort: the recovery login may have landed an authenticated
+        # grok.com session without ever minting the 'sso' JWT (seen live:
+        # final screenshot already signed in). The browser device flow below
+        # only needs that live session, so continue with an empty sso_cookie
+        # instead of discarding the account; retry-pending skips such rows.
+        try:
+            await page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(1.5)
+            if await _grok_signed_in(page):
+                prog.log(
+                    "grok.com session live (no sso JWT) — continuing",
+                    "WARN",
+                    email=email,
+                    step="sso_extract",
+                )
+                sso_cookie = ""
+        except Exception:
+            pass
+    if not sso_cookie and sso_cookie is None:
         prog.log("SSO cookie not found", "ERR", email=email, step="sso_extract")
         await _shot(page, cfg, email, "fail_sso", prog)
         return None
-    prog.log(f"SSO cookie: {sso_cookie[:12]}...", "DBG", email=email, step="sso_extract")
+    if sso_cookie:
+        prog.log(f"SSO cookie: {sso_cookie[:12]}...", "DBG", email=email, step="sso_extract")
 
     # New accounts have no Grok principal until they visit grok.com + accept
     # terms. Without it, OAuth consent returns "Failed to generate
     # authentication code / Access denied". Confirm an authenticated session
     # before consent; the principal is provisioned async, so poll grok.com until
     # it is truly signed in rather than assuming after one visit.
-    provisioned = await activate_grok_if_needed(page, cfg, prog, email)
-    if not provisioned:
-        await asyncio.sleep(4.0)
-        provisioned = await activate_grok_if_needed(page, cfg, prog, email)
+    # Fresh accounts usually have no Grok principal yet; the device flow below
+    # still works with only the sso cookie, so give activation a short budget
+    # (2 SSO handoffs) and move on instead of burning minutes on a step that
+    # rarely succeeds pre-provision.
+    provisioned = await activate_grok_if_needed(page, cfg, prog, email, attempts=2)
     if not provisioned:
         prog.log(
             "grok.com principal unconfirmed — consent may deny",
@@ -499,7 +543,7 @@ async def register_one(
     # on PKCE consent, so approve device flow in the already-signed-in browser
     # first (reference's 1000+-account path); fall back to in-page PKCE.
     prog.step(email, "oauth", "OAuth tokens (device -> PKCE)")
-    tokens = await _obtain_tokens_with_retry(page, email, password, cfg, prog, proxy_url)
+    tokens = await obtain_tokens_with_retry(page, email, password, cfg, prog, proxy_url)
 
     base = {
         "email": email,
@@ -513,41 +557,6 @@ async def register_one(
         return {**base, "tokens": None, "stage": "sso_only"}
 
     return {**base, "tokens": tokens, "stage": "tokens"}
-
-
-async def _obtain_tokens_with_retry(
-    page: Any,
-    email: str,
-    password: str,
-    cfg: Config,
-    prog: Progress,
-    proxy_url: str,
-) -> dict | None:
-    attempts = max(1, cfg.oauth_retries)
-    for attempt in range(1, attempts + 1):
-        try:
-            tokens = await obtain_tokens_via_browser(
-                page, cfg, prog=prog, email=email, password=password, proxy_url=proxy_url
-            )
-            if tokens and tokens.get("access_token"):
-                return tokens
-        except Exception as exc:
-            prog.log(f"device flow error: {exc}", "WARN", email=email, step="oauth")
-        prog.log("device flow miss — falling back to PKCE", "WAIT", email=email, step="oauth")
-        try:
-            tokens = await obtain_oidc_tokens(
-                page, email, password, cfg, prog, email, reprovision=activate_grok_if_needed
-            )
-            if tokens and tokens.get("access_token"):
-                return tokens
-        except Exception as exc:
-            prog.log(f"OAuth failed (device+PKCE): {exc}", "ERR", email=email, step="oauth")
-        if attempt < attempts:
-            backoff = min(15.0, 3.0 * attempt)
-            prog.log(f"oauth retry {attempt}/{attempts - 1} (backoff {backoff:.0f}s)", "WAIT", email=email, step="oauth")
-            await asyncio.sleep(backoff)
-            await activate_grok_if_needed(page, cfg, prog, email)
-    return None
 
 
 def _result_to_export(r: dict, cfg: Config) -> dict | None:
@@ -619,15 +628,31 @@ async def run_register(
     sem = asyncio.Semaphore(max(1, concurrency))
     save_lock = asyncio.Lock()
     proxy_idx = 0
+    stop_flag = {"stop": False}
+    failed_streak = {"n": 0}
+    started_emails: set[str] = set()
+    settled_emails: set[str] = set()
 
     if use_cf_mail:
         prog.log(
             f"signup mail via temp-mail worker ({cfg.cf_mail_domain})", "INFO", step="start"
         )
 
-    async def worker(idx: int) -> None:
+    def _settle(email: str, ok: bool, msg: str) -> None:
+        settled_emails.add(email)
+        if ok:
+            failed_streak["n"] = 0
+            prog.mark_ok(email, msg)
+        else:
+            failed_streak["n"] += 1
+            prog.mark_fail(email, msg)
+
+    async def _run_worker(idx: int, budget: float) -> None:
         nonlocal proxy_idx
         async with sem:
+            if stop_flag["stop"]:
+                prog.log(f"skip worker {idx} — abort after consecutive failures", "WARN", step="stop")
+                return
             mail_session: Any = None
             if use_cf_mail:
                 try:
@@ -648,6 +673,7 @@ async def run_register(
                     email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
             else:
                 email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
+            started_emails.add(email)
             proxy_url = ""
             if proxies:
                 proxy_url = proxies[proxy_idx % len(proxies)]
@@ -673,7 +699,10 @@ async def run_register(
                 async with AsyncCamoufox(**launch_kwargs) as browser:
                     page = await browser.new_page()
                     prog.step(email, "register", "filling signup form")
-                    result = await register_one(page, email, password, cfg, prog, proxy_url, mail_session)
+                    result = await asyncio.wait_for(
+                        register_one(page, email, password, cfg, prog, proxy_url, mail_session),
+                        timeout=budget,
+                    )
                     if result and result.get("stage") == "tokens":
                         async with save_lock:
                             results.append(result)
@@ -690,7 +719,7 @@ async def run_register(
                                     )
                                 except Exception as exc:
                                     prog.log(f"save err: {exc}", "ERR", email=email)
-                        prog.mark_ok(email, "registered + tokens obtained")
+                        _settle(email, True, "registered + tokens obtained")
                     elif result and result.get("stage") == "sso_only":
                         async with save_lock:
                             results.append(result)
@@ -702,18 +731,28 @@ async def run_register(
                                 prog.log(f"pending (sso_only) -> {pp}", "WARN", email=email)
                             except Exception as exc:
                                 prog.log(f"pending write err: {exc}", "ERR", email=email)
-                        prog.mark_fail(email, "signup ok but OAuth incomplete (saved to pending)")
+                        _settle(email, False, "signup ok but OAuth incomplete (saved to pending)")
                     else:
-                        prog.mark_fail(email, "registration flow returned no result")
+                        _settle(email, False, "registration flow returned no result")
+            except asyncio.TimeoutError:
+                _settle(email, False, f"account timeout after {budget:.0f}s budget")
+            except asyncio.CancelledError:
+                # Only the job teardown path cancels us; record a terminal
+                # state before re-raising so no account silently vanishes.
+                try:
+                    _settle(email, False, "cancelled (job budget exceeded)")
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 err = str(e)
                 if "Invalid URL" in err:
                     hint = f"proxy config broken: {proxy_url[:40] if proxy_url else 'none'}"
                 elif "Timeout" in err or "timeout" in err:
-                    hint = f"timeout during registration (check proxy/network)"
+                    hint = "timeout during registration (check proxy/network)"
                 else:
                     hint = err[:150]
-                prog.mark_fail(email, hint)
+                _settle(email, False, hint)
             finally:
                 if mail_session is not None:
                     try:
@@ -722,9 +761,29 @@ async def run_register(
                         )
                     except Exception:
                         pass
+            # Abort the remaining backlog when the whole batch keeps failing
+            # (e.g. xAI blocking the farm IP): burning browsers per account for
+            # an hour would waste capacity with the same outcome. sso_only is
+            # counted as a failure too, so streak only resets on real tokens.
+            if failed_streak["n"] >= 4 and not stop_flag["stop"]:
+                stop_flag["stop"] = True
+                prog.log(
+                    "aborting remaining accounts after 4 consecutive failures",
+                    "ERR",
+                    step="stop",
+                )
 
-    tasks = [worker(i) for i in range(count)]
+    async def worker(idx: int) -> None:
+        await _run_worker(idx, max(120.0, float(cfg.account_timeout)))
+
+    tasks = [asyncio.create_task(worker(i)) for i in range(count)]
     await asyncio.gather(*tasks, return_exceptions=True)
+    # Settled guard: a driver-level crash (ProtocolError) can kill every
+    # worker mid-await before any terminal line is emitted — this used to be
+    # the "accounts silently missing from the log" case. Reconcile here.
+    for email in sorted(started_emails - settled_emails):
+        prog.mark_fail(email, "no terminal state recorded (driver crash?)")
+    prog.summary()
     return results
 
 

@@ -71,6 +71,11 @@ class Config:
     login_timeout: int
     oauth_timeout: int
     oauth_retries: int
+    # Wall-clock budget for one account's whole register pipeline; on expiry
+    # the worker marks the account failed and moves on instead of hanging the
+    # shared driver (a crashed/stuck tab previously left accounts with no
+    # terminal log line at all).
+    account_timeout: int
     proxy_url: str
     proxy_file: str
     proxy_shuffle: bool
@@ -128,6 +133,7 @@ def load_config() -> Config:
         login_timeout=_env_int("GROK_LOGIN_TIMEOUT", 120),
         oauth_timeout=_env_int("GROK_OAUTH_TIMEOUT", 120),
         oauth_retries=_env_int("GROK_OAUTH_RETRIES", 2),
+        account_timeout=_env_int("GROK_ACCOUNT_TIMEOUT", 600),
         proxy_url=_env("GROK_PROXY_URL") or _env("BATCHER_PROXY_URL"),
         proxy_file=_env("GROK_PROXY_FILE"),
         proxy_shuffle=_env_bool("GROK_PROXY_SHUFFLE", True),

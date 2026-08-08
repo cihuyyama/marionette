@@ -298,6 +298,52 @@ async def _ensure_password_filled(page: Any, password: str) -> bool:
     return bool(await _password_field_value(page))
 
 
+async def _restore_password_stage(
+    page: Any,
+    email_addr: str,
+    password: str,
+) -> bool:
+    # Cloudflare remounts the login form after Turnstile and the password
+    # input can vanish (or be recreated empty), so plain re-fill fails until
+    # the email->Next stage is driven again and the field stabilises.
+    if await _ensure_password_filled(page, password):
+        return True
+    try:
+        if await page.locator("text=/Log( ?in|in) with email|Sign in with email/i").count() > 0:
+            await click_login_with_email(page)
+            await asyncio.sleep(0.8)
+        email_loc = page.locator('input[type="email"], input[name="email"]')
+        if await email_loc.count() > 0:
+            await fill_input(
+                page,
+                ['input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]'],
+                email_addr,
+            )
+            await asyncio.sleep(0.3)
+            if await page.locator('input[type="password"]').count() == 0:
+                try:
+                    next_loc = page.get_by_role("button", name=re.compile(r"^next$", re.I))
+                    if not await _hard_click_locator(page, next_loc):
+                        await click_text_button(
+                            page, ["Next", "Continue"], exclude=["Google", "Apple"]
+                        )
+                except Exception:
+                    await click_text_button(page, ["Next", "Continue"], exclude=["Google", "Apple"])
+                for _ in range(16):
+                    await recover_page_load_error(page)
+                    if await page.locator('input[type="password"]').count() > 0:
+                        break
+                    await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
+    except Exception:
+        pass
+    for _ in range(3):
+        if await _ensure_password_filled(page, password):
+            return True
+        await asyncio.sleep(0.7)
+    return False
+
+
 async def turnstile_token_len(page: Any) -> int:
     try:
         return int(
@@ -817,11 +863,22 @@ async def drive_email_password_login(
                 await asyncio.sleep(0.5)
             await asyncio.sleep(0.4)
 
-    if not await _ensure_password_filled(page, password):
-        prog.log("could not fill password before turnstile", "WAIT", email=label)
+    if not await _restore_password_stage(page, email_addr, password):
+        prog.log("could not fill password before turnstile", "WAIT", email=label, step="login")
 
     for round_i in range(5):
         await recover_page_load_error(page)
+
+        # A successful submit can navigate away mid-restore (redirect lands
+        # while the password value is re-read), leaving no form controls
+        # behind; detect that here instead of looping on "password empty".
+        cur = (page.url or "").lower()
+        if (
+            await page.locator('input[type="password"]').count() == 0
+            and await page.locator('input[type="email"], input[name="email"]').count() == 0
+            and "sign-in" not in cur
+        ):
+            return True
 
         if (
             await page.locator('input[type="password"]').count() == 0
@@ -866,10 +923,14 @@ async def drive_email_password_login(
                     await asyncio.sleep(1.5)
                     continue
                 await asyncio.sleep(0.4)
-                await _ensure_password_filled(page, password)
 
-        if not await _ensure_password_filled(page, password):
-            prog.log(f"password empty after turnstile (round {round_i + 1})", "WAIT", email=label)
+        if not await _restore_password_stage(page, email_addr, password):
+            prog.log(
+                f"password empty after turnstile (round {round_i + 1})",
+                "WAIT",
+                email=label,
+                step="login",
+            )
             await asyncio.sleep(0.5)
             continue
 
@@ -915,7 +976,7 @@ async def drive_email_password_login(
             if not await turnstile_solved(page):
                 continue
 
-        prog.log(f"login submit round {round_i + 1}", "DBG", email=label)
+        prog.log(f"login submit round {round_i + 1}", "DBG", email=label, step="login")
         submitted = False
         try:
             loc = page.get_by_role(
@@ -930,7 +991,7 @@ async def drive_email_password_login(
 
         try:
             if await turnstile_needs_click(page) and await on_email_login_form(page):
-                prog.log("still on form with empty checkbox after Login", "WAIT", email=label)
+                prog.log("still on form with empty checkbox after Login", "WAIT", email=label, step="login")
                 continue
             if await page.locator("text=Log in with your email").count() == 0:
                 if await turnstile_solved(page) or (
@@ -943,7 +1004,7 @@ async def drive_email_password_login(
                 if "accounts.x.ai/sign" not in cur:
                     return True
             if await page.locator("text=/incorrect|invalid password|wrong password/i").count() > 0:
-                prog.log("login rejected (wrong password?)", "ERR", email=label)
+                prog.log("login rejected (wrong password?)", "ERR", email=label, step="login")
                 await _ensure_password_filled(page, password)
         except Exception:
             return True

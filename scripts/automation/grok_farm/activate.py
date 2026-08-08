@@ -65,6 +65,7 @@ async def activate_grok_if_needed(
     cfg: Config,
     prog: Progress,
     label: str,
+    attempts: int = 4,
 ) -> bool:
     """Visit grok.com to create the Grok principal (entitlement).
 
@@ -75,7 +76,8 @@ async def activate_grok_if_needed(
     Returns True only when an authenticated grok.com session is confirmed.
     """
     prog.step(label, "activate", "ensure grok.com entitlement")
-    for attempt in range(4):
+    total_attempts = max(1, attempts)
+    for attempt in range(total_attempts):
         try:
             await page.goto(_GROK_URL, wait_until="domcontentloaded", timeout=30_000)
         except Exception:
@@ -102,7 +104,7 @@ async def activate_grok_if_needed(
 
         if "sign in" in body or "log in" in body or "sign up" in body:
             prog.log(
-                f"activate: grok.com signed out — SSO handoff (attempt {attempt + 1}/4)",
+                f"activate: grok.com signed out — SSO handoff (attempt {attempt + 1}/{total_attempts})",
                 "WAIT",
                 email=label,
             )
