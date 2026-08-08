@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Grok CLI relogin + register farm. "
             "relogin: email+password -> OAuth PKCE -> verify_chat. "
-            "register: signup new accounts -> Castle + Turnstile -> Device Flow -> tokens."
+            "register: signup new accounts -> Turnstile -> Device Flow -> tokens."
         ),
     )
     p.add_argument(
@@ -265,9 +265,6 @@ def _run_register(args, cfg) -> int:
     if not domain:
         prog.log("GROK_EMAIL_DOMAIN not set", "ERR", step="start")
         return 2
-    if not password:
-        prog.log("GROK_PASSWORD not set", "ERR", step="start")
-        return 2
 
     results = asyncio.run(
         run_register(
@@ -288,6 +285,7 @@ def _run_register(args, cfg) -> int:
             ok_results.append({
                 "ok": True,
                 "email": r["email"],
+                "password": r.get("password", ""),
                 "accessToken": tokens["access_token"],
                 "refreshToken": tokens.get("refresh_token", ""),
                 "idToken": tokens.get("id_token", ""),

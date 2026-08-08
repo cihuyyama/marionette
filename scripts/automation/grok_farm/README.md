@@ -119,6 +119,14 @@ Signup flow (`run_register`) needs to receive the xAI confirmation code
 | `imap` | Own-domain inbox over IMAP | `GROK_IMAP_*` |
 | `auto` (default) | `cf` if `GROK_CF_MAIL_*` configured, else `imap` | both |
 
+**Per-account randomization (anti batch-detection):** every signup gets a
+random realistic first/last name and — unless `GROK_PASSWORD` is set — a
+unique strong password. The generated password is written to the output JSON
+(`password` field, ignored by `marionette-import`) so relogin mode can reuse
+it later. Uniform names/passwords across a batch are an easy bot signal;
+Castle token minting was also removed (the reference grok-register flow works
+without it and the injected token was likely part of the `bfs=1` bot flag).
+
 **Why temp-mail over IMAP:** no pre-provisioned inboxes needed — the farm
 creates a fresh mailbox per signup via the worker's admin API, polls
 `/api/parsed_mails` for the code, then deletes the address. The Worker is

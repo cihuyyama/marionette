@@ -17,7 +17,8 @@ _proxy_lock = asyncio.Lock()
 
 # Directory for persistent browser profiles (one per account email).
 # Each profile retains cookies, storage, and fingerprint across runs so
-# Castle sees a stable device rather than a brand-new one on every relogin.
+# fraud detection sees a stable device rather than a brand-new one on
+# every relogin.
 _PROFILES_DIR = Path(__file__).resolve().parent / ".profiles"
 
 
@@ -146,8 +147,8 @@ async def next_proxy_url(cfg: Config) -> str | None:
 
 
 def sticky_proxy_for_email(email: str, cfg: Config) -> str | None:
-    """Pick a fixed proxy for this email via hash so Castle always sees
-    the same IP for the same device profile."""
+    """Pick a fixed proxy for this email via hash so fraud detection always
+    sees the same IP for the same device profile."""
     pool = load_proxy_pool(cfg)
     if not pool:
         return None

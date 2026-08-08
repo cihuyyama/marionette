@@ -36,6 +36,9 @@ def connection_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     expires_at = result.get("expiresAt") or result.get("expires_at") or ""
     expires_in = result.get("expiresIn") or result.get("expires_in")
     scope = result.get("scope") or ""
+    # Per-account password (random or shared). Kept so relogin mode can reuse
+    # it; marionette-import ignores unknown fields.
+    password = result.get("password") or ""
 
     conn: dict[str, Any] = {
         "id": result.get("id") or str(uuid.uuid4()),
@@ -69,6 +72,8 @@ def connection_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
             pass
     if scope:
         conn["scope"] = scope
+    if password:
+        conn["password"] = password
     return conn
 
 

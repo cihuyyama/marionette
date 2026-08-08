@@ -14,7 +14,6 @@ from email import message_from_bytes
 from pathlib import Path
 from typing import Any
 
-from . import castle
 from . import mail_provider
 from .activate import _grok_signed_in, activate_grok_if_needed
 from .browser import _normalize_proxy_url, _proxy_dict
@@ -31,6 +30,37 @@ def generate_email(domain: str, local_len: int = 16) -> str:
     chars = string.ascii_lowercase + string.digits
     local = "".join(secrets.choice(chars) for _ in range(local_len))
     return f"{local}@{domain}"
+
+
+# Identical first/last names across a whole batch are a strong bot signal,
+# so every account gets a random realistic name and its own strong password.
+_GIVEN_NAMES = [
+    "Neo", "Ethan", "Liam", "Noah", "Lucas", "Mason", "Ryan", "Leo",
+    "Owen", "Aiden", "Elio", "Aron", "Ivan", "Nolan", "Evan", "Kai",
+    "Caleb", "Adam", "Ezra", "Miles", "Logan", "Carter", "Hunter", "Jason",
+    "Brian", "Dylan", "Alex", "Colin", "Blake", "Gavin", "Henry", "Julian",
+    "Kevin", "Louis", "Marcus", "Nathan", "Oscar", "Peter", "Quinn", "Robin",
+    "Simon", "Tristan", "Victor", "Wesley", "Xavier", "Yuri", "Zane", "Felix",
+    "Aaron", "Damian", "Maya", "Sofia", "Emma", "Lena", "Iris", "Nora",
+    "Clara", "Elena", "Ruth", "Ada", "Lucy", "Hana", "Vera", "Mira",
+]
+_FAMILY_NAMES = [
+    "Hart", "Reed", "Voss", "Kane", "Ortiz", "Blum", "Fischer", "Novak",
+    "Silva", "Costa", "Moreau", "Dubois", "Keller", "Weber", "Schulz", "Berg",
+    "Holm", "Dahl", "Lind", "Sunde", "Aoki", "Tanaka", "Sato", "Klein",
+    "Brandt", "Wolfe", "Graves", "Stone", "Frost", "Hale", "Mercer", "Boone",
+    "Calloway", "Draper", "Ellison", "Farr", "Garner", "Hutton", "Irving", "Jarvis",
+]
+
+
+def generate_password() -> str:
+    return "N" + secrets.token_hex(4) + "!a7#" + secrets.token_urlsafe(6)
+
+
+def build_profile() -> tuple[str, str, str]:
+    given = secrets.choice(_GIVEN_NAMES)
+    family = secrets.choice(_FAMILY_NAMES)
+    return given, family, generate_password()
 
 
 def generate_plus_email(gmail_base: str) -> str:
@@ -239,12 +269,13 @@ async def _fill_otp(page: Any, code: str, prog: Progress) -> bool:
 
 async def _fill_profile_and_password(page: Any, password: str, prog: Progress) -> bool:
     try:
+        given_name, family_name, _ = build_profile()
         first_input = page.locator('input[name="firstName"], input[name="given_name"], input[autocomplete="given-name"]')
         if await first_input.count() > 0:
-            await first_input.first.fill("User")
+            await first_input.first.fill(given_name)
         last_input = page.locator('input[name="lastName"], input[name="family_name"], input[autocomplete="family-name"]')
         if await last_input.count() > 0:
-            await last_input.first.fill("Grok")
+            await last_input.first.fill(family_name)
         pw_input = page.locator('input[type="password"], input[name="password"]')
         if await pw_input.count() > 0:
             await pw_input.first.fill(password)
@@ -418,9 +449,6 @@ async def register_one(
     await asyncio.sleep(3)
     await dismiss_cookie_banner(page)
 
-    prog.step(email, "castle", "Minting Castle token")
-    await castle.mint(page, prog, email)
-
     prog.step(email, "signup_email", "Filling email")
     email_btn = page.get_by_role("button", name=re.compile(r"sign up with email", re.I))
     try:
@@ -567,6 +595,7 @@ def _result_to_export(r: dict, cfg: Config) -> dict | None:
     return {
         "ok": True,
         "email": r.get("email", ""),
+        "password": r.get("password", ""),
         "accessToken": tokens["access_token"],
         "refreshToken": tokens.get("refresh_token", ""),
         "idToken": tokens.get("id_token", ""),
@@ -604,9 +633,10 @@ async def run_register(
     if not email_source and not use_cf_mail:
         prog.log("no email source configured (domain or gmail base)", "ERR", step="start")
         return []
-    if not password:
-        prog.log("no password configured (GROK_PASSWORD)", "ERR", step="start")
-        return []
+    if password:
+        prog.log("using shared GROK_PASSWORD for all accounts", "INFO", step="start")
+    else:
+        prog.log("no GROK_PASSWORD — generating a unique password per account", "INFO", step="start")
 
     proxies: list[str] = []
     if proxy_file:
@@ -674,6 +704,7 @@ async def run_register(
             else:
                 email = generate_plus_email(email_source) if is_plus_trick else generate_email(email_source)
             started_emails.add(email)
+            acc_password = password or generate_password()
             proxy_url = ""
             if proxies:
                 proxy_url = proxies[proxy_idx % len(proxies)]
@@ -700,7 +731,7 @@ async def run_register(
                     page = await browser.new_page()
                     prog.step(email, "register", "filling signup form")
                     result = await asyncio.wait_for(
-                        register_one(page, email, password, cfg, prog, proxy_url, mail_session),
+                        register_one(page, email, acc_password, cfg, prog, proxy_url, mail_session),
                         timeout=budget,
                     )
                     if result and result.get("stage") == "tokens":
@@ -725,7 +756,7 @@ async def run_register(
                             results.append(result)
                             try:
                                 pp = append_pending(
-                                    {"email": email, "password": password, "sso": result.get("sso_cookie", "")},
+                                    {"email": email, "password": acc_password, "sso": result.get("sso_cookie", "")},
                                     cfg.output,
                                 )
                                 prog.log(f"pending (sso_only) -> {pp}", "WARN", email=email)
