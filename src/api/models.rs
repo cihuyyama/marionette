@@ -11,6 +11,7 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for combo in db::list_model_combos(&state.pool).await? {
         if !combo.is_active {
             continue;
@@ -27,28 +28,36 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
             "targets": targets,
         }));
     }
-    for acc in db::list_accounts(&state.pool, Some("byok"), None).await? {
+    for acc in db::list_accounts(&state.pool, Some("byok"), None, None).await? {
         if acc.is_active == 0 {
             continue;
         }
-        let slug = match acc.email.as_deref().filter(|s| !s.trim().is_empty()) {
+        let email = match acc.email.as_deref().filter(|s| !s.trim().is_empty()) {
             Some(s) => s.to_string(),
             None => continue,
         };
+        let slug_key = email.to_ascii_lowercase();
+        if seen.contains(&slug_key) {
+            continue;
+        }
         let models = acc
             .data_json()
             .get("models")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        if models.is_empty() {
+            continue;
+        }
+        seen.insert(slug_key);
         for m in models {
             let Some(id) = m.as_str() else { continue };
             data.push(json!({
-                "id": format!("{slug}/{id}"),
+                "id": format!("{email}/{id}"),
                 "object": "model",
                 "owned_by": "byok",
                 "display_name": id,
-                "slug": slug,
+                "slug": email,
                 "reasoning": false,
                 "vision": false,
                 "is_default": false,

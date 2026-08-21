@@ -228,7 +228,9 @@ Dashboard (`web/src/lib/settings.ts`):
 | PATCH | `/admin/keys/{id}` | admin (name / is_active / limits / allowlist; explicit `null` clears a limit) |
 | DELETE | `/admin/keys/{id}` | admin (revoke) |
 | GET | `/admin/keys/{id}/usage` | admin (aggregate from request_logs) |
-| POST | `/admin/byok` | admin (create BYOK endpoint; body `{slug,name,base_url,api_key,auto_fetch}`; 409 duplicate slug) |
+| POST | `/admin/byok` | admin (BYOK endpoint multi-key: body `{slug,name?,base_url?,api_key,auto_fetch?}`; new slug requires base_url; existing slug adds a key — same key twice → 409; response = account public JSON + `models_count` (+`models_fetch_error`) + `new_provider`) |
+| GET | `/admin/byok` | admin (grouped provider summary `{providers:[{slug,name,base_url,keys,models_count,models_fetched_at,bound,sealed,cut,fallen,inactive}]}`) |
+| DELETE | `/admin/byok/{slug}` | admin (delete all keys of the slug; `{deleted:n}`, 404 if none) |
 | POST | `/admin/accounts/{id}/byok-models` | admin (re-fetch BYOK model catalog from endpoint) |
 
 Combo routes use `{slug}` (axum path params don't span `/`); server reconstructs `combo/{slug}` via `combo_id_from_slug`.

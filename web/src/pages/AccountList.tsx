@@ -4,6 +4,7 @@ import {
   ApiError,
   claimProTrial,
   deleteAccount,
+  deleteByokProvider,
   getAccount,
   grokBilling,
   listAccounts,
@@ -38,9 +39,13 @@ const STATUS_PILLS: { id: StatusFilter; label: string }[] = [
 const PER_PAGE = 25;
 
 export function AccountList() {
-  const { provider: rawProvider } = useParams<{ provider: string }>();
+  const { provider: rawProvider, slug } = useParams<{
+    provider: string;
+    slug: string;
+  }>();
   const navigate = useNavigate();
   const provider = isProviderId(rawProvider) ? rawProvider : null;
+  const byokSlug = provider === "byok" && slug ? slug : null;
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -79,7 +84,9 @@ export function AccountList() {
     setLoading(true);
     setError(null);
     try {
-      const res = await listAccounts({ provider });
+      const res = await listAccounts(
+        byokSlug ? { provider, slug: byokSlug } : { provider },
+      );
       setAccounts(res.accounts);
     } catch (e) {
       setError(
@@ -93,7 +100,7 @@ export function AccountList() {
     } finally {
       setLoading(false);
     }
-  }, [provider]);
+  }, [provider, byokSlug]);
 
   useEffect(() => {
     void load();
@@ -105,7 +112,7 @@ export function AccountList() {
     setDetail(null);
     setSearch("");
     setStatusFilter("all");
-  }, [provider]);
+  }, [provider, byokSlug]);
 
   useEffect(() => {
     setPage(1);
@@ -307,6 +314,9 @@ export function AccountList() {
   }
 
   const providerId = provider;
+  const endpointBaseUrl = byokSlug
+    ? (accounts.map((a) => byokBaseUrl(a)).find((u) => u !== null) ?? undefined)
+    : undefined;
 
   async function handleBulkDelete() {
     const ids = Array.from(selectedIds);
@@ -403,6 +413,35 @@ export function AccountList() {
     }
   }
 
+  async function handleDeleteEndpoint() {    if (!byokSlug) return;
+    if (
+      !window.confirm(
+        `Delete BYOK endpoint "${byokSlug}" and all its keys? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBulkBusy(true);
+    setError(null);
+    try {
+      const res = await deleteByokProvider(byokSlug);
+      setMessage(
+        `Deleted endpoint ${byokSlug} (${res.deleted} key${res.deleted === 1 ? "" : "s"})`,
+      );
+      navigate("/accounts");
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Delete endpoint failed",
+      );
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <div>
       <header className="page-header">
@@ -417,9 +456,11 @@ export function AccountList() {
               ←
             </button>
             <div>
-              <h1>{labelProvider(providerId)}</h1>
+              <h1>{byokSlug ?? labelProvider(providerId)}</h1>
               <p className="subtitle">
-                {accounts.length} accounts · {activeCount} active
+                {byokSlug
+                  ? `${labelProvider(providerId)} endpoint · ${accounts.length} key${accounts.length === 1 ? "" : "s"} · ${activeCount} active`
+                  : `${accounts.length} accounts · ${activeCount} active`}
               </p>
             </div>
           </div>
@@ -471,12 +512,23 @@ export function AccountList() {
             >
               Disable all ({activeCount})
             </button>
+            {byokSlug && (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger"
+                disabled={bulkBusy}
+                title="Delete this BYOK endpoint and all its keys"
+                onClick={() => void handleDeleteEndpoint()}
+              >
+                Delete endpoint
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-sm btn-primary"
               onClick={() => setAddOpen(true)}
             >
-              + Add
+              {byokSlug ? "+ Add key" : "+ Add"}
             </button>
           </div>
         </div>
@@ -571,7 +623,9 @@ export function AccountList() {
           <p className="flavor">No threads in this filter.</p>
           <p>
             {accounts.length === 0
-              ? "Add accounts for this provider, or import a 9Router backup."
+              ? byokSlug
+                ? "Add an API key for this endpoint."
+                : "Add accounts for this provider, or import a 9Router backup."
               : "Try another status or search."}
           </p>
           {accounts.length === 0 && (
@@ -581,11 +635,13 @@ export function AccountList() {
                 className="btn btn-primary"
                 onClick={() => setAddOpen(true)}
               >
-                + Add
+                {byokSlug ? "+ Add key" : "+ Add"}
               </button>
-<Link to="/settings" className="btn">
-9Router backup
-              </Link>
+              {!byokSlug && (
+                <Link to="/settings" className="btn">
+                  9Router backup
+                </Link>
+              )}
             </div>
           )}
         </div>
@@ -683,6 +739,7 @@ export function AccountList() {
                         )}
                       </button>
                       {a.provider === "byok" &&
+                        !byokSlug &&
                         byokBaseUrl(a) !== null && (
                           <div
                             className="row-sub-hint"
@@ -1183,6 +1240,8 @@ export function AccountList() {
         <AddAccountModal
           provider={provider as ProviderId}
           open={addOpen}
+          byokSlug={byokSlug ?? undefined}
+          byokBaseUrl={endpointBaseUrl}
           onClose={() => setAddOpen(false)}
           onImported={(res) => {
             setMessage(
@@ -1192,8 +1251,13 @@ export function AccountList() {
           }}
           onByokCreated={(res) => {
             const n = res.models_count ?? 0;
+            const label = res.new_provider
+              ? "Endpoint created"
+              : byokSlug
+                ? "Key added"
+                : "Added";
             setMessage(
-              `Added ${res.email ?? res.id.slice(0, 8)} — ${n} model${n === 1 ? "" : "s"} fetched.`,
+              `${label} — ${res.email ?? res.id.slice(0, 8)} · ${n} model${n === 1 ? "" : "s"} fetched.`,
             );
             void load();
           }}

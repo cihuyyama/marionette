@@ -119,7 +119,7 @@ impl RefreshManager {
             }
         }
 
-        let accounts = db::list_accounts(&state.pool, Some(&provider), None).await?;
+        let accounts = db::list_accounts(&state.pool, Some(&provider), None, None).await?;
         let candidates: Vec<_> = accounts
             .into_iter()
             .filter(|a| a.is_active == 1)

@@ -18,6 +18,8 @@ type Props = {
   onClose: () => void;
   onImported: (result: ImportResult) => void;
   onByokCreated?: (result: ByokCreateResult) => void;
+  byokSlug?: string;
+  byokBaseUrl?: string;
 };
 
 export function AddAccountModal({
@@ -26,7 +28,10 @@ export function AddAccountModal({
   onClose,
   onImported,
   onByokCreated,
+  byokSlug: fixedSlug,
+  byokBaseUrl: fixedBaseUrl,
 }: Props) {
+  const addKeyMode = provider === "byok" && Boolean(fixedSlug);
   const modes = useMemo<Mode[]>(() => {
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "blackbox") return ["single", "keys", "bulk"];
@@ -99,6 +104,9 @@ export function AddAccountModal({
     !baseUrlTrimmed.startsWith("https://");
 
   const canSubmit = (() => {
+    if (addKeyMode) {
+      return byokApiKeyTrimmed !== "";
+    }
     if (provider === "byok") {
       return (
         BYOK_SLUG_RE.test(slugTrimmed) &&
@@ -124,6 +132,31 @@ export function AddAccountModal({
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (provider === "byok" && addKeyMode && fixedSlug) {
+      setLoading(true);
+      try {
+        const res = await createByok({
+          slug: fixedSlug,
+          api_key: byokApiKeyTrimmed,
+        });
+        setByokResult(res);
+        if (onByokCreated) onByokCreated(res);
+        else onImported({ inserted: 1, updated: 0, skipped: 0 });
+      } catch (err) {
+        setError(
+          err instanceof ApiError
+            ? err.status === 409
+              ? `This key is already added for ${fixedSlug}`
+              : err.message
+            : err instanceof Error
+              ? err.message
+              : "Add BYOK key failed",
+        );
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
     if (provider === "byok") {
       if (slugInvalid) {
         setError(
@@ -211,11 +244,13 @@ export function AddAccountModal({
       <div className="modal" role="dialog" aria-modal="true" aria-label="Add account">
         <div className="modal-head">
           <div>
-            <h2>Add {labelProvider(provider)}</h2>
+            <h2>{addKeyMode ? "Add key" : `Add ${labelProvider(provider)}`}</h2>
             <p className="muted" style={{ margin: 0 }}>
-              {provider === "byok"
-                ? "One OpenAI-compatible endpoint per account"
-                : "Single account or bulk tokens for this provider only"}
+              {addKeyMode
+                ? `Add an API key to the ${fixedSlug} endpoint`
+                : provider === "byok"
+                  ? "One OpenAI-compatible endpoint per account"
+                  : "Single account or bulk tokens for this provider only"}
             </p>
           </div>
           <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
@@ -252,7 +287,12 @@ export function AddAccountModal({
         {byokResult ? (
           <div className="stack-gap">
             <div className="alert alert-ok" role="status">
-              Added {byokResult.email ?? byokResult.id.slice(0, 8)} — fetched{" "}
+              {byokResult.new_provider
+                ? "Endpoint created"
+                : addKeyMode
+                  ? "Key added"
+                  : "Added"}{" "}
+              {byokResult.email ?? byokResult.id.slice(0, 8)} — fetched{" "}
               <strong className="mono">{byokResult.models_count}</strong>{" "}
               model{byokResult.models_count === 1 ? "" : "s"}.
             </div>
@@ -270,7 +310,45 @@ export function AddAccountModal({
           </div>
         ) : (
         <form className="stack-gap" onSubmit={(e) => void onSubmit(e)}>
-          {provider === "byok" && (
+          {addKeyMode && (
+            <>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-key-slug">Endpoint</label>
+                <input
+                  id="add-byok-key-slug"
+                  className="input"
+                  value={fixedSlug ?? ""}
+                  readOnly
+                  spellCheck={false}
+                />
+                {fixedBaseUrl ? (
+                  <span className="hint mono" title={fixedBaseUrl}>
+                    {fixedBaseUrl}
+                  </span>
+                ) : (
+                  <span className="hint">Base URL inherited from endpoint</span>
+                )}
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-key-api-key">API key</label>
+                <input
+                  id="add-byok-key-api-key"
+                  className="input"
+                  type="password"
+                  value={byokApiKey}
+                  onChange={(e) => setByokApiKey(e.target.value)}
+                  placeholder="sk-…"
+                  required
+                  autoComplete="new-password"
+                  spellCheck={false}
+                />
+                <span className="hint">
+                  Shares this endpoint&apos;s base URL and model catalog
+                </span>
+              </div>
+            </>
+          )}
+          {provider === "byok" && !addKeyMode && (
             <>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label htmlFor="add-byok-slug">Slug</label>
@@ -575,7 +653,11 @@ export function AddAccountModal({
               disabled={loading || !canSubmit}
             >
               {loading ? <span className="spinner inline-spinner" /> : null}
-              {provider === "byok" || mode === "single" ? "Add account" : "Import"}
+              {addKeyMode
+                ? "Add key"
+                : provider === "byok" || mode === "single"
+                  ? "Add account"
+                  : "Import"}
             </button>
           </div>
         </form>

@@ -9,7 +9,7 @@ pub mod proxies;
 use crate::state::AppState;
 use axum::{
     Router,
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 
 pub fn router(state: AppState) -> Router {
@@ -59,7 +59,11 @@ pub fn router(state: AppState) -> Router {
             patch(admin::patch_provider_settings),
         )
         .route("/admin/accounts", get(admin::list_accounts).post(admin::import_accounts))
-        .route("/admin/byok", post(admin::create_byok_endpoint))
+        .route(
+            "/admin/byok",
+            get(admin::list_byok_providers).post(admin::create_byok_endpoint),
+        )
+        .route("/admin/byok/{slug}", delete(admin::delete_byok_endpoint))
         .route(
             "/admin/accounts/{id}",
             get(admin::get_account)

@@ -568,6 +568,180 @@ async fn byok_create_happy_path_and_duplicate_409() {
     assert_eq!(dup.status(), StatusCode::CONFLICT);
 }
 
+async fn admin_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer test-admin-key");
+    let body = match body {
+        Some(b) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(b.to_string())
+        }
+        None => Body::empty(),
+    };
+    app.clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn byok_multi_key_lifecycle() {
+    let (app, _dir) = test_app().await;
+
+    // (a) first key creates the provider
+    let first = post_byok(
+        &app,
+        r#"{"slug":"multi","name":"Multi","base_url":"https://openrouter.ai/api/v1","api_key":"sk-first-key-111","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let v = body_json(first).await;
+    assert_eq!(v["new_provider"], true, "first key creates the slug");
+
+    // (a) second key under the same slug, no base_url (reused)
+    let second = post_byok(
+        &app,
+        r#"{"slug":"multi","api_key":"sk-second-key-222","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let v = body_json(second).await;
+    assert_eq!(v["new_provider"], false, "slug already existed");
+    assert_eq!(v["name"], "Multi", "name defaults to the provider name");
+    assert_eq!(v["data"]["baseUrl"], "https://openrouter.ai/api/v1");
+
+    let listed = admin_request(&app, "GET", "/admin/accounts?provider=byok&slug=multi", None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let lv = body_json(listed).await;
+    assert_eq!(
+        lv["accounts"].as_array().unwrap().len(),
+        2,
+        "slug filter returns both keys"
+    );
+
+    // (a) slug filter is case-insensitive
+    let listed = admin_request(&app, "GET", "/admin/accounts?provider=byok&slug=MULTI", None).await;
+    let lv = body_json(listed).await;
+    assert_eq!(lv["accounts"].as_array().unwrap().len(), 2);
+
+    // (b) same key twice → 409
+    let dup = post_byok(
+        &app,
+        r#"{"slug":"multi","api_key":"  sk-first-key-111  ","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(dup.status(), StatusCode::CONFLICT);
+    let dv = body_json(dup).await;
+    assert!(dv["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("key already added for byok endpoint 'multi'"));
+
+    // (c) new slug without base_url → 400
+    let res = post_byok(
+        &app,
+        r#"{"slug":"fresh","api_key":"sk-x","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // (c) existing slug with an invalid base_url → 400
+    let res = post_byok(
+        &app,
+        r#"{"slug":"multi","base_url":"ftp://bad","api_key":"sk-y","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // (d) grouped provider summary
+    let listed = admin_request(&app, "GET", "/admin/byok", None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let pv = body_json(listed).await;
+    let providers = pv["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["slug"], "multi");
+    assert_eq!(providers[0]["name"], "Multi");
+    assert_eq!(providers[0]["base_url"], "https://openrouter.ai/api/v1");
+    assert_eq!(providers[0]["keys"], 2);
+    assert_eq!(providers[0]["bound"], 2);
+    assert_eq!(providers[0]["sealed"], 0);
+    assert_eq!(providers[0]["cut"], 0);
+    assert_eq!(providers[0]["fallen"], 0);
+    assert_eq!(providers[0]["inactive"], 0);
+
+    // (e) delete removes every key of the slug
+    let deleted = admin_request(&app, "DELETE", "/admin/byok/multi", None).await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(body_json(deleted).await["deleted"], 2);
+
+    let listed = admin_request(&app, "GET", "/admin/byok", None).await;
+    assert!(body_json(listed).await["providers"].as_array().unwrap().is_empty());
+
+    let again = admin_request(&app, "DELETE", "/admin/byok/multi", None).await;
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn byok_models_deduped_across_keys_of_one_slug() {
+    let (app, dir) = test_app().await;
+
+    for key in ["sk-one-111", "sk-two-222"] {
+        let res = post_byok(
+            &app,
+            &format!(
+                r#"{{"slug":"dedup","base_url":"https://openrouter.ai/api/v1","api_key":"{key}","auto_fetch":false}}"#
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    let pool = db::connect(&dir.join("test.sqlite")).await.unwrap();
+    let rows = db::list_accounts(&pool, Some("byok"), None, Some("dedup"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for mut acc in rows {
+        let mut data = acc.data_json();
+        data["models"] = serde_json::json!(["m1"]);
+        data["modelsFetchedAt"] = serde_json::json!("2026-01-01T00:00:00.000Z");
+        acc.set_data_json(&data);
+        db::update_account(&pool, &acc).await.unwrap();
+    }
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv = body_json(listed).await;
+    let byok_ids: Vec<String> = mv["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["owned_by"] == "byok")
+        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(
+        byok_ids,
+        vec!["dedup/m1"],
+        "each slug's model set is emitted exactly once"
+    );
+}
+
 #[tokio::test]
 async fn byok_models_listed_only_after_models_present() {
     let (app, dir) = test_app().await;

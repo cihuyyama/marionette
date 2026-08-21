@@ -1663,23 +1663,29 @@ pub async fn list_accounts(
     pool: &SqlitePool,
     provider: Option<&str>,
     status: Option<&str>,
+    slug: Option<&str>,
 ) -> AppResult<Vec<Account>> {
-    let rows = if let Some(p) = provider {
-        let sql = format!(
-            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE provider = ? ORDER BY priority ASC, created_at ASC"
-        );
-        sqlx::query_as::<_, Account>(&sql)
-            .bind(p)
-            .fetch_all(pool)
-            .await?
+    let slug = slug.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let mut sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE 1 = 1");
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(p) = provider {
+        sql.push_str(" AND provider = ?");
+        binds.push(p.to_string());
+    }
+    if let Some(s) = slug {
+        sql.push_str(" AND email IS NOT NULL AND lower(trim(email)) = lower(trim(?))");
+        binds.push(s.to_string());
+    }
+    sql.push_str(if provider.is_some() {
+        " ORDER BY priority ASC, created_at ASC"
     } else {
-        let sql = format!(
-            "SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY provider, priority ASC, created_at ASC"
-        );
-        sqlx::query_as::<_, Account>(&sql)
-            .fetch_all(pool)
-            .await?
-    };
+        " ORDER BY provider, priority ASC, created_at ASC"
+    });
+    let mut query = sqlx::query_as::<_, Account>(&sql);
+    for b in binds {
+        query = query.bind(b);
+    }
+    let rows = query.fetch_all(pool).await?;
 
     let filtered = if let Some(st) = status {
         rows.into_iter()
@@ -2359,6 +2365,30 @@ pub async fn delete_account(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Delete every account row of a BYOK endpoint (all keys under the slug,
+/// case-insensitive). Returns the number of deleted rows.
+pub async fn delete_byok_accounts_by_slug(
+    pool: &SqlitePool,
+    slug: &str,
+) -> AppResult<u64> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return Ok(0);
+    }
+    let r = sqlx::query(
+        r#"
+        DELETE FROM accounts
+        WHERE provider = 'byok'
+          AND email IS NOT NULL
+          AND lower(trim(email)) = lower(trim(?))
+        "#,
+    )
+    .bind(slug)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 pub async fn delete_accounts_by_providers(
     pool: &SqlitePool,
     providers: &[&str],
@@ -3014,6 +3044,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_eligible_byok_returns_all_keys_of_a_slug() {
+        let (pool, _dir) = temp_db("byokmultikey").await;
+
+        upsert_account(&pool, &byok_account_fixture("byok-a1", "openrouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-a2", "openrouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-b", "my-api"))
+            .await
+            .unwrap();
+
+        let scoped = list_eligible_accounts(&pool, "byok", Some("openrouter/m1"))
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = scoped.iter().map(|a| a.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["byok-a1", "byok-a2"],
+            "both keys of the slug are eligible for load balancing"
+        );
+
+        let mixed_case = list_eligible_accounts(&pool, "byok", Some("OPENROUTER/m1"))
+            .await
+            .unwrap();
+        assert_eq!(mixed_case.len(), 2, "slug match stays case-insensitive");
+    }
+
+    #[tokio::test]
+    async fn list_accounts_slug_filter_is_case_insensitive() {
+        let (pool, _dir) = temp_db("byoklistslug").await;
+
+        upsert_account(&pool, &byok_account_fixture("byok-a1", "openrouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-a2", "OpenRouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-b", "my-api"))
+            .await
+            .unwrap();
+
+        let all = list_accounts(&pool, Some("byok"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3, "without slug filter all rows return");
+
+        let filtered = list_accounts(&pool, Some("byok"), None, Some("openrouter"))
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = filtered.iter().map(|a| a.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["byok-a1", "byok-a2"],
+            "slug filter matches any casing of the slug"
+        );
+
+        let filtered_upper = list_accounts(&pool, Some("byok"), None, Some("OPENROUTER"))
+            .await
+            .unwrap();
+        assert_eq!(filtered_upper.len(), 2);
+
+        let none = list_accounts(&pool, Some("byok"), None, Some("ghost"))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_byok_accounts_by_slug_removes_all_casings() {
+        let (pool, _dir) = temp_db("byokdelslug").await;
+
+        upsert_account(&pool, &byok_account_fixture("byok-a1", "openrouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-a2", "OpenRouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-b", "my-api"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delete_byok_accounts_by_slug(&pool, "OPENROUTER").await.unwrap(),
+            2
+        );
+        let remaining = list_accounts(&pool, Some("byok"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "byok-b");
+        assert_eq!(delete_byok_accounts_by_slug(&pool, "ghost").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn pick_account_byok_seeds_provider_settings_defaults() {
         let (pool, _dir) = temp_db("byoksettings").await;
         upsert_account(&pool, &byok_account_fixture("byok-a", "openrouter"))
@@ -3191,7 +3319,7 @@ mod tests {
             Some("2026-01-01T00:00:00.000Z")
         );
 
-        let all = list_accounts(&pool, Some("grok-cli"), None)
+        let all = list_accounts(&pool, Some("grok-cli"), None, None)
             .await
             .unwrap();
         assert_eq!(all.len(), 1, "must not create duplicate row");
@@ -3263,7 +3391,7 @@ mod tests {
         assert_eq!(saved.id, "row-1");
         assert!(saved.data.contains("t3"));
 
-        let all = list_accounts(&pool, Some("grok-cli"), None)
+        let all = list_accounts(&pool, Some("grok-cli"), None, None)
             .await
             .unwrap();
         assert_eq!(all.len(), 2);

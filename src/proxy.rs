@@ -222,7 +222,7 @@ impl ProxyManager {
         if proxies.is_empty() {
             return Err(AppError::BadRequest("no active proxies to assign".into()));
         }
-        let accounts = db::list_accounts(&self.pool, Some(provider), None).await?;
+        let accounts = db::list_accounts(&self.pool, Some(provider), None, None).await?;
         let mut counts: HashMap<String, i64> = db::proxy_assignment_counts(&self.pool)
             .await?
             .into_iter()

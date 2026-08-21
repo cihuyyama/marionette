@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ApiError,
   listAccounts,
+  listByokProviders,
   listProviderSettings,
   patchProviderLoadBalance,
   patchProviderPickMode,
@@ -12,6 +13,7 @@ import {
   getRefreshStatus,
   cancelRefreshAll,
   type Account,
+  type ByokProviderSummary,
   type LoadBalanceOption,
   type PickModeOption,
   type ProviderSetting,
@@ -19,6 +21,10 @@ import {
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { PROVIDERS, labelProvider, type ProviderId } from "../lib/providers";
+
+const BUILTIN_PROVIDERS = PROVIDERS.filter(
+  (p): p is Exclude<ProviderId, "byok"> => p !== "byok",
+);
 
 type ProviderCounts = {
   total: number;
@@ -235,16 +241,22 @@ export function Accounts() {
   const refreshBusy =
     refreshJob?.status === "running";
   const [addProvider, setAddProvider] = useState<ProviderId | null>(null);
+  const [byokProviders, setByokProviders] = useState<ByokProviderSummary[]>([]);
+  const [byokModal, setByokModal] = useState<
+    { slug?: string; baseUrl?: string } | null
+  >(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [acc, prov] = await Promise.all([
+      const [acc, prov, byok] = await Promise.all([
         listAccounts(),
         listProviderSettings(),
+        listByokProviders(),
       ]);
       setAccounts(acc.accounts);
+      setByokProviders(byok.providers || []);
       const map: Record<string, ProviderSetting> = {};
       for (const p of prov.providers) {
         map[p.provider] = p;
@@ -261,6 +273,7 @@ export function Accounts() {
             : "Failed to load accounts",
       );
       setAccounts([]);
+      setByokProviders([]);
     } finally {
       setLoading(false);
     }
@@ -293,13 +306,12 @@ export function Accounts() {
   }, [message]);
 
   const byProvider = useMemo(() => {
-    const map: Record<ProviderId, ProviderCounts> = {
+    const map: Record<Exclude<ProviderId, "byok">, ProviderCounts> = {
       "grok-cli": emptyCounts(),
       qoder: emptyCounts(),
       blackbox: emptyCounts(),
-      byok: emptyCounts(),
     };
-    for (const p of PROVIDERS) {
+    for (const p of BUILTIN_PROVIDERS) {
       map[p] = countFor(accounts.filter((a) => a.provider === p));
     }
     return map;
@@ -482,7 +494,7 @@ export function Accounts() {
       )}
 
       <div className="provider-grid">
-        {PROVIDERS.map((provider) => {
+        {BUILTIN_PROVIDERS.map((provider) => {
           const stat = byProvider[provider];
           const lb = lbByProvider[provider];
           const current =
@@ -559,9 +571,7 @@ export function Accounts() {
                 onKeyDown={(e) => e.stopPropagation()}
               >
                 <div className="provider-lb-row">
-                  {provider !== "byok" && (
-                    <label htmlFor={`lb-${provider}`}>Load balancing</label>
-                  )}
+                  <label htmlFor={`lb-${provider}`}>Load balancing</label>
                   <button
                     type="button"
                     className="btn btn-sm btn-primary"
@@ -570,40 +580,31 @@ export function Accounts() {
                     + Add
                   </button>
                 </div>
-                {provider === "byok" ? (
-                  <p className="provider-lb-hint">
-                    Your own OpenAI-compatible endpoints — models route as{" "}
-                    <span className="mono">&lt;slug&gt;/&lt;model&gt;</span>.
-                  </p>
-                ) : (
-                  <>
-                    <select
-                      id={`lb-${provider}`}
-                      className="select"
-                      value={current}
-                      disabled={savingProvider === provider || loading}
-                      onChange={(e) =>
-                        void onLoadBalanceChange(provider, e.target.value)
-                      }
-                    >
-                      {(strategies.length
-                        ? strategies
-                        : [
-                            {
-                              id: "round_robin",
-                              label: "Round robin",
-                              hint: "",
-                            },
-                          ]
-                      ).map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </select>
-                    {hint ? <p className="provider-lb-hint">{hint}</p> : null}
-                  </>
-                )}
+                <select
+                  id={`lb-${provider}`}
+                  className="select"
+                  value={current}
+                  disabled={savingProvider === provider || loading}
+                  onChange={(e) =>
+                    void onLoadBalanceChange(provider, e.target.value)
+                  }
+                >
+                  {(strategies.length
+                    ? strategies
+                    : [
+                        {
+                          id: "round_robin",
+                          label: "Round robin",
+                          hint: "",
+                        },
+                      ]
+                  ).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                {hint ? <p className="provider-lb-hint">{hint}</p> : null}
                 {provider === "qoder" ? (
                   <>
                     <label
@@ -710,12 +711,131 @@ export function Accounts() {
             >
               + Add Qoder
             </button>
-<Link to="/settings" className="btn">
-9Router backup
+            <Link to="/settings" className="btn">
+              9Router backup
             </Link>
           </div>
         </div>
       )}
+
+      <section className="byok-section">
+        <div className="activity-section-head">
+          <div>
+            <h2 className="section-title">BYOK endpoints</h2>
+            <p className="subtitle" style={{ marginTop: 0 }}>
+              Your own OpenAI-compatible endpoints · models route as{" "}
+              <span className="mono">&lt;slug&gt;/&lt;model&gt;</span>
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={() => setByokModal({})}
+          >
+            + Add endpoint
+          </button>
+        </div>
+
+        {!loading && byokProviders.length === 0 ? (
+          <div className="panel empty">
+            <p className="flavor">No BYOK endpoints bound yet.</p>
+            <p>
+              Add your own OpenAI-compatible endpoint — models route as{" "}
+              <span className="mono">&lt;slug&gt;/&lt;model&gt;</span>.
+            </p>
+            <div className="btn-row" style={{ justifyContent: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setByokModal({})}
+              >
+                + Add endpoint
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="byok-grid">
+            {byokProviders.map((p) => (
+              <div key={p.slug} className="provider-card provider-card-static">
+                <button
+                  type="button"
+                  className="provider-card-main"
+                  onClick={() => navigate(`/accounts/byok/${p.slug}`)}
+                >
+                  <div className="provider-card-head">
+                    <div style={{ minWidth: 0 }}>
+                      <h2>{p.name || p.slug}</h2>
+                      <span className="mono muted">{p.slug}</span>
+                    </div>
+                    <span className="mono muted">
+                      {p.keys} key{p.keys === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  {p.base_url && (
+                    <span className="byok-baseurl" title={p.base_url}>
+                      {p.base_url}
+                    </span>
+                  )}
+                  <div className="byok-chip-row">
+                    <span className="chip chip-bound">
+                      <span className="chip-dot" aria-hidden />
+                      {p.models_count} model{p.models_count === 1 ? "" : "s"}
+                    </span>
+                    {p.bound > 0 && (
+                      <span className="chip chip-bound">
+                        <span className="chip-dot" aria-hidden />
+                        {p.bound} bound
+                      </span>
+                    )}
+                    {p.sealed > 0 && (
+                      <span className="chip chip-sealed">
+                        <span className="chip-dot" aria-hidden />
+                        {p.sealed} sealed
+                      </span>
+                    )}
+                    {p.cut > 0 && (
+                      <span className="chip chip-cut">
+                        <span className="chip-dot" aria-hidden />
+                        {p.cut} cut
+                      </span>
+                    )}
+                    {p.fallen > 0 && (
+                      <span className="chip chip-fallen">
+                        <span className="chip-dot" aria-hidden />
+                        {p.fallen} fallen
+                      </span>
+                    )}
+                    {p.inactive > 0 && (
+                      <span className="chip chip-cut">
+                        <span className="chip-dot" aria-hidden />
+                        {p.inactive} inactive
+                      </span>
+                    )}
+                  </div>
+                </button>
+                <div
+                  className="provider-lb"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <div className="provider-lb-row">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={() =>
+                        setByokModal({ slug: p.slug, baseUrl: p.base_url ?? undefined })
+                      }
+                    >
+                      + Key
+                    </button>
+                    <span className="provider-card-cta">Open endpoint →</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {addProvider && (
         <AddAccountModal
@@ -732,6 +852,34 @@ export function Accounts() {
             const n = res.models_count ?? 0;
             setMessage(
               `Added ${res.email ?? res.id.slice(0, 8)} — ${n} model${n === 1 ? "" : "s"} fetched.`,
+            );
+            void load();
+          }}
+        />
+      )}
+
+      {byokModal && (
+        <AddAccountModal
+          provider="byok"
+          open
+          byokSlug={byokModal.slug}
+          byokBaseUrl={byokModal.baseUrl}
+          onClose={() => setByokModal(null)}
+          onImported={(res) => {
+            setMessage(
+              `Added — inserted ${res.inserted}, updated ${res.updated}, skipped ${res.skipped}.`,
+            );
+            void load();
+          }}
+          onByokCreated={(res) => {
+            const n = res.models_count ?? 0;
+            const label = res.new_provider
+              ? "Endpoint created"
+              : byokModal.slug
+                ? "Key added"
+                : "Added";
+            setMessage(
+              `${label} — ${res.email ?? res.id.slice(0, 8)} · ${n} model${n === 1 ? "" : "s"} fetched.`,
             );
             void load();
           }}

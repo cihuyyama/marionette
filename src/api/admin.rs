@@ -21,6 +21,7 @@ use uuid::Uuid;
 pub struct ListQuery {
     pub provider: Option<String>,
     pub status: Option<String>,
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +312,7 @@ pub async fn list_accounts(
         &state.pool,
         q.provider.as_deref(),
         q.status.as_deref(),
+        q.slug.as_deref(),
     )
     .await?;
     let public: Vec<_> = rows.iter().map(|a| a.to_public()).collect();
@@ -377,7 +379,7 @@ pub async fn patch_account(
             }
         }
         let mut data = acc.data_json();
-        if let Some(base) = body.base_url {
+        if let Some(ref base) = body.base_url {
             data["baseUrl"] = json!(base.trim());
         }
         if let Some(key) = body.api_key {
@@ -387,6 +389,11 @@ pub async fn patch_account(
     }
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
+    if acc.provider == "byok" {
+        if let Some(ref base) = body.base_url {
+            propagate_byok_base_url(&state, &acc, base.trim()).await?;
+        }
+    }
     Ok(Json(json!(acc.to_public())))
 }
 
@@ -453,7 +460,7 @@ pub async fn refresh_account(
 pub struct CreateByokBody {
     pub slug: String,
     pub name: Option<String>,
-    pub base_url: String,
+    pub base_url: Option<String>,
     pub api_key: String,
     #[serde(default)]
     pub auto_fetch: Option<bool>,
@@ -465,37 +472,58 @@ pub async fn create_byok_endpoint(
     Json(body): Json<CreateByokBody>,
 ) -> AppResult<Json<Value>> {
     let slug = body.slug.trim().to_string();
-    crate::providers::byok::validate_byok_slug(&slug)
-        .map_err(AppError::BadRequest)?;
-    if !crate::providers::byok::is_valid_byok_base_url(&body.base_url) {
-        return Err(AppError::BadRequest(
-            "base_url must be an http(s) URL".into(),
-        ));
-    }
+    crate::providers::byok::validate_byok_slug(&slug).map_err(AppError::BadRequest)?;
     let api_key = body.api_key.trim().to_string();
     if api_key.is_empty() {
         return Err(AppError::BadRequest("api_key must not be empty".into()));
     }
-    if db::find_byok_account_by_slug(&state.pool, &slug)
-        .await?
-        .is_some()
-    {
-        return Err(AppError::Conflict(format!("byok endpoint '{slug}' already exists")));
-    }
 
-    let auto_fetch = body.auto_fetch.unwrap_or(true);
+    let existing = db::find_byok_account_by_slug(&state.pool, &slug).await?;
+    let new_provider = existing.is_none();
+
+    let base_url = if let Some(provided) = body.base_url.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !crate::providers::byok::is_valid_byok_base_url(provided) {
+            return Err(AppError::BadRequest("base_url must be an http(s) URL".into()));
+        }
+        provided.to_string()
+    } else if let Some(first) = existing.as_ref() {
+        crate::providers::byok::ByokProvider::base_url_of(&first.data_json()).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "byok endpoint '{slug}' has no stored baseUrl; provide base_url"
+            ))
+        })?
+    } else {
+        return Err(AppError::BadRequest(
+            "base_url is required for a new byok endpoint".into(),
+        ));
+    };
+
     let name = body
         .name
         .clone()
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
+        .or_else(|| existing.as_ref().and_then(|f| f.name.clone()))
         .unwrap_or_else(|| slug.clone());
+
+    let auto_fetch = body.auto_fetch.unwrap_or(true);
+
+    if existing.is_some() {
+        for row in db::list_accounts(&state.pool, Some("byok"), None, Some(&slug)).await? {
+            let existing_key = crate::providers::byok::ByokProvider::api_key_of(&row.data_json());
+            if existing_key.as_deref() == Some(api_key.as_str()) {
+                return Err(AppError::Conflict(format!(
+                    "key already added for byok endpoint '{slug}'"
+                )));
+            }
+        }
+    }
 
     let mut models: Vec<String> = Vec::new();
     let mut models_fetched_at: Option<String> = None;
     let mut models_fetch_error: Option<String> = None;
     if auto_fetch {
-        match state.byok.fetch_models(&body.base_url, &api_key).await {
+        match state.byok.fetch_models(&base_url, &api_key).await {
             Ok(ids) => {
                 models = ids;
                 models_fetched_at = Some(db::now_rfc3339());
@@ -505,11 +533,26 @@ pub async fn create_byok_endpoint(
                 warn!(slug = %slug, error = %e, "byok auto models fetch failed; endpoint kept");
             }
         }
+    } else if let Some(first) = existing.as_ref() {
+        let first_data = first.data_json();
+        models = first_data
+            .get("models")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        models_fetched_at = first_data
+            .get("modelsFetchedAt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
     }
 
     let data = json!({
         "slug": slug,
-        "baseUrl": body.base_url.trim(),
+        "baseUrl": base_url,
         "apiKey": api_key,
         "models": models,
         "modelsFetchedAt": models_fetched_at,
@@ -533,7 +576,13 @@ pub async fn create_byok_endpoint(
         quota_remaining: q_rem,
     };
     db::upsert_account(&state.pool, &acc).await?;
-    info!(slug = %slug, models = models.len(), auto_fetch, "byok endpoint created");
+    info!(
+        slug = %slug,
+        models = models.len(),
+        auto_fetch,
+        new_provider,
+        "byok endpoint key created"
+    );
 
     let mut resp = json!(acc.to_public());
     if let Some(obj) = resp.as_object_mut() {
@@ -541,8 +590,89 @@ pub async fn create_byok_endpoint(
         if let Some(err) = models_fetch_error {
             obj.insert("models_fetch_error".into(), json!(err));
         }
+        obj.insert("new_provider".into(), json!(new_provider));
     }
     Ok(Json(resp))
+}
+
+pub async fn list_byok_providers(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> AppResult<Json<Value>> {
+    let rows = db::list_accounts(&state.pool, Some("byok"), None, None).await?;
+    let mut groups: Vec<(String, Vec<Account>)> = Vec::new();
+    for acc in rows {
+        let Some(slug) = acc
+            .email
+            .as_deref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if let Some(g) = groups.iter_mut().find(|(k, _)| *k == slug) {
+            g.1.push(acc);
+        } else {
+            groups.push((slug, vec![acc]));
+        }
+    }
+
+    let mut providers: Vec<Value> = Vec::new();
+    for (_key, accs) in groups {
+        let first = &accs[0];
+        let first_data = first.data_json();
+        let mut bound = 0u64;
+        let mut sealed = 0u64;
+        let mut cut = 0u64;
+        let mut fallen = 0u64;
+        let mut inactive = 0u64;
+        for a in &accs {
+            if a.is_active == 0 {
+                inactive += 1;
+                continue;
+            }
+            match a.status_label() {
+                "bound" => bound += 1,
+                "sealed" => sealed += 1,
+                "cut" => cut += 1,
+                "fallen" => fallen += 1,
+                _ => {}
+            }
+        }
+        let models_count = first_data
+            .get("models")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        providers.push(json!({
+            "slug": first.email.clone().unwrap_or_default(),
+            "name": first.name.clone().unwrap_or_default(),
+            "base_url": crate::providers::byok::ByokProvider::base_url_of(&first_data)
+                .unwrap_or_default(),
+            "keys": accs.len(),
+            "models_count": models_count,
+            "models_fetched_at": first_data.get("modelsFetchedAt").cloned().unwrap_or(Value::Null),
+            "bound": bound,
+            "sealed": sealed,
+            "cut": cut,
+            "fallen": fallen,
+            "inactive": inactive,
+        }));
+    }
+    Ok(Json(json!({ "providers": providers })))
+}
+
+pub async fn delete_byok_endpoint(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    let deleted = db::delete_byok_accounts_by_slug(&state.pool, &slug).await?;
+    if deleted == 0 {
+        return Err(AppError::NotFound(format!("byok endpoint '{slug}'")));
+    }
+    info!(slug = %slug, deleted, "byok endpoint deleted");
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 pub async fn refetch_byok_models(
@@ -575,11 +705,63 @@ pub async fn refetch_byok_models(
     acc.set_data_json(&new_data);
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
+    propagate_byok_models(&state, &acc, &models, &fetched_at).await?;
     Ok(Json(json!({
         "models": models,
         "fetched_at": fetched_at,
         "count": models.len(),
     })))
+}
+
+fn byok_slug_of(acc: &Account) -> Option<String> {
+    acc.email
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+async fn propagate_byok_models(
+    state: &AppState,
+    source: &Account,
+    models: &[String],
+    fetched_at: &str,
+) -> AppResult<()> {
+    let Some(slug) = byok_slug_of(source) else {
+        return Ok(());
+    };
+    for mut row in db::list_accounts(&state.pool, Some("byok"), None, Some(&slug)).await? {
+        if row.id == source.id {
+            continue;
+        }
+        let mut data = row.data_json();
+        data["models"] = json!(models);
+        data["modelsFetchedAt"] = json!(fetched_at);
+        row.set_data_json(&data);
+        row.updated_at = db::now_rfc3339();
+        db::update_account(&state.pool, &row).await?;
+    }
+    Ok(())
+}
+
+async fn propagate_byok_base_url(
+    state: &AppState,
+    source: &Account,
+    base_url: &str,
+) -> AppResult<()> {
+    let Some(slug) = byok_slug_of(source) else {
+        return Ok(());
+    };
+    for mut row in db::list_accounts(&state.pool, Some("byok"), None, Some(&slug)).await? {
+        if row.id == source.id {
+            continue;
+        }
+        let mut data = row.data_json();
+        data["baseUrl"] = json!(base_url);
+        row.set_data_json(&data);
+        row.updated_at = db::now_rfc3339();
+        db::update_account(&state.pool, &row).await?;
+    }
+    Ok(())
 }
 
 pub async fn grok_billing(
@@ -887,7 +1069,7 @@ pub async fn inject_bulk(
     let headless = body.headless.or(q.headless).unwrap_or(true);
     let do_refresh = body.refresh.or(q.refresh).unwrap_or(true);
 
-    let rows = db::list_accounts(&state.pool, Some("qoder"), None).await?;
+    let rows = db::list_accounts(&state.pool, Some("qoder"), None, None).await?;
     let want: Option<std::collections::HashSet<String>> = body
         .account_ids
         .as_ref()
@@ -1228,7 +1410,7 @@ pub async fn warmup_qoder_accounts(
         .unwrap_or(state.config.refresh_workers)
         .clamp(1, 32);
 
-    let all = db::list_accounts(&state.pool, Some("qoder"), None).await?;
+    let all = db::list_accounts(&state.pool, Some("qoder"), None, None).await?;
     let candidates: Vec<Account> = all
         .into_iter()
         .filter(|a| include_inactive || a.is_active != 0)

@@ -149,13 +149,14 @@ export function getConnection(settings?: Settings) {
 }
 
 export function listAccounts(
-  params?: { provider?: string; status?: string },
+  params?: { provider?: string; status?: string; slug?: string },
   settings?: Settings,
   signal?: AbortSignal,
 ) {
   const q = new URLSearchParams();
   if (params?.provider) q.set("provider", params.provider);
   if (params?.status) q.set("status", params.status);
+  if (params?.slug) q.set("slug", params.slug);
   const qs = q.toString();
   return request<{ accounts: Account[] }>(
     `/admin/accounts${qs ? `?${qs}` : ""}`,
@@ -555,7 +556,7 @@ export function warmupQoderAccounts(
 export type ByokCreateInput = {
   slug: string;
   name?: string;
-  base_url: string;
+  base_url?: string;
   api_key: string;
   auto_fetch?: boolean;
 };
@@ -563,7 +564,38 @@ export type ByokCreateInput = {
 export type ByokCreateResult = Account & {
   models_count: number;
   models_fetch_error?: string;
+  new_provider?: boolean;
 };
+
+export type ByokProviderSummary = {
+  slug: string;
+  name: string | null;
+  base_url: string | null;
+  keys: number;
+  models_count: number;
+  models_fetched_at: string | null;
+  bound: number;
+  sealed: number;
+  cut: number;
+  fallen: number;
+  inactive: number;
+};
+
+export function listByokProviders(settings?: Settings, signal?: AbortSignal) {
+  return request<{ providers: ByokProviderSummary[] }>(
+    "/admin/byok",
+    { auth: "admin", signal },
+    settings,
+  );
+}
+
+export function deleteByokProvider(slug: string, settings?: Settings) {
+  return request<{ deleted: number }>(
+    `/admin/byok/${encodeURIComponent(slug)}`,
+    { method: "DELETE", auth: "admin" },
+    settings,
+  );
+}
 
 export function createByok(input: ByokCreateInput, settings?: Settings) {
   return request<ByokCreateResult>(

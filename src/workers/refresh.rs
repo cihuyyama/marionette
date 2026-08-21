@@ -33,7 +33,7 @@ pub fn spawn(state: AppState) {
 }
 
 async fn run_cycle(state: &AppState) -> Result<(), crate::error::AppError> {
-    let accounts = db::list_accounts(&state.pool, Some("grok-cli"), None).await?;
+    let accounts = db::list_accounts(&state.pool, Some("grok-cli"), None, None).await?;
     let candidates: Vec<_> = accounts
         .into_iter()
         .filter(|a| a.is_active == 1)

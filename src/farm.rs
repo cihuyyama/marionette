@@ -2152,7 +2152,7 @@ async fn db_provider_emails(
     pool: &SqlitePool,
     provider: &str,
 ) -> AppResult<std::collections::HashSet<String>> {
-    let rows = db::list_accounts(pool, Some(provider), None).await?;
+    let rows = db::list_accounts(pool, Some(provider), None, None).await?;
     let mut set = std::collections::HashSet::new();
     for acc in rows {
         if let Some(email) = acc.email.as_ref() {
