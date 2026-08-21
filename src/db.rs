@@ -598,6 +598,7 @@ pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
         "grok-cli" => (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA),
         "qoder" => (0, 0),
         "blackbox" => (0, 0),
+        "byok" => (0, 0),
         _ => (0, 0),
     }
 }
@@ -607,6 +608,7 @@ pub fn quota_kind_for_provider(provider: &str) -> &'static str {
         "grok-cli" => "tokens",
         "qoder" => "credits",
         "blackbox" => "none",
+        "byok" => "none",
         _ => "none",
     }
 }
@@ -1730,6 +1732,32 @@ pub async fn find_account_by_provider_email(
     Ok(rows.into_iter().next())
 }
 
+/// BYOK endpoints ride the accounts table with `email = slug` (no '@'), so
+/// the email-based dedupe above never matches them — look them up directly.
+pub async fn find_byok_account_by_slug(
+    pool: &SqlitePool,
+    slug: &str,
+) -> AppResult<Option<Account>> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    let sql = format!(
+        r#"
+        SELECT {ACCOUNT_COLUMNS} FROM accounts
+        WHERE provider = 'byok'
+          AND email IS NOT NULL
+          AND lower(trim(email)) = lower(trim(?))
+        ORDER BY created_at ASC, id ASC
+        "#
+    );
+    let rows = sqlx::query_as::<_, Account>(&sql)
+        .bind(slug)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().next())
+}
+
 fn merge_import_into_existing(existing: &Account, incoming: &Account) -> Account {
     let now = now_rfc3339();
     Account {
@@ -2412,6 +2440,24 @@ pub async fn list_eligible_accounts(
         }
     }
 
+    // BYOK endpoints are slug-scoped: `<slug>/<model>` must only ever pick the
+    // account whose email == slug (case-insensitive). Without this the pool
+    // could send a request to a different BYOK endpoint's key.
+    if provider == "byok" {
+        if let Some(m) = model {
+            if let Some((slug, _)) = m.split_once('/') {
+                if !slug.is_empty() {
+                    eligible.retain(|a| {
+                        a.email
+                            .as_deref()
+                            .map(|e| e.eq_ignore_ascii_case(slug))
+                            .unwrap_or(false)
+                    });
+                }
+            }
+        }
+    }
+
     Ok(eligible)
 }
 
@@ -2901,6 +2947,122 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn byok_account_fixture(id: &str, slug: &str) -> Account {
+        let now = now_rfc3339();
+        Account {
+            id: id.into(),
+            provider: "byok".into(),
+            email: Some(slug.into()),
+            name: Some(slug.into()),
+            is_active: 1,
+            priority: 0,
+            data: format!(
+                r#"{{"slug":"{slug}","baseUrl":"https://x.ai/api/v1","apiKey":"sk-test","models":[],"modelsFetchedAt":null}}"#
+            ),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            quota_limit: 0,
+            quota_remaining: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_eligible_byok_is_slug_scoped() {
+        let (pool, _dir) = temp_db("byokscope").await;
+
+        upsert_account(&pool, &byok_account_fixture("byok-a", "openrouter"))
+            .await
+            .unwrap();
+        upsert_account(&pool, &byok_account_fixture("byok-b", "my-api"))
+            .await
+            .unwrap();
+
+        let scoped = list_eligible_accounts(&pool, "byok", Some("openrouter/anthropic/claude-x"))
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1, "must only pick the slug's endpoint");
+        assert_eq!(scoped[0].id, "byok-a");
+
+        let case_insensitive = list_eligible_accounts(&pool, "byok", Some("OpenRouter/m1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            case_insensitive.len(),
+            1,
+            "slug match is case-insensitive"
+        );
+        assert_eq!(case_insensitive[0].id, "byok-a");
+
+        let other = list_eligible_accounts(&pool, "byok", Some("my-api/some-model"))
+            .await
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].id, "byok-b");
+
+        let unknown = list_eligible_accounts(&pool, "byok", Some("ghost/model"))
+            .await
+            .unwrap();
+        assert!(
+            unknown.is_empty(),
+            "unregistered slug yields no eligible accounts (pool reports no accounts)"
+        );
+    }
+
+    #[tokio::test]
+    async fn pick_account_byok_seeds_provider_settings_defaults() {
+        let (pool, _dir) = temp_db("byoksettings").await;
+        upsert_account(&pool, &byok_account_fixture("byok-a", "openrouter"))
+            .await
+            .unwrap();
+
+        let settings = get_provider_settings(&pool, "byok").await.unwrap();
+        assert_eq!(
+            LoadBalance::parse(&settings.load_balance),
+            Some(LoadBalance::RoundRobin),
+            "unknown provider row must yield defaults, not error"
+        );
+
+        let (acc, strategy) = pick_account(&pool, "byok", &[], Some("openrouter/m1"))
+            .await
+            .unwrap();
+        assert_eq!(acc.id, "byok-a");
+        assert_eq!(strategy, LoadBalance::RoundRobin);
+    }
+
+    #[tokio::test]
+    async fn find_byok_account_by_slug_is_case_insensitive() {
+        let (pool, _dir) = temp_db("byokfind").await;
+        upsert_account(&pool, &byok_account_fixture("byok-a", "openrouter"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            find_byok_account_by_slug(&pool, "openrouter")
+                .await
+                .unwrap()
+                .map(|a| a.id),
+            Some("byok-a".to_string())
+        );
+        assert_eq!(
+            find_byok_account_by_slug(&pool, "OPENROUTER")
+                .await
+                .unwrap()
+                .map(|a| a.id),
+            Some("byok-a".to_string())
+        );
+        assert!(find_byok_account_by_slug(&pool, "ghost").await.unwrap().is_none());
+        assert!(find_byok_account_by_slug(&pool, "").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn quota_kind_and_defaults_cover_byok() {
+        assert_eq!(quota_kind_for_provider("byok"), "none");
+        assert_eq!(default_quota_for_provider("byok"), (0, 0));
     }
 
     #[tokio::test]

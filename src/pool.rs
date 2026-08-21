@@ -534,20 +534,38 @@ async fn handle_combo_chat(
     Err(err)
 }
 
+/// Resolve the provider for a requested model. Static routing arms
+/// (`openai::provider_id_for_model`) win first — BYOK slug validation
+/// reserves all names that could shadow them. If none matches, the first
+/// `slug/` segment is looked up as a BYOK endpoint (`accounts` row with
+/// provider="byok", email=slug, case-insensitive).
+async fn resolve_provider_id(pool: &SqlitePool, model: &str) -> AppResult<Option<&'static str>> {
+    if let Some(id) = crate::openai::provider_id_for_model(model) {
+        return Ok(Some(id));
+    }
+    if let Some((slug, _)) = model.split_once('/') {
+        if !slug.is_empty() && db::find_byok_account_by_slug(pool, slug).await?.is_some() {
+            return Ok(Some("byok"));
+        }
+    }
+    Ok(None)
+}
+
 async fn handle_concrete_chat(
     state: &AppState,
     req: ChatCompletionRequest,
     suppress_error_log: bool,
     key_id: Option<String>,
 ) -> AppResult<ChatOutcome> {
-    let provider_id = req
-        .provider_id()
+    let provider_id = resolve_provider_id(&state.pool, &req.model)
+        .await?
         .ok_or_else(|| AppError::BadRequest(format!("unknown model: {}", req.model)))?;
 
     let provider: Arc<dyn Provider> = match provider_id {
         "grok-cli" => state.grok.clone() as Arc<dyn Provider>,
         "qoder" => state.qoder.clone() as Arc<dyn Provider>,
         "blackbox" => state.blackbox.clone() as Arc<dyn Provider>,
+        "byok" => state.byok.clone() as Arc<dyn Provider>,
         other => return Err(AppError::NotImplemented(other.into())),
     };
 
@@ -1190,6 +1208,19 @@ async fn apply_provider_error(
     account.updated_at = db::now_rfc3339();
     account.last_error = Some(err.to_string().chars().take(500).collect());
 
+    // BYOK keys belong to the user, not a farm: billing/permission rejections
+    // (402/403) must never seal or cut the account — they fall (last_error
+    // kept) and the account stays selectable.
+    let byok_billing_block = account.provider == "byok"
+        && matches!(
+            err,
+            ProviderError::PaymentRequired
+                | ProviderError::Upstream {
+                    status: 402 | 403,
+                    ..
+                }
+        );
+
     match err {
         ProviderError::RateLimited { retry_after_secs } => {
             let hours = config.cooldown_hours as i64;
@@ -1214,7 +1245,9 @@ async fn apply_provider_error(
             info!(account = %account.id, "cut (disabled)");
         }
         ProviderError::PaymentRequired
-        | ProviderError::Upstream { status: 402, .. } => {
+        | ProviderError::Upstream { status: 402, .. }
+            if !byok_billing_block =>
+        {
             let hours = config.cooldown_hours as i64;
             let until = Utc::now() + Duration::hours(hours);
             account.cooldown_until =
@@ -1228,7 +1261,7 @@ async fn apply_provider_error(
                 "sealed (402/payment credit block; quota zeroed, not cut)"
             );
         }
-        ProviderError::Upstream { status, .. } if *status == 403 => {
+        ProviderError::Upstream { status, .. } if *status == 403 && !byok_billing_block => {
             account.is_active = 0;
             info!(account = %account.id, "cut (403 access denied)");
         }
@@ -1554,5 +1587,157 @@ mod tests {
         assert!(matches!(err, AppError::ApiKeyRateLimited(_)));
         let after = db::get_api_key(&state.pool, &key.id).await.unwrap().unwrap();
         assert_eq!(after.requests_used, 2, "rejected request must not count");
+    }
+
+    fn byok_pool_account() -> Account {
+        let now = db::now_rfc3339();
+        Account {
+            id: "byok-1".into(),
+            provider: "byok".into(),
+            email: Some("openrouter".into()),
+            name: None,
+            is_active: 1,
+            priority: 0,
+            data: r#"{"slug":"openrouter","baseUrl":"https://openrouter.ai/api/v1","apiKey":"sk-test"}"#.into(),
+            cooldown_until: None,
+            last_error: None,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+            quota_limit: 0,
+            quota_remaining: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_prefers_static_arms_and_looks_up_byok_slug() {
+        let (state, _dir) = test_state("resolve").await;
+        assert_eq!(
+            resolve_provider_id(&state.pool, "bb/blackboxai/x-ai/grok-4.3")
+                .await
+                .unwrap(),
+            Some("blackbox")
+        );
+        assert_eq!(
+            resolve_provider_id(&state.pool, "gcli/grok-4.5").await.unwrap(),
+            Some("grok-cli")
+        );
+        assert_eq!(
+            resolve_provider_id(&state.pool, "qd/auto").await.unwrap(),
+            Some("qoder")
+        );
+        assert_eq!(
+            resolve_provider_id(&state.pool, "openrouter/some-model")
+                .await
+                .unwrap(),
+            None,
+            "no byok account registered yet"
+        );
+
+        db::upsert_account(&state.pool, &byok_pool_account())
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_provider_id(&state.pool, "openrouter/anthropic/claude-x")
+                .await
+                .unwrap(),
+            Some("byok")
+        );
+        assert_eq!(
+            resolve_provider_id(&state.pool, "ghost/model").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn byok_billing_errors_fall_but_never_cut_or_seal() {
+        let (state, _dir) = test_state("byokerr").await;
+        let mut acc = byok_pool_account();
+        db::upsert_account(&state.pool, &acc).await.unwrap();
+
+        for err in [
+            ProviderError::PaymentRequired,
+            ProviderError::Upstream {
+                status: 402,
+                body: "billing".into(),
+            },
+            ProviderError::Upstream {
+                status: 403,
+                body: "moderation".into(),
+            },
+        ] {
+            apply_provider_error(&state.pool, &state.config, &mut acc, &err)
+                .await
+                .unwrap();
+            assert_eq!(
+                acc.is_active, 1,
+                "byok account must not be cut by {err:?}"
+            );
+            assert!(
+                acc.cooldown_until.is_none(),
+                "byok account must not be sealed by {err:?}"
+            );
+            assert!(acc.last_error.is_some(), "fallen keeps last_error");
+            assert_eq!(acc.status_label(), "fallen");
+        }
+
+        // Built-in providers keep the old behavior on the same errors.
+        let mut bb = acc.clone();
+        bb.id = "bb-1".into();
+        bb.provider = "blackbox".into();
+        bb.email = None;
+        db::upsert_account(&state.pool, &bb).await.unwrap();
+        apply_provider_error(
+            &state.pool,
+            &state.config,
+            &mut bb,
+            &ProviderError::Upstream {
+                status: 403,
+                body: "x".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bb.is_active, 0, "blackbox 403 still cuts");
+    }
+
+    #[tokio::test]
+    async fn byok_auth_invalid_cuts_and_rate_limit_seals() {
+        let (state, _dir) = test_state("byokcut").await;
+        let mut acc = byok_pool_account();
+        db::upsert_account(&state.pool, &acc).await.unwrap();
+
+        apply_provider_error(
+            &state.pool,
+            &state.config,
+            &mut acc,
+            &ProviderError::AuthInvalid("dead key".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(acc.is_active, 0, "dead user key is cut");
+
+        let mut acc2 = byok_pool_account();
+        acc2.id = "byok-2".into();
+        db::upsert_account(&state.pool, &acc2).await.unwrap();
+        apply_provider_error(
+            &state.pool,
+            &state.config,
+            &mut acc2,
+            &ProviderError::RateLimited {
+                retry_after_secs: Some(900),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(acc2.cooldown_until.is_some(), "429 seals byok like others");
+        assert_eq!(acc2.is_active, 1);
+    }
+
+    #[test]
+    fn byok_has_no_retry_no_decrement_no_resync() {
+        assert!(!should_retry_same_account("byok", &ProviderError::AuthExpired, false));
+        assert!(!should_local_token_decrement("byok"));
+        assert!(!should_server_resync_quota("byok"));
     }
 }

@@ -27,6 +27,34 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
             "targets": targets,
         }));
     }
+    for acc in db::list_accounts(&state.pool, Some("byok"), None).await? {
+        if acc.is_active == 0 {
+            continue;
+        }
+        let slug = match acc.email.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let models = acc
+            .data_json()
+            .get("models")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for m in models {
+            let Some(id) = m.as_str() else { continue };
+            data.push(json!({
+                "id": format!("{slug}/{id}"),
+                "object": "model",
+                "owned_by": "byok",
+                "display_name": id,
+                "slug": slug,
+                "reasoning": false,
+                "vision": false,
+                "is_default": false,
+            }));
+        }
+    }
     Ok(json!({ "object": "list", "data": data }))
 }
 

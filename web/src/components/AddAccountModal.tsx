@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   ApiError,
+  createByok,
   importAccounts,
+  type ByokCreateResult,
   type ImportResult,
 } from "../lib/api";
 import { labelProvider, type ProviderId } from "../lib/providers";
 
 type Mode = "single" | "bulk" | "pat" | "keys";
 
+const BYOK_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
 type Props = {
   provider: ProviderId;
   open: boolean;
   onClose: () => void;
   onImported: (result: ImportResult) => void;
+  onByokCreated?: (result: ByokCreateResult) => void;
 };
 
 export function AddAccountModal({
@@ -20,10 +25,12 @@ export function AddAccountModal({
   open,
   onClose,
   onImported,
+  onByokCreated,
 }: Props) {
   const modes = useMemo<Mode[]>(() => {
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "blackbox") return ["single", "keys", "bulk"];
+    if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);
 
@@ -40,6 +47,13 @@ export function AddAccountModal({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const [byokSlug, setByokSlug] = useState("");
+  const [byokName, setByokName] = useState("");
+  const [byokBaseUrl, setByokBaseUrl] = useState("");
+  const [byokApiKey, setByokApiKey] = useState("");
+  const [byokAutoFetch, setByokAutoFetch] = useState(true);
+  const [byokResult, setByokResult] = useState<ByokCreateResult | null>(null);
+
   useEffect(() => {
     if (!open) return;
     setMode(modes[0]);
@@ -54,6 +68,12 @@ export function AddAccountModal({
     setSkipExisting(false);
     setError(null);
     setLoading(false);
+    setByokSlug("");
+    setByokName("");
+    setByokBaseUrl("");
+    setByokApiKey("");
+    setByokAutoFetch(true);
+    setByokResult(null);
   }, [open, modes, provider]);
 
   useEffect(() => {
@@ -67,7 +87,26 @@ export function AddAccountModal({
 
   if (!open) return null;
 
+  const slugTrimmed = byokSlug.trim();
+  const baseUrlTrimmed = byokBaseUrl.trim();
+  const byokApiKeyTrimmed = byokApiKey.trim();
+
+  const slugInvalid =
+    slugTrimmed !== "" && !BYOK_SLUG_RE.test(slugTrimmed);
+  const baseUrlInvalid =
+    baseUrlTrimmed !== "" &&
+    !baseUrlTrimmed.startsWith("http://") &&
+    !baseUrlTrimmed.startsWith("https://");
+
   const canSubmit = (() => {
+    if (provider === "byok") {
+      return (
+        BYOK_SLUG_RE.test(slugTrimmed) &&
+        !baseUrlInvalid &&
+        baseUrlTrimmed !== "" &&
+        byokApiKeyTrimmed !== ""
+      );
+    }
     if (mode === "bulk" || mode === "pat" || mode === "keys") {
       return Boolean(bulkText.trim());
     }
@@ -85,6 +124,52 @@ export function AddAccountModal({
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (provider === "byok") {
+      if (slugInvalid) {
+        setError(
+          "Slug must match ^[a-z0-9][a-z0-9_-]{0,31}$ (lowercase letters, digits, _ or -).",
+        );
+        return;
+      }
+      if (baseUrlInvalid) {
+        setError("Base URL must start with http:// or https://");
+        return;
+      }
+      setLoading(true);
+      try {
+        const body: {
+          slug: string;
+          name?: string;
+          base_url: string;
+          api_key: string;
+          auto_fetch: boolean;
+        } = {
+          slug: slugTrimmed,
+          base_url: baseUrlTrimmed,
+          api_key: byokApiKeyTrimmed,
+          auto_fetch: byokAutoFetch,
+        };
+        const nameTrimmed = byokName.trim();
+        if (nameTrimmed) body.name = nameTrimmed;
+        const res = await createByok(body);
+        setByokResult(res);
+        if (onByokCreated) onByokCreated(res);
+        else onImported({ inserted: 1, updated: 0, skipped: 0 });
+      } catch (err) {
+        setError(
+          err instanceof ApiError
+            ? err.status === 409
+              ? `slug already exists (${err.message})`
+              : err.message
+            : err instanceof Error
+              ? err.message
+              : "Create BYOK account failed",
+        );
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
     setLoading(true);
     try {
       const body = buildPayload(provider, mode, {
@@ -128,7 +213,9 @@ export function AddAccountModal({
           <div>
             <h2>Add {labelProvider(provider)}</h2>
             <p className="muted" style={{ margin: 0 }}>
-              Single account or bulk tokens for this provider only
+              {provider === "byok"
+                ? "One OpenAI-compatible endpoint per account"
+                : "Single account or bulk tokens for this provider only"}
             </p>
           </div>
           <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
@@ -136,23 +223,25 @@ export function AddAccountModal({
           </button>
         </div>
 
-        <div className="mode-tabs" role="tablist" aria-label="Add mode">
-          {modes.map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="tab"
-              aria-selected={mode === m}
-              className={`mode-tab${mode === m ? " active" : ""}`}
-              onClick={() => {
-                setMode(m);
-                setError(null);
-              }}
-            >
-              {modeLabel(m)}
-            </button>
-          ))}
-        </div>
+        {modes.length > 1 && (
+          <div className="mode-tabs" role="tablist" aria-label="Add mode">
+            {modes.map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="tab"
+                aria-selected={mode === m}
+                className={`mode-tab${mode === m ? " active" : ""}`}
+                onClick={() => {
+                  setMode(m);
+                  setError(null);
+                }}
+              >
+                {modeLabel(m)}
+              </button>
+            ))}
+          </div>
+        )}
 
         {error && (
           <div className="alert alert-error" role="alert">
@@ -160,7 +249,112 @@ export function AddAccountModal({
           </div>
         )}
 
+        {byokResult ? (
+          <div className="stack-gap">
+            <div className="alert alert-ok" role="status">
+              Added {byokResult.email ?? byokResult.id.slice(0, 8)} — fetched{" "}
+              <strong className="mono">{byokResult.models_count}</strong>{" "}
+              model{byokResult.models_count === 1 ? "" : "s"}.
+            </div>
+            {byokResult.models_fetch_error && (
+              <div className="alert alert-info" role="status">
+                Models not fetched: {byokResult.models_fetch_error}. Use
+                “Refresh models” on the account row to retry.
+              </div>
+            )}
+            <div className="btn-row" style={{ justifyContent: "flex-end" }}>
+              <button type="button" className="btn btn-sm" onClick={onClose}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
         <form className="stack-gap" onSubmit={(e) => void onSubmit(e)}>
+          {provider === "byok" && (
+            <>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-slug">Slug</label>
+                <input
+                  id="add-byok-slug"
+                  className="input"
+                  value={byokSlug}
+                  onChange={(e) => setByokSlug(e.target.value)}
+                  placeholder="openrouter"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {slugInvalid ? (
+                  <span className="hint" style={{ color: "var(--blood)" }}>
+                    Must match ^[a-z0-9][a-z0-9_-]{"{0,31}"}$ — lowercase,
+                    digits, _ or -, max 32 chars
+                  </span>
+                ) : (
+                  <span className="hint">
+                    Lowercase id used in model routing — models appear as{" "}
+                    <span className="mono">{slugTrimmed || "openrouter"}/…</span>
+                  </span>
+                )}
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-name">Name (optional)</label>
+                <input
+                  id="add-byok-name"
+                  className="input"
+                  value={byokName}
+                  onChange={(e) => setByokName(e.target.value)}
+                  placeholder="OpenRouter"
+                  autoComplete="off"
+                />
+                <span className="hint">Display name shown in lists</span>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-base-url">Base URL</label>
+                <input
+                  id="add-byok-base-url"
+                  className="input"
+                  value={byokBaseUrl}
+                  onChange={(e) => setByokBaseUrl(e.target.value)}
+                  placeholder="https://openrouter.ai/api/v1"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {baseUrlInvalid ? (
+                  <span className="hint" style={{ color: "var(--blood)" }}>
+                    Must start with http:// or https://
+                  </span>
+                ) : (
+                  <span className="hint">
+                    OpenAI-compatible endpoint — requests go to{" "}
+                    <span className="mono">&lt;base&gt;/chat/completions</span>
+                  </span>
+                )}
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-byok-api-key">API key</label>
+                <input
+                  id="add-byok-api-key"
+                  className="input"
+                  type="password"
+                  value={byokApiKey}
+                  onChange={(e) => setByokApiKey(e.target.value)}
+                  placeholder="sk-…"
+                  required
+                  autoComplete="new-password"
+                  spellCheck={false}
+                />
+              </div>
+              <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="checkbox"
+                  checked={byokAutoFetch}
+                  onChange={(e) => setByokAutoFetch(e.target.checked)}
+                />
+                <span>Fetch model list on add</span>
+              </label>
+            </>
+          )}
           {mode === "single" && provider === "grok-cli" && (
             <>
               <div className="field" style={{ marginBottom: 0 }}>
@@ -347,25 +541,29 @@ export function AddAccountModal({
             </div>
           )}
 
-          <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
-            <input
-              type="radio"
-              name="add-dedup"
-              checked={!skipExisting}
-              onChange={() => setSkipExisting(false)}
-            />
-            <span>Replace existing — overwrite accounts with the same provider+email</span>
-          </label>
+          {provider !== "byok" && (
+            <>
+              <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="radio"
+                  name="add-dedup"
+                  checked={!skipExisting}
+                  onChange={() => setSkipExisting(false)}
+                />
+                <span>Replace existing — overwrite accounts with the same provider+email</span>
+              </label>
 
-          <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
-            <input
-              type="radio"
-              name="add-dedup"
-              checked={skipExisting}
-              onChange={() => setSkipExisting(true)}
-            />
-            <span>Skip existing — ignore rows whose provider+email is already in the pool</span>
-          </label>
+              <label className="field-inline" style={{ cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="radio"
+                  name="add-dedup"
+                  checked={skipExisting}
+                  onChange={() => setSkipExisting(true)}
+                />
+                <span>Skip existing — ignore rows whose provider+email is already in the pool</span>
+              </label>
+            </>
+          )}
 
           <div className="btn-row" style={{ justifyContent: "flex-end" }}>
             <button type="button" className="btn btn-sm" onClick={onClose} disabled={loading}>
@@ -377,10 +575,11 @@ export function AddAccountModal({
               disabled={loading || !canSubmit}
             >
               {loading ? <span className="spinner inline-spinner" /> : null}
-              {mode === "single" ? "Add account" : "Import"}
+              {provider === "byok" || mode === "single" ? "Add account" : "Import"}
             </button>
           </div>
         </form>
+        )}
       </div>
     </>
   );

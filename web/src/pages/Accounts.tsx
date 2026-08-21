@@ -297,6 +297,7 @@ export function Accounts() {
       "grok-cli": emptyCounts(),
       qoder: emptyCounts(),
       blackbox: emptyCounts(),
+      byok: emptyCounts(),
     };
     for (const p of PROVIDERS) {
       map[p] = countFor(accounts.filter((a) => a.provider === p));
@@ -558,7 +559,9 @@ export function Accounts() {
                 onKeyDown={(e) => e.stopPropagation()}
               >
                 <div className="provider-lb-row">
-                  <label htmlFor={`lb-${provider}`}>Load balancing</label>
+                  {provider !== "byok" && (
+                    <label htmlFor={`lb-${provider}`}>Load balancing</label>
+                  )}
                   <button
                     type="button"
                     className="btn btn-sm btn-primary"
@@ -567,31 +570,40 @@ export function Accounts() {
                     + Add
                   </button>
                 </div>
-                <select
-                  id={`lb-${provider}`}
-                  className="select"
-                  value={current}
-                  disabled={savingProvider === provider || loading}
-                  onChange={(e) =>
-                    void onLoadBalanceChange(provider, e.target.value)
-                  }
-                >
-                  {(strategies.length
-                    ? strategies
-                    : [
-                        {
-                          id: "round_robin",
-                          label: "Round robin",
-                          hint: "",
-                        },
-                      ]
-                  ).map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-                {hint ? <p className="provider-lb-hint">{hint}</p> : null}
+                {provider === "byok" ? (
+                  <p className="provider-lb-hint">
+                    Your own OpenAI-compatible endpoints — models route as{" "}
+                    <span className="mono">&lt;slug&gt;/&lt;model&gt;</span>.
+                  </p>
+                ) : (
+                  <>
+                    <select
+                      id={`lb-${provider}`}
+                      className="select"
+                      value={current}
+                      disabled={savingProvider === provider || loading}
+                      onChange={(e) =>
+                        void onLoadBalanceChange(provider, e.target.value)
+                      }
+                    >
+                      {(strategies.length
+                        ? strategies
+                        : [
+                            {
+                              id: "round_robin",
+                              label: "Round robin",
+                              hint: "",
+                            },
+                          ]
+                      ).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                    {hint ? <p className="provider-lb-hint">{hint}</p> : null}
+                  </>
+                )}
                 {provider === "qoder" ? (
                   <>
                     <label
@@ -713,6 +725,13 @@ export function Accounts() {
           onImported={(res) => {
             setMessage(
               `Imported — inserted ${res.inserted}, updated ${res.updated}, skipped ${res.skipped}.`,
+            );
+            void load();
+          }}
+          onByokCreated={(res) => {
+            const n = res.models_count ?? 0;
+            setMessage(
+              `Added ${res.email ?? res.id.slice(0, 8)} — ${n} model${n === 1 ? "" : "s"} fetched.`,
             );
             void load();
           }}

@@ -38,6 +38,8 @@ pub struct PatchBody {
     pub quota_limit: Option<i64>,
     pub quota_remaining: Option<i64>,
     pub reset_quota: Option<bool>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
 }
 
 pub async fn stats(State(state): State<AppState>, _auth: AdminAuth) -> AppResult<Json<Value>> {
@@ -361,6 +363,28 @@ pub async fn patch_account(
             }
         }
     }
+    if acc.provider == "byok" && (body.base_url.is_some() || body.api_key.is_some()) {
+        if let Some(ref base) = body.base_url {
+            if !crate::providers::byok::is_valid_byok_base_url(base) {
+                return Err(AppError::BadRequest(
+                    "base_url must be an http(s) URL".into(),
+                ));
+            }
+        }
+        if let Some(ref key) = body.api_key {
+            if key.trim().is_empty() {
+                return Err(AppError::BadRequest("api_key must not be empty".into()));
+            }
+        }
+        let mut data = acc.data_json();
+        if let Some(base) = body.base_url {
+            data["baseUrl"] = json!(base.trim());
+        }
+        if let Some(key) = body.api_key {
+            data["apiKey"] = json!(key.trim());
+        }
+        acc.set_data_json(&data);
+    }
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
     Ok(Json(json!(acc.to_public())))
@@ -408,6 +432,13 @@ pub async fn refresh_account(
                 .await
                 .map_err(AppError::from)?;
         }
+        "byok" => {
+            state
+                .byok
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
         other => {
             return Err(AppError::BadRequest(format!("unknown provider {other}")));
         }
@@ -416,6 +447,139 @@ pub async fn refresh_account(
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
     Ok(Json(json!(acc.to_public())))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateByokBody {
+    pub slug: String,
+    pub name: Option<String>,
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub auto_fetch: Option<bool>,
+}
+
+pub async fn create_byok_endpoint(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Json(body): Json<CreateByokBody>,
+) -> AppResult<Json<Value>> {
+    let slug = body.slug.trim().to_string();
+    crate::providers::byok::validate_byok_slug(&slug)
+        .map_err(AppError::BadRequest)?;
+    if !crate::providers::byok::is_valid_byok_base_url(&body.base_url) {
+        return Err(AppError::BadRequest(
+            "base_url must be an http(s) URL".into(),
+        ));
+    }
+    let api_key = body.api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err(AppError::BadRequest("api_key must not be empty".into()));
+    }
+    if db::find_byok_account_by_slug(&state.pool, &slug)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(format!("byok endpoint '{slug}' already exists")));
+    }
+
+    let auto_fetch = body.auto_fetch.unwrap_or(true);
+    let name = body
+        .name
+        .clone()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| slug.clone());
+
+    let mut models: Vec<String> = Vec::new();
+    let mut models_fetched_at: Option<String> = None;
+    let mut models_fetch_error: Option<String> = None;
+    if auto_fetch {
+        match state.byok.fetch_models(&body.base_url, &api_key).await {
+            Ok(ids) => {
+                models = ids;
+                models_fetched_at = Some(db::now_rfc3339());
+            }
+            Err(e) => {
+                models_fetch_error = Some(e.to_string());
+                warn!(slug = %slug, error = %e, "byok auto models fetch failed; endpoint kept");
+            }
+        }
+    }
+
+    let data = json!({
+        "slug": slug,
+        "baseUrl": body.base_url.trim(),
+        "apiKey": api_key,
+        "models": models,
+        "modelsFetchedAt": models_fetched_at,
+    });
+    let now = db::now_rfc3339();
+    let (q_lim, q_rem) = db::default_quota_for_provider("byok");
+    let acc = Account {
+        id: Uuid::new_v4().to_string(),
+        provider: "byok".into(),
+        email: Some(slug.clone()),
+        name: Some(name),
+        is_active: 1,
+        priority: 0,
+        data: data.to_string(),
+        cooldown_until: None,
+        last_error: None,
+        last_used_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+        quota_limit: q_lim,
+        quota_remaining: q_rem,
+    };
+    db::upsert_account(&state.pool, &acc).await?;
+    info!(slug = %slug, models = models.len(), auto_fetch, "byok endpoint created");
+
+    let mut resp = json!(acc.to_public());
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert("models_count".into(), json!(models.len()));
+        if let Some(err) = models_fetch_error {
+            obj.insert("models_fetch_error".into(), json!(err));
+        }
+    }
+    Ok(Json(resp))
+}
+
+pub async fn refetch_byok_models(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut acc = db::get_account(&state.pool, &id).await?;
+    if acc.provider != "byok" {
+        return Err(AppError::NotFound(format!(
+            "account {id} is not a byok endpoint"
+        )));
+    }
+    let data = acc.data_json();
+    let base_url = crate::providers::byok::ByokProvider::base_url_of(&data).ok_or_else(|| {
+        AppError::BadRequest(format!("byok account {id} has no baseUrl"))
+    })?;
+    let api_key = crate::providers::byok::ByokProvider::api_key_of(&data).ok_or_else(|| {
+        AppError::BadRequest(format!("byok account {id} has no apiKey"))
+    })?;
+    let models = state
+        .byok
+        .fetch_models(&base_url, &api_key)
+        .await
+        .map_err(AppError::from)?;
+    let fetched_at = db::now_rfc3339();
+    let mut new_data = data;
+    new_data["models"] = json!(models);
+    new_data["modelsFetchedAt"] = json!(fetched_at);
+    acc.set_data_json(&new_data);
+    acc.updated_at = db::now_rfc3339();
+    db::update_account(&state.pool, &acc).await?;
+    Ok(Json(json!({
+        "models": models,
+        "fetched_at": fetched_at,
+        "count": models.len(),
+    })))
 }
 
 pub async fn grok_billing(

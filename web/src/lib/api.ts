@@ -46,6 +46,7 @@ export type ModelObject = {
   owned_by: string;
   model_key?: string | null;
   display_name?: string | null;
+  slug?: string | null;
   credit_usage_rate?: string | null;
   max_input?: string | null;
   reasoning?: boolean;
@@ -546,6 +547,41 @@ export function warmupQoderAccounts(
   const q = qs.toString();
   return request<WarmupResult>(
     `/admin/providers/qoder/warmup${q ? `?${q}` : ""}`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
+export type ByokCreateInput = {
+  slug: string;
+  name?: string;
+  base_url: string;
+  api_key: string;
+  auto_fetch?: boolean;
+};
+
+export type ByokCreateResult = Account & {
+  models_count: number;
+  models_fetch_error?: string;
+};
+
+export function createByok(input: ByokCreateInput, settings?: Settings) {
+  return request<ByokCreateResult>(
+    "/admin/byok",
+    { method: "POST", auth: "admin", body: JSON.stringify(input) },
+    settings,
+  );
+}
+
+export type ByokModelsResult = {
+  models: string[];
+  fetched_at: string;
+  count: number;
+};
+
+export function refreshByokModels(accountId: string, settings?: Settings) {
+  return request<ByokModelsResult>(
+    `/admin/accounts/${encodeURIComponent(accountId)}/byok-models`,
     { method: "POST", auth: "admin" },
     settings,
   );

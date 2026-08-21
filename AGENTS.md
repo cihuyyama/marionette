@@ -1,15 +1,17 @@
 # AGENTS.md — Marionette
 
 ## Mission
-Build a **thin Rust OpenAI-compatible proxy pool** with three providers:
+Build a **thin Rust OpenAI-compatible proxy pool** with three built-in providers:
 - `grok-cli` (first, complete)
 - `qoder` (after dashboard)
 - `blackbox` (after qoder; static API keys, farm via temp-mail signup)
 
+Plus **BYOK** (user-supplied OpenAI-compatible endpoints: base URL + API key, 9Router-style) — a generic passthrough, not a farmed provider.
+
 Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full etteeum rewrite.
 
 ## Hard constraints
-1. **Do not** port all of etteeum-pool (no CodeBuddy/Kiro/Codex/Canva, no full pudidil/compression stack in v1).
+1. **Do not** port all of etteeum-pool (no CodeBuddy/Kiro/Codex/Canva, no full pudidil/compression stack in v1). **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is allowed; it is a generic passthrough, not a new farmed provider. No other new built-in providers.
 2. **Do not** put Playwright / browser automation in Rust v1.
 3. **Order locked:** skeleton → Grok CLI full → Admin JSON → React+Vite dashboard → **then** Qoder.
 4. Non-stream chat works before stream SSE.

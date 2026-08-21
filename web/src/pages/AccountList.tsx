@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   claimProTrial,
   deleteAccount,
+  getAccount,
   grokBilling,
   listAccounts,
   patchAccount,
   refreshAccount,
+  refreshByokModels,
   warmupQoderAccounts,
   type Account,
 } from "../lib/api";
@@ -61,6 +63,16 @@ export function AccountList() {
   const [bulkInjectOpen, setBulkInjectOpen] = useState(false);
   const [exportPatOpen, setExportPatOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [byokRefreshed, setByokRefreshed] = useState<
+    Record<string, { count: number; fetched_at: string }>
+  >({});
+  const [byokRefreshError, setByokRefreshError] = useState<
+    Record<string, string>
+  >({});
+  const detailIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    detailIdRef.current = detail?.id ?? null;
+  }, [detail?.id]);
 
   const load = useCallback(async () => {
     if (!provider) return;
@@ -134,6 +146,48 @@ export function AccountList() {
             ? e.message
             : "Action failed",
       );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleByokRefreshModels(a: Account) {
+    setBusyId(a.id);
+    setError(null);
+    setByokRefreshError((prev) => {
+      if (!(a.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[a.id];
+      return next;
+    });
+    try {
+      const res = await refreshByokModels(a.id);
+      setByokRefreshed((prev) => ({
+        ...prev,
+        [a.id]: { count: res.count, fetched_at: res.fetched_at },
+      }));
+      setMessage(
+        `Fetched ${res.count} model${res.count === 1 ? "" : "s"} for ${a.email ?? a.id.slice(0, 8)}`,
+      );
+      await load();
+      if (detailIdRef.current === a.id) {
+        try {
+          const fresh = await getAccount(a.id);
+          setDetail((cur) => (cur?.id === a.id ? fresh : cur));
+        } catch {
+          /* row list is already refreshed; drawer keeps stale data */
+        }
+      }
+    } catch (e) {
+      setByokRefreshError((prev) => ({
+        ...prev,
+        [a.id]:
+          e instanceof ApiError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : "Refresh models failed",
+      }));
     } finally {
       setBusyId(null);
     }
@@ -628,6 +682,15 @@ export function AccountList() {
                           </span>
                         )}
                       </button>
+                      {a.provider === "byok" &&
+                        byokBaseUrl(a) !== null && (
+                          <div
+                            className="row-sub-hint"
+                            title={byokBaseUrl(a) ?? undefined}
+                          >
+                            {byokBaseUrl(a)}
+                          </div>
+                        )}
                       {a.last_error && (
                         <div
                           className="row-error-hint"
@@ -680,7 +743,24 @@ export function AccountList() {
                       {a.last_used_at ? formatShort(a.last_used_at) : "—"}
                     </td>
                     <td className="health-cell" title={fmtCreditTitle(a)}>
-                      <AccountHealth a={a} compact />
+                      {a.provider === "byok" ? (
+                        <>
+                          <ByokModelsInfo
+                            a={a}
+                            refreshed={byokRefreshed[a.id]}
+                          />
+                          {byokRefreshError[a.id] && (
+                            <div
+                              className="row-error-hint"
+                              title={byokRefreshError[a.id]}
+                            >
+                              {byokRefreshError[a.id]}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <AccountHealth a={a} compact />
+                      )}
                     </td>
                     <td
                       className="truncate muted"
@@ -690,7 +770,7 @@ export function AccountList() {
                     </td>
                     <td>
                       <div className="actions-cell">
-                        {provider !== "blackbox" && (
+                        {provider !== "blackbox" && provider !== "byok" && (
                           <button
                             type="button"
                             className="btn btn-sm"
@@ -707,6 +787,17 @@ export function AccountList() {
                             }
                           >
                             Auth
+                          </button>
+                        )}
+                        {provider === "byok" && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Re-fetch the model list from the endpoint"
+                            onClick={() => void handleByokRefreshModels(a)}
+                          >
+                            Models
                           </button>
                         )}
                         {provider === "grok-cli" && (
@@ -898,6 +989,22 @@ export function AccountList() {
             <dl className="kv" style={{ marginTop: 16 }}>
               <dt>Provider</dt>
               <dd className="mono">{detail.provider}</dd>
+              {detail.provider === "byok" && (
+                <>
+                  <dt>Slug</dt>
+                  <dd className="mono">{byokSlugOf(detail) ?? "—"}</dd>
+                  <dt>Base URL</dt>
+                  <dd className="mono" title={byokBaseUrl(detail) ?? undefined}>
+                    {byokBaseUrl(detail) ?? "—"}
+                  </dd>
+                  <dt>API key</dt>
+                  <dd className="mono">{byokApiKeyMasked(detail) ?? "—"}</dd>
+                  <dt>Models</dt>
+                  <dd>
+                    <ByokModelsInfo a={detail} refreshed={byokRefreshed[detail.id]} />
+                  </dd>
+                </>
+              )}
               <dt>Active</dt>
               <dd>{detail.is_active ? "true" : "false"}</dd>
               <dt>Priority</dt>
@@ -970,7 +1077,7 @@ export function AccountList() {
                   Reset quota
                 </button>
               )}
-              {provider !== "blackbox" && (
+              {provider !== "blackbox" && provider !== "byok" && (
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -986,6 +1093,17 @@ export function AccountList() {
                   }
                 >
                   Refresh auth
+                </button>
+              )}
+              {provider === "byok" && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busyId === detail.id || bulkBusy}
+                  title="Re-fetch the model list from the endpoint"
+                  onClick={() => void handleByokRefreshModels(detail)}
+                >
+                  Refresh models
                 </button>
               )}
               {provider === "qoder" && (
@@ -1072,6 +1190,13 @@ export function AccountList() {
             );
             void load();
           }}
+          onByokCreated={(res) => {
+            const n = res.models_count ?? 0;
+            setMessage(
+              `Added ${res.email ?? res.id.slice(0, 8)} — ${n} model${n === 1 ? "" : "s"} fetched.`,
+            );
+            void load();
+          }}
         />
       )}
 
@@ -1135,6 +1260,67 @@ function fmtGrokBilling(res: import("../lib/api").GrokBilling): string {
       ? ` · ${b.billingPeriodStart.slice(0, 10)}→${b.billingPeriodEnd.slice(0, 10)}`
       : "";
   return `${who}: ${parts.length ? parts.join(" · ") : "no meter"}${period}`;
+}
+
+function byokBaseUrl(a: Account): string | null {
+  const raw = a.data?.baseUrl ?? a.data?.base_url;
+  return typeof raw === "string" && raw.trim() ? raw : null;
+}
+
+function byokSlugOf(a: Account): string | null {
+  const raw = a.data?.slug;
+  if (typeof raw === "string" && raw.trim()) return raw;
+  return a.email;
+}
+
+function byokApiKeyMasked(a: Account): string | null {
+  const raw = a.data?.apiKey ?? a.data?.api_key;
+  return typeof raw === "string" && raw ? raw : null;
+}
+
+function byokModels(a: Account): string[] {
+  const raw = a.data?.models;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((m): m is string => typeof m === "string");
+}
+
+function byokModelsFetchedAt(a: Account): string | null {
+  const raw = a.data?.modelsFetchedAt ?? a.data?.models_fetched_at;
+  return typeof raw === "string" && raw ? raw : null;
+}
+
+function ByokModelsInfo({
+  a,
+  refreshed,
+}: {
+  a: Account;
+  refreshed?: { count: number; fetched_at: string };
+}) {
+  const count = refreshed?.count ?? byokModels(a).length;
+  const fetchedAt = refreshed?.fetched_at ?? byokModelsFetchedAt(a);
+  if (count <= 0 && !fetchedAt) {
+    return (
+      <span className="muted" title="No models fetched yet">
+        No models
+      </span>
+    );
+  }
+  return (
+    <span className="health-stack health-stack-compact">
+      <span
+        className="chip chip-bound"
+        title={`Models fetched${fetchedAt ? ` at ${fetchedAt}` : ""}`}
+      >
+        <span className="chip-dot" aria-hidden />
+        {count} model{count === 1 ? "" : "s"}
+      </span>
+      {fetchedAt && (
+        <span className="mono muted" style={{ fontSize: 10.5 }}>
+          fetched {formatShort(fetchedAt)}
+        </span>
+      )}
+    </span>
+  );
 }
 
 function fmtAccountCredit(a: Account): string {

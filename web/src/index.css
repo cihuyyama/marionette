@@ -1372,6 +1372,17 @@ table.data tr.row-inactive td {
   color: #d47a86;
 }
 
+.row-sub-hint {
+  margin-top: 2px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+}
+
 .nowrap {
   white-space: nowrap;
 }

@@ -457,3 +457,249 @@ async fn api_key_admin_endpoints_require_admin_key() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+async fn post_byok(app: &axum::Router, body: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/byok")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn byok_create_rejects_bad_slug() {
+    let (app, _dir) = test_app().await;
+    let res = post_byok(
+        &app,
+        r#"{"slug":"Has Space","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = post_byok(
+        &app,
+        r#"{"slug":"-lead","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn byok_create_rejects_reserved_slug() {
+    let (app, _dir) = test_app().await;
+    for slug in ["bb", "gcli", "qd", "combo", "blackbox-x", "my-grok-api"] {
+        let res = post_byok(
+            &app,
+            &format!(
+                r#"{{"slug":"{slug}","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test","auto_fetch":false}}"#
+            ),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "reserved slug '{slug}' must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn byok_create_rejects_bad_base_url_and_empty_key() {
+    let (app, _dir) = test_app().await;
+    let res = post_byok(
+        &app,
+        r#"{"slug":"ok","base_url":"ftp://x.ai","api_key":"sk-test","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = post_byok(
+        &app,
+        r#"{"slug":"ok","base_url":"https://openrouter.ai/api/v1","api_key":"   ","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn byok_create_happy_path_and_duplicate_409() {
+    let (app, _dir) = test_app().await;
+    let body = r#"{"slug":"openrouter","name":"OpenRouter","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test-long-key","auto_fetch":false}"#;
+
+    let created = post_byok(&app, body).await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let v = body_json(created).await;
+    assert_eq!(v["provider"], "byok");
+    assert_eq!(v["email"], "openrouter");
+    assert_eq!(v["models_count"], 0);
+    assert!(v.get("models_fetch_error").is_none());
+    let key = v["data"]["apiKey"].as_str().unwrap();
+    assert!(key.contains('…') || key.contains("..."), "apiKey must be masked");
+    assert_eq!(v["data"]["baseUrl"], "https://openrouter.ai/api/v1");
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/accounts")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let lv = body_json(listed).await;
+    assert!(
+        lv["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["provider"] == "byok" && a["email"] == "openrouter"),
+        "created byok endpoint appears in /admin/accounts"
+    );
+
+    let dup = post_byok(&app, body).await;
+    assert_eq!(dup.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn byok_models_listed_only_after_models_present() {
+    let (app, dir) = test_app().await;
+    let created = post_byok(
+        &app,
+        r#"{"slug":"myapi","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test-long-key","auto_fetch":false}"#,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let v = body_json(created).await;
+    let id = v["id"].as_str().unwrap().to_string();
+    assert_eq!(v["name"], "myapi", "display name defaults to slug");
+
+    let list_ids = |v: &Value| -> Vec<String> {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| {
+                if m["owned_by"] == "byok" {
+                    m["id"].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv = body_json(listed).await;
+    assert!(
+        list_ids(&mv).is_empty(),
+        "no byok models until endpoint has a fetched model list"
+    );
+
+    let pool = db::connect(&dir.join("test.sqlite")).await.unwrap();
+    let mut acc = db::get_account(&pool, &id).await.unwrap();
+    let mut data = acc.data_json();
+    data["models"] = serde_json::json!(["anthropic/claude-x", "openai/gpt-x"]);
+    data["modelsFetchedAt"] = serde_json::json!("2026-01-01T00:00:00.000Z");
+    acc.set_data_json(&data);
+    db::update_account(&pool, &acc).await.unwrap();
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv = body_json(listed).await;
+    let ids = list_ids(&mv);
+    assert_eq!(ids, vec!["myapi/anthropic/claude-x", "myapi/openai/gpt-x"]);
+
+    let fetched = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/admin/accounts/{id}"))
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetched.status(), StatusCode::OK);
+    let fv = body_json(fetched).await;
+    let masked = fv["data"]["apiKey"].as_str().unwrap();
+    assert!(masked.contains('…') || masked.contains("..."));
+    assert_eq!(fv["data"]["baseUrl"], "https://openrouter.ai/api/v1");
+    assert_eq!(fv["quota_kind"], "none");
+
+    let patched = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/accounts/{id}"))
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"renamed","base_url":"https://other.dev","api_key":"sk-new-long-key"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), StatusCode::OK);
+    let pv = body_json(patched).await;
+    assert_eq!(pv["name"], "renamed");
+    assert_eq!(pv["data"]["baseUrl"], "https://other.dev");
+    assert_eq!(pv["data"]["models"].as_array().unwrap().len(), 2, "patch preserves data.models");
+
+    let byok_models_404 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/accounts/ghost/byok-models")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(byok_models_404.status(), StatusCode::NOT_FOUND);
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/admin/accounts/{id}"))
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+}

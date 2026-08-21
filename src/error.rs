@@ -16,6 +16,8 @@ pub enum AppError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("no healthy accounts available for provider {0}")]
     NoAccounts(String),
     #[error("provider not implemented: {0}")]
@@ -49,6 +51,7 @@ impl AppError {
             AppError::Forbidden | AppError::ApiKeyForbidden(_) => StatusCode::FORBIDDEN,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::NoAccounts(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             AppError::Upstream { status, .. } => {

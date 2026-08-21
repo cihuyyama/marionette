@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
             patch(admin::patch_provider_settings),
         )
         .route("/admin/accounts", get(admin::list_accounts).post(admin::import_accounts))
+        .route("/admin/byok", post(admin::create_byok_endpoint))
         .route(
             "/admin/accounts/{id}",
             get(admin::get_account)
@@ -66,6 +67,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(admin::delete_account),
         )
         .route("/admin/accounts/{id}/refresh", post(admin::refresh_account))
+        .route(
+            "/admin/accounts/{id}/byok-models",
+            post(admin::refetch_byok_models),
+        )
         .route("/admin/accounts/{id}/grok-billing", get(admin::grok_billing))
         .route("/admin/accounts/export-pats", post(admin::export_qoder_pats))
         .route("/admin/accounts/export", post(admin::export_accounts))

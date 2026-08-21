@@ -148,7 +148,21 @@ export function ModelsPage() {
       {filtered.length === 0 && !loading ? (
         <div className="panel empty">
           <p className="flavor">No models in this filter.</p>
-          <p>Check pool key in Settings if the list is empty.</p>
+          {owner === "byok" ? (
+            <>
+              <p>
+                Add a Custom (BYOK) endpoint in Accounts, then use
+                “Refresh models” on its row to fetch the model list.
+              </p>
+              <div className="btn-row" style={{ justifyContent: "center" }}>
+                <Link to="/accounts/byok" className="btn btn-primary">
+                  Accounts → Custom (BYOK)
+                </Link>
+              </div>
+            </>
+          ) : (
+            <p>Check pool key in Settings if the list is empty.</p>
+          )}
         </div>
       ) : (
         <div className="table-wrap">
@@ -192,7 +206,12 @@ export function ModelsPage() {
                       <span className="muted">—</span>
                     )}
                   </td>
-                  <td className="muted">{labelProvider(m.owned_by)}</td>
+                  <td className="muted">
+                    {labelProvider(m.owned_by)}
+                    {m.owned_by === "byok" && m.slug && (
+                      <span className="mono"> · {m.slug}</span>
+                    )}
+                  </td>
                   <td>
                     <button
                       type="button"

@@ -8,13 +8,14 @@
 
 ## 1. What this is
 
-Thin **Rust** OpenAI-compatible **proxy pool** with three providers:
+Thin **Rust** OpenAI-compatible **proxy pool** with three built-in providers + BYOK:
 
 | Provider ID | Model prefix | Auth |
 |-------------|--------------|------|
 | `grok-cli` | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | `qoder` | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` + userId/machineId |
 | `blackbox` | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh, no expiry) |
+| `byok` | `<slug>/*` (user-chosen slug) | user-supplied base URL + static API key (OpenAI-compatible) |
 
 Plus a **React + Vite + TypeScript** admin SPA under `web/` (dark-only, LoTM soft).
 
@@ -26,7 +27,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 
 ## 2. Golden rules (hard constraints)
 
-1. **Only** `grok-cli`, `qoder`, and `blackbox`. Do not add CodeBuddy/Kiro/Codex/Canva/etc.
+1. **Only** `grok-cli`, `qoder`, and `blackbox` as built-in providers. **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is a generic passthrough, not a new farmed provider. Do not add CodeBuddy/Kiro/Codex/Canva/etc.
 2. **Do not** port all of etteeum (no full pudidil/compression stack in v1).
 3. **Do not** put Playwright / browser automation in the Rust binary.
 4. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
@@ -37,6 +38,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
    - Grok **403 / AccessDenied** and **AuthInvalid** (`invalid_grant`) → **cut**.
    - Qoder uses **local** `classify_qoder_status`: 402/403 → `RateLimited` (cooldown), **not** cut.
    - Blackbox uses **local** `classify_blackbox_status`: 401 → cut (dead key), 402 → sealed+quota-0, **403 → fallen (moderation, never cut/seal)**, 429 → sealed w/ parsed retry-after.
+   - BYOK uses **local** `classify_byok_status`: 401 → cut (dead key), 429 → sealed w/ parsed retry-after, **402/403 → Upstream → fallen only** (`byok_billing_block` guard in `apply_provider_error` — user's own keys never sealed/cut for billing/permission).
    - **Never change global `classify_http_status` to “fix” Qoder** — keep Qoder classification local.
 7. Dashboard: **React + Vite SPA only** — not Next, TanStack Start, or SSR.
 8. UI: `docs/DESIGN.md` — dark-only, English ops nav, soft LoTM on chips/empty/brand only.
@@ -57,7 +59,7 @@ marionette/
 │   ├── main.rs             # Axum serve, CORS, optional static web/dist, refresh worker spawn
 │   ├── lib.rs              # module exports
 │   ├── config.rs           # Config::from_env
-│   ├── state.rs            # AppState { pool, config, http, grok, qoder }
+│   ├── state.rs            # AppState { pool, config, http, grok, qoder, blackbox, byok }
 │   ├── auth.rs             # PoolAuth, AdminAuth (Bearer extractors)
 │   ├── error.rs            # AppError, ProviderError
 │   ├── openai.rs           # ChatCompletionRequest, default_models(), provider_id()
@@ -226,6 +228,8 @@ Dashboard (`web/src/lib/settings.ts`):
 | PATCH | `/admin/keys/{id}` | admin (name / is_active / limits / allowlist; explicit `null` clears a limit) |
 | DELETE | `/admin/keys/{id}` | admin (revoke) |
 | GET | `/admin/keys/{id}/usage` | admin (aggregate from request_logs) |
+| POST | `/admin/byok` | admin (create BYOK endpoint; body `{slug,name,base_url,api_key,auto_fetch}`; 409 duplicate slug) |
+| POST | `/admin/accounts/{id}/byok-models` | admin (re-fetch BYOK model catalog from endpoint) |
 
 Combo routes use `{slug}` (axum path params don't span `/`); server reconstructs `combo/{slug}` via `combo_id_from_slug`.
 
@@ -249,6 +253,8 @@ Error JSON shape:
 - starts with `combo/` → virtual combo (no direct provider; `provider_id_for_model` returns None)
 - else → unknown model (400)
 
+**BYOK resolution** happens at pool level (`pool.rs::resolve_provider_id`), not in `openai.rs`: static arms run first; if none matches, the first `<slug>/` segment is looked up in the DB (`accounts` row, `provider="byok"`, `email=slug`, case-insensitive) → provider `"byok"`. Reserved-slug validation (`validate_byok_slug`) guarantees a BYOK slug can never shadow a static arm.
+
 `upstream_model()`: strip first `prefix/` if present.
 
 `default_models()` lists (non-exhaustive copy — confirm in `openai.rs` if editing):
@@ -260,6 +266,8 @@ Error JSON shape:
 **Blackbox:** `bb/z-ai/glm-5.2`, `bb/blackboxai/moonshotai/kimi-k3`, `bb/blackboxai/x-ai/grok-4.3`, `bb/blackboxai/openai/gpt-5.4`, `bb/blackboxai/anthropic/claude-sonnet-4.5`, `bb/blackboxai/google/gemini-3.5-flash`, `bb/blackboxai/blackbox-pro`, … (~20 curated ids from the live `api.blackbox.ai/v1/models` catalog) — bare `blackboxai/*` and `z-ai/*` upstream ids also route to blackbox
 
 **Combos:** `combo/<slug>` virtual chat models are admin-created (not in `default_models()`); active ones are merged into `/v1/models` + `/admin/models` at request time (`models.rs::models_payload`, `owned_by="combo"`). Targets must be canonical concrete chat catalog ids — no aliases, no `combo/*`, no image-only `*imagine-image*`.
+
+**BYOK:** `<slug>/<modelId>` ids are merged into `/v1/models` + `/admin/models` at request time from active byok accounts' stored `data.models` (fetched from the endpoint's `GET {base}/models` on add or via `POST /admin/accounts/{id}/byok-models`; `owned_by="byok"`). Models are slug-scoped: a request picks only the account whose `email == slug` (`list_eligible_accounts` byok filter). BYOK models are **not** valid combo targets.
 
 OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_tool_calls` and message `tool_calls` / `tool_call_id`.
 
@@ -279,7 +287,7 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 
 ### Concrete flow (`handle_concrete_chat`)
 
-1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok`, `qoder`, or `blackbox`).
+1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok`, `qoder`, `blackbox`, or `byok`).
 2. Loop **up to 8** picks: `db::pick_account(pool, provider_id, &tried)`.
 3. Push account id to `tried`.
 4. `provider.ensure_fresh_auth(&mut account)` — on fail → `apply_provider_error` + next account.
@@ -297,10 +305,10 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 | ProviderError | Account effect |
 |---------------|----------------|
 | `RateLimited { … }` | `cooldown_until = now + MARIONETTE_COOLDOWN_HOURS` (or retry_after) — **sealed** |
-| `PaymentRequired` / `Upstream` **402** | **sealed** (same cooldown hours) + `quota_remaining=0` (Grok credit/spending-limit recovers) |
+| `PaymentRequired` / `Upstream` **402** | **sealed** (same cooldown hours) + `quota_remaining=0` (Grok credit/spending-limit recovers). **BYOK exception:** `byok_billing_block` guard → falls through to fallen (never seal/cut user keys for billing/permission) |
 | `AuthExpired` | first: 5 min cooldown; if last_error already auth-ish: **cut** (`is_active=0`) |
 | `AuthInvalid` / `AccessDenied` | **cut** |
-| `Upstream` status **403** | **cut** |
+| `Upstream` status **403** | **cut** — except BYOK (`byok_billing_block` → fallen) |
 | other | record `last_error` only |
 
 ### Status labels (`Account::status_label`)
@@ -554,6 +562,7 @@ Do not modify those repos unless the user explicitly asks.
 | 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
 | 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
 | 6 Blackbox provider + farm | code complete (provider `bb/`, static `sk-` keys, local classifier, `blackbox_farm` novabox-port w/ our CF temp-mail); live farm validation pending |
+| 6.5 BYOK provider | code complete (`byok` static base-URL+API-key passthrough; `<slug>/<model>` routing; `POST /admin/byok` + auto/manual models fetch; slug-scoped picks; local classifier 401 cut / 429 seal / 402-403 fallen; dashboard Custom (BYOK)); 205 lib + 24 smoke pass |
 | 7 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

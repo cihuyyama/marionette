@@ -1,4 +1,5 @@
 pub mod blackbox;
+pub mod byok;
 pub mod grok_cli;
 pub mod qoder;
 

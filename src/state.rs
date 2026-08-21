@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::farm::FarmManager;
 use crate::providers::blackbox::BlackboxProvider;
+use crate::providers::byok::ByokProvider;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub grok: Arc<GrokCliProvider>,
     pub qoder: Arc<QoderProvider>,
     pub blackbox: Arc<BlackboxProvider>,
+    pub byok: Arc<ByokProvider>,
     pub farm: FarmManager,
     pub refresh: RefreshManager,
     pub proxies: ProxyManager,
@@ -45,6 +47,7 @@ impl AppState {
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
         let qoder = Arc::new(QoderProvider::new());
         let blackbox = Arc::new(BlackboxProvider::new());
+        let byok = Arc::new(ByokProvider::new());
         let proxies = ProxyManager::new(pool.clone());
         Self {
             pool,
@@ -53,6 +56,7 @@ impl AppState {
             grok,
             qoder,
             blackbox,
+            byok,
             farm,
             refresh: RefreshManager::new(),
             proxies,
