@@ -312,6 +312,14 @@ export function ProxiesPage() {
               >
                 blackbox
               </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void onAssign("freebuff")}
+                disabled={busy}
+              >
+                freebuff
+              </button>
             </div>
           </div>
         </div>

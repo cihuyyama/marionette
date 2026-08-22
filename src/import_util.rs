@@ -16,12 +16,13 @@
 /// }
 /// ```
 ///
-/// We support "grok-cli", "qoder", and "blackbox". Other providers are silently skipped.
+/// We support "grok-cli", "qoder", "blackbox", and "freebuff". Other providers
+/// are silently skipped.
 use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "blackbox"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "blackbox", "freebuff"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -130,6 +131,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "grok-cli" => build_grok_data(item),
         "qoder" => build_qoder_data(item),
         "blackbox" => build_blackbox_data(item),
+        "freebuff" => build_freebuff_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -243,6 +245,53 @@ fn build_blackbox_data(item: &Value) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
+/// freebuff data: an opaque `cb_…` account token — no refresh, no expiry.
+/// Accepts a `token` field (or a raw connection string) and the `token:uid`
+/// form, splitting the optional uid out.
+fn build_freebuff_data(item: &Value) -> Result<Value, String> {
+    let raw = if item.is_string() {
+        item.as_str().unwrap_or("").to_string()
+    } else {
+        item.get("token")
+            .or_else(|| item.get("api_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let raw = raw.trim().to_string();
+    if raw.is_empty() {
+        return Err("freebuff: missing token".into());
+    }
+
+    let (token, uid) = split_token_uid(&raw);
+    if token.is_empty() {
+        return Err("freebuff: missing token".into());
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert("token".into(), json!(token));
+    if let Some(u) = uid {
+        out.insert("uid".into(), json!(u));
+    } else {
+        out.insert("uid".into(), json!(null));
+    }
+    out.insert("modelsFetchedAt".into(), json!(null));
+
+    Ok(Value::Object(out))
+}
+
+/// Split `token:uid` into (token, Some(uid)); plain tokens yield (token, None).
+fn split_token_uid(s: &str) -> (String, Option<String>) {
+    if let Some(idx) = s.find(':') {
+        let token = s[..idx].trim().to_string();
+        let uid = s[idx + 1..].trim().to_string();
+        (token, if uid.is_empty() { None } else { Some(uid) })
+    } else {
+        (s.trim().to_string(), None)
+    }
+}
+
 fn copy_str(src: &Value, dst: &mut serde_json::Map<String, Value>, key: &str) {
     if let Some(s) = src.get(key).and_then(|v| v.as_str()) {
         if !s.is_empty() {
@@ -322,6 +371,18 @@ mod tests {
         })
     }
 
+    fn freebuff_item() -> Value {
+        json!({
+            "id": "dddd-4444",
+            "provider": "freebuff",
+            "email": "freebuff-1",
+            "name": "fb account",
+            "isActive": true,
+            "priority": 0,
+            "token": "cb_farm-token-1234567890"
+        })
+    }
+
     #[test]
     fn parse_grok_account() {
         let acc = map_connection(&grok_item()).unwrap();
@@ -362,13 +423,15 @@ mod tests {
                 grok_item(),
                 qoder_item(),
                 blackbox_item(),
+                freebuff_item(),
                 json!({ "provider": "openai", "id": "x", "accessToken": "y" })
             ]
         });
         let accounts = parse_9router_backup(&backup);
-        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts.len(), 4);
         assert!(accounts.iter().all(|a| SUPPORTED_PROVIDERS.contains(&a.provider.as_str())));
         assert!(accounts.iter().any(|a| a.provider == "blackbox"));
+        assert!(accounts.iter().any(|a| a.provider == "freebuff"));
     }
 
     #[test]
@@ -460,6 +523,58 @@ mod tests {
         assert!(
             data.get("expireTime").is_none(),
             "must NOT invent expireTime when absent"
+        );
+    }
+
+    #[test]
+    fn parse_freebuff_account() {
+        let acc = map_connection(&freebuff_item()).unwrap();
+        assert_eq!(acc.provider, "freebuff");
+        assert_eq!(acc.email.as_deref(), Some("freebuff-1"));
+        assert_eq!(acc.quota_limit, 0);
+        assert_eq!(acc.quota_remaining, 0);
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(data["token"], "cb_farm-token-1234567890");
+        assert!(data.get("uid").unwrap().is_null());
+        assert!(data["modelsFetchedAt"].is_null());
+        assert!(data.get("email").is_none());
+    }
+
+    #[test]
+    fn freebuff_token_uid_split() {
+        let mut item = freebuff_item();
+        item["token"] = json!("cb_long-token-value:uid-777");
+        let acc = map_connection(&item).unwrap();
+        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        assert_eq!(data["token"], "cb_long-token-value");
+        assert_eq!(data["uid"], "uid-777");
+    }
+
+    #[test]
+    fn freebuff_missing_token_error() {
+        let mut item = freebuff_item();
+        item.as_object_mut().unwrap().remove("token");
+        assert_eq!(map_connection(&item).unwrap_err(), "freebuff: missing token");
+
+        let mut blank = freebuff_item();
+        blank["token"] = json!("   ");
+        assert_eq!(map_connection(&blank).unwrap_err(), "freebuff: missing token");
+    }
+
+    #[test]
+    fn split_token_uid_variants() {
+        assert_eq!(
+            split_token_uid("cb_tok"),
+            ("cb_tok".into(), None)
+        );
+        assert_eq!(
+            split_token_uid("cb_tok:u1"),
+            ("cb_tok".into(), Some("u1".into()))
+        );
+        assert_eq!(split_token_uid("cb_tok:"), ("cb_tok".into(), None));
+        assert_eq!(
+            split_token_uid("  cb_tok : u2 "),
+            ("cb_tok".into(), Some("u2".into()))
         );
     }
 }

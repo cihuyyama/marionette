@@ -1,17 +1,18 @@
 # AGENTS.md — Marionette
 
 ## Mission
-Build a **thin Rust OpenAI-compatible proxy pool** with three built-in providers:
+Build a **thin Rust OpenAI-compatible proxy pool** with four built-in providers:
 - `grok-cli` (first, complete)
 - `qoder` (after dashboard)
 - `blackbox` (after qoder; static API keys, farm via temp-mail signup)
+- `freebuff` (session-protocol upstream on codebuff.com; static `cb_…` account tokens, no refresh)
 
 Plus **BYOK** (user-supplied OpenAI-compatible endpoints: base URL + API key, 9Router-style) — a generic passthrough, not a farmed provider.
 
 Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full etteeum rewrite.
 
 ## Hard constraints
-1. **Do not** port all of etteeum-pool (no CodeBuddy/Kiro/Codex/Canva, no full pudidil/compression stack in v1). **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is allowed; it is a generic passthrough, not a new farmed provider. No other new built-in providers.
+1. **Do not** port all of etteeum-pool (no CodeBuddy/Kiro/Codex/Canva, no full pudidil/compression stack in v1). **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is allowed; it is a generic passthrough, not a new farmed provider. No other new built-in providers beyond the four listed in Mission.
 2. **Do not** put Playwright / browser automation in Rust v1.
 3. **Order locked:** skeleton → Grok CLI full → Admin JSON → React+Vite dashboard → **then** Qoder.
 4. Non-stream chat works before stream SSE.
@@ -32,7 +33,8 @@ Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full ett
 4. Dashboard `web/`: scaffold Vite first, then Impeccable craft (Overview, Accounts, Import, Smoke test, Settings)
 5. Qoder auth + chat (port from etteeum)
 6. Blackbox provider: static `sk-` API keys, `bb/` model prefix, quota kind none, local error classifier (403 = moderation → fallen, never cut), farm = novabox flow ported with our CF temp-mail worker
-7. Deploy polish (serve `web/dist`, systemd optional)
+7. Freebuff provider: session-protocol port of `refs/freebuff2api` engine — `fb/` model prefix, static `cb_…` account tokens, quota kind none, session/run lifecycle + Buffy envelope + SSE `{data:…}` unwrap, local classifier (banned/country_blocked → cut, session-gate errors → fallen + session evict, 429 quota → sealed)
+8. Deploy polish (serve `web/dist`, systemd optional)
 
 ## Code style
 **Rust**

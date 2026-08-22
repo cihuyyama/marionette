@@ -124,7 +124,7 @@ pub async fn patch_provider_settings(
     Path(provider): Path<String>,
     Json(body): Json<ProviderLbBody>,
 ) -> AppResult<Json<Value>> {
-    if provider != "grok-cli" && provider != "qoder" && provider != "blackbox" {
+    if provider != "grok-cli" && provider != "qoder" && provider != "blackbox" && provider != "freebuff" {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
     if body.load_balance.is_none() && body.pick_mode.is_none() {
@@ -438,6 +438,28 @@ pub async fn refresh_account(
                 .ensure_fresh_auth(&mut acc)
                 .await
                 .map_err(AppError::from)?;
+        }
+        "freebuff" => {
+            let data = acc.data_json();
+            let token = crate::providers::freebuff::FreebuffProvider::token_of(&data)
+                .ok_or_else(|| AppError::BadRequest("freebuff: missing token".into()))?;
+            match state.freebuff.fetch_user(&token).await {
+                Ok((uid, email)) => {
+                    let mut data = data;
+                    if let Some(uid) = uid {
+                        data["uid"] = json!(uid);
+                    }
+                    if acc.email.is_none() {
+                        if let Some(e) = email {
+                            acc.email = Some(e);
+                        }
+                    }
+                    acc.set_data_json(&data);
+                }
+                Err(e) => {
+                    return Err(AppError::from(e));
+                }
+            }
         }
         "byok" => {
             state
@@ -933,6 +955,24 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
                 .unwrap_or(false);
             if !has_key {
                 return Err("blackbox: missing apiKey");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "freebuff" => {
+            if masked(&data, &["token"]) {
+                return Err("freebuff: token is masked");
+            }
+            let has_token = data
+                .get("token")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_token {
+                return Err("freebuff: missing token");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {
@@ -1635,6 +1675,7 @@ fn normalize_import_items(body: &Value) -> AppResult<Vec<Value>> {
         || body.get("personalToken").is_some()
         || body.get("apiKey").is_some()
         || body.get("api_key").is_some()
+        || body.get("token").is_some()
         || body.get("data").is_some()
     {
         return Ok(vec![body.clone()]);
@@ -1657,6 +1698,8 @@ async fn upsert_import_item(
                 "blackbox"
             } else if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
                 "qoder"
+            } else if item.get("token").is_some() {
+                "freebuff"
             } else {
                 "grok-cli"
             }

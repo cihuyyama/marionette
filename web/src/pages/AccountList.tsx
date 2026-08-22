@@ -748,6 +748,11 @@ export function AccountList() {
                             {byokBaseUrl(a)}
                           </div>
                         )}
+                      {a.provider === "freebuff" && freebuffUid(a) && (
+                        <div className="row-sub-hint" title="Upstream uid">
+                          uid {freebuffUid(a)}
+                        </div>
+                      )}
                       {a.last_error && (
                         <div
                           className="row-error-hint"
@@ -827,7 +832,9 @@ export function AccountList() {
                     </td>
                     <td>
                       <div className="actions-cell">
-                        {provider !== "blackbox" && provider !== "byok" && (
+                        {provider !== "blackbox" &&
+                          provider !== "freebuff" &&
+                          provider !== "byok" && (
                           <button
                             type="button"
                             className="btn btn-sm"
@@ -1134,7 +1141,9 @@ export function AccountList() {
                   Reset quota
                 </button>
               )}
-              {provider !== "blackbox" && provider !== "byok" && (
+              {provider !== "blackbox" &&
+                provider !== "freebuff" &&
+                provider !== "byok" && (
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -1328,6 +1337,11 @@ function fmtGrokBilling(res: import("../lib/api").GrokBilling): string {
 
 function byokBaseUrl(a: Account): string | null {
   const raw = a.data?.baseUrl ?? a.data?.base_url;
+  return typeof raw === "string" && raw.trim() ? raw : null;
+}
+
+function freebuffUid(a: Account): string | null {
+  const raw = a.data?.uid;
   return typeof raw === "string" && raw.trim() ? raw : null;
 }
 

@@ -8,13 +8,14 @@
 
 ## 1. What this is
 
-Thin **Rust** OpenAI-compatible **proxy pool** with three built-in providers + BYOK:
+Thin **Rust** OpenAI-compatible **proxy pool** with four built-in providers + BYOK:
 
 | Provider ID | Model prefix | Auth |
 |-------------|--------------|------|
 | `grok-cli` | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | `qoder` | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` + userId/machineId |
 | `blackbox` | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh, no expiry) |
+| `freebuff` | `fb/*`, bare `freebuff*` | static `cb_…` account token (no refresh; session protocol upstream) |
 | `byok` | `<slug>/*` (user-chosen slug) | user-supplied base URL + static API key (OpenAI-compatible) |
 
 Plus a **React + Vite + TypeScript** admin SPA under `web/` (dark-only, LoTM soft).
@@ -27,8 +28,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 
 ## 2. Golden rules (hard constraints)
 
-1. **Only** `grok-cli`, `qoder`, and `blackbox` as built-in providers. **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is a generic passthrough, not a new farmed provider. Do not add CodeBuddy/Kiro/Codex/Canva/etc.
-2. **Do not** port all of etteeum (no full pudidil/compression stack in v1).
+1. **Only** `grok-cli`, `qoder`, `blackbox`, and `freebuff` as built-in providers. **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is a generic passthrough, not a new farmed provider. Do not add CodeBuddy/Kiro/Codex/Canva/etc.2. **Do not** port all of etteeum (no full pudidil/compression stack in v1).
 3. **Do not** put Playwright / browser automation in the Rust binary.
 4. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
 5. **Mask tokens** in every admin JSON response (`db::mask_token` / `mask_secrets`).
@@ -252,6 +252,7 @@ Error JSON shape:
 - starts with `gcli/` **or** `grok` **or** contains `grok` → `"grok-cli"`
 - starts with `qd/` **or** `qoder` → `"qoder"`
 - starts with `bb/` **or** `blackbox` → `"blackbox"` (branch **before** grok: upstream ids like `blackboxai/x-ai/grok-4.3` contain "grok")
+- starts with `fb/` **or** `freebuff` → `"freebuff"` (session-protocol upstream on codebuff.com)
 - starts with `combo/` → virtual combo (no direct provider; `provider_id_for_model` returns None)
 - else → unknown model (400)
 
@@ -266,6 +267,8 @@ Error JSON shape:
 **Qoder:** `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/lite`, `qd/qmodel_preview` (Qwen3.8-Max-Preview), `qd/qmodel_latest`, `qd/qmodel1`, `qd/kmodel_latest` (Kimi-K3), `qd/kmodel1` (Kimi-K2.7-Code), `qd/gm51model1` (GLM-5.2), `qd/dmodel1`, `qd/dfmodel1`, `qd/mmodel` (MiniMax-M3) — one listed id per live upstream; legacy aliases (`qmodel`, `kmodel`, `gm51model`, …) still route in `model_cfg`
 
 **Blackbox:** `bb/z-ai/glm-5.2`, `bb/blackboxai/moonshotai/kimi-k3`, `bb/blackboxai/x-ai/grok-4.3`, `bb/blackboxai/openai/gpt-5.4`, `bb/blackboxai/anthropic/claude-sonnet-4.5`, `bb/blackboxai/google/gemini-3.5-flash`, `bb/blackboxai/blackbox-pro`, … (~20 curated ids from the live `api.blackbox.ai/v1/models` catalog) — bare `blackboxai/*` and `z-ai/*` upstream ids also route to blackbox
+
+**Freebuff:** `fb/deepseek/deepseek-v4-flash` (default), `fb/deepseek/deepseek-v4-pro`, `fb/mimo/mimo-v2.5`, `fb/minimax/minimax-m3`, `fb/z-ai/glm-5.2`, `fb/openai/gpt-5.6-luna` — upstream ids keep inner slashes; session protocol on `www.codebuff.com` (sessions cached 30 min per account+model — creation consumes daily quota)
 
 **Combos:** `combo/<slug>` virtual chat models are admin-created (not in `default_models()`); active ones are merged into `/v1/models` + `/admin/models` at request time (`models.rs::models_payload`, `owned_by="combo"`). Targets must be canonical concrete chat catalog ids — no aliases, no `combo/*`, no image-only `*imagine-image*`.
 
@@ -565,6 +568,7 @@ Do not modify those repos unless the user explicitly asks.
 | 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
 | 6 Blackbox provider + farm | code complete (provider `bb/`, static `sk-` keys, local classifier, `blackbox_farm` novabox-port w/ our CF temp-mail); live farm validation pending |
 | 6.5 BYOK provider | code complete (`byok` static base-URL+API-key passthrough; `<slug>/<model>` routing; `POST /admin/byok` + auto/manual models fetch; slug-scoped picks; local classifier 401 cut / 429 seal / 402-403 fallen; dashboard Custom (BYOK)); 205 lib + 24 smoke pass |
+| 6.7 Freebuff provider | code complete (`fb/` native session-protocol port of `refs/freebuff2api`; static `cb_…` tokens; session cache w/ 30-min TTL + run-chain; Buffy envelope + `{data:…}` SSE unwrap; local classifier banned/country_blocked→cut, marker-drift→fallen, session-gate→fallen+evict, 429→sealed; dashboard Freebuff; NO farm); 237 lib + 31 smoke pass; live smoke needs `cb_` token |
 | 7 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

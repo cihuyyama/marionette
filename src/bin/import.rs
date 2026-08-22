@@ -9,8 +9,8 @@ use uuid::Uuid;
 fn usage() {
     eprintln!(
         "Usage:
-  marionette-import --file <path.json> [--provider grok-cli|qoder|blackbox] [--replace] [--db path]
-  marionette-import --from-9router <data.sqlite> [--provider grok-cli|qoder|blackbox] [--replace] [--db path]
+  marionette-import --file <path.json> [--provider grok-cli|qoder|blackbox|freebuff] [--replace] [--db path]
+  marionette-import --from-9router <data.sqlite> [--provider grok-cli|qoder|blackbox|freebuff] [--replace] [--db path]
   marionette-import --from-9router-backup <backup.json> [--replace] [--db path]
 
 Env: MARIONETTE_DB (default ./data/marionette.sqlite)

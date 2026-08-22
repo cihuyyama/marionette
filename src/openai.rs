@@ -79,6 +79,8 @@ pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
         // "grok" (e.g. blackboxai/x-ai/grok-4.3) and the grok arm uses
         // contains("grok"), which would steal them.
         Some("blackbox")
+    } else if model.starts_with("fb/") || model.starts_with("freebuff") {
+        Some("freebuff")
     } else if model.starts_with("gcli/") || model.starts_with("grok") {
         Some("grok-cli")
     } else if model.starts_with("qd/") || model.starts_with("qoder") {
@@ -197,6 +199,22 @@ fn bb(id: &'static str, display: &'static str) -> ModelObject {
         false,
         true,
         false,
+    )
+}
+
+/// Freebuff public ids are `fb/<upstream-id>`; upstream ids keep their inner
+/// slashes (upstream_model strips only the first `fb/` segment).
+fn fb(id: &'static str, display: &'static str, is_default: bool) -> ModelObject {
+    model(
+        id,
+        "freebuff",
+        Some(id),
+        Some(display),
+        None,
+        None,
+        false,
+        false,
+        is_default,
     )
 }
 
@@ -430,6 +448,12 @@ pub fn default_models() -> ModelsResponse {
             bb("bb/blackboxai/blackbox-pro", "Blackbox Pro"),
             bb("bb/blackboxai/amazon/nova-2-lite", "Nova 2 Lite"),
             bb("bb/blackboxai/meta/llama-3.1-70b", "Llama 3.1 70B"),
+            fb("fb/deepseek/deepseek-v4-flash", "DeepSeek-V4-Flash", true),
+            fb("fb/deepseek/deepseek-v4-pro", "DeepSeek-V4-Pro", false),
+            fb("fb/mimo/mimo-v2.5", "MiMo-v2.5", false),
+            fb("fb/minimax/minimax-m3", "MiniMax-M3", false),
+            fb("fb/z-ai/glm-5.2", "GLM-5.2", false),
+            fb("fb/openai/gpt-5.6-luna", "GPT-5.6-Luna", false),
         ],
     }
 }
@@ -579,6 +603,61 @@ mod tests {
             .find(|m| m.id == "bb/blackboxai/x-ai/grok-4.3")
             .expect("bb/blackboxai/x-ai/grok-4.3 in catalog");
         assert!(is_valid_combo_target(&grok43.id));
+    }
+
+    #[test]
+    fn freebuff_models_route_to_freebuff_not_grok() {
+        assert_eq!(provider_id_for_model("fb/deepseek/deepseek-v4-flash"), Some("freebuff"));
+        assert_eq!(provider_id_for_model("fb/openai/gpt-5.6-luna"), Some("freebuff"));
+        assert_eq!(provider_id_for_model("freebuff-model-x"), Some("freebuff"));
+        assert_eq!(provider_id_for_model("gcli/grok-4.5"), Some("grok-cli"));
+        assert_eq!(provider_id_for_model("grok-3"), Some("grok-cli"));
+        assert_eq!(provider_id_for_model("qd/auto"), Some("qoder"));
+        assert_eq!(provider_id_for_model("bb/z-ai/glm-5.2"), Some("blackbox"));
+        assert_eq!(provider_id_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn freebuff_upstream_model_keeps_inner_slashes() {
+        let req = ChatCompletionRequest {
+            model: "fb/deepseek/deepseek-v4-flash".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Value::String("hi".into()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            extra: Value::Object(Default::default()),
+        };
+        assert_eq!(req.provider_id(), Some("freebuff"));
+        assert_eq!(req.upstream_model(), "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn freebuff_catalog_entries_present() {
+        let models = default_models();
+        let fb_models: Vec<_> = models
+            .data
+            .iter()
+            .filter(|m| m.owned_by == "freebuff")
+            .collect();
+        assert_eq!(fb_models.len(), 6);
+        assert!(fb_models.iter().all(|m| m.id.starts_with("fb/")));
+        let flash = fb_models
+            .iter()
+            .find(|m| m.id == "fb/deepseek/deepseek-v4-flash")
+            .expect("fb/deepseek/deepseek-v4-flash in catalog");
+        assert!(flash.is_default, "deepseek-v4-flash is the freebuff default");
+        assert!(is_valid_combo_target("fb/deepseek/deepseek-v4-flash"));
+        assert!(is_valid_combo_target("fb/z-ai/glm-5.2"));
     }
 
     #[test]

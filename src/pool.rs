@@ -565,6 +565,7 @@ async fn handle_concrete_chat(
         "grok-cli" => state.grok.clone() as Arc<dyn Provider>,
         "qoder" => state.qoder.clone() as Arc<dyn Provider>,
         "blackbox" => state.blackbox.clone() as Arc<dyn Provider>,
+        "freebuff" => state.freebuff.clone() as Arc<dyn Provider>,
         "byok" => state.byok.clone() as Arc<dyn Provider>,
         other => return Err(AppError::NotImplemented(other.into())),
     };

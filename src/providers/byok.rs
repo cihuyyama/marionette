@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 /// Reserved BYOK slugs: any of these would collide with the static routing
 /// arms in `openai::provider_id_for_model` (checked case-insensitively).
-const RESERVED_BYOK_SLUGS: &[&str] = &["bb", "gcli", "qd", "combo"];
+const RESERVED_BYOK_SLUGS: &[&str] = &["bb", "fb", "gcli", "qd", "combo"];
 
 /// A BYOK endpoint is one `accounts` row; no quota budget (kind "none").
 pub const BYOK_PROVIDER: &str = "byok";
@@ -363,7 +363,11 @@ pub fn validate_byok_slug(slug: &str) -> Result<(), String> {
     if RESERVED_BYOK_SLUGS.contains(&lower.as_str()) {
         return Err(format!("slug '{slug}' is reserved for a built-in provider"));
     }
-    if lower.starts_with("blackbox") || lower.starts_with("qoder") || lower.contains("grok") {
+    if lower.starts_with("blackbox")
+        || lower.starts_with("freebuff")
+        || lower.starts_with("qoder")
+        || lower.contains("grok")
+    {
         return Err(format!(
             "slug '{slug}' is reserved (must not reference a built-in provider)"
         ));
@@ -505,10 +509,12 @@ mod tests {
         for slug in [
             "BB",
             "bb",
+            "fb",
             "gcli",
             "qd",
             "combo",
             "blackbox-x",
+            "freebuff-x",
             "qoder",
             "my-grok-api",
             "has space",

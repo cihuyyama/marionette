@@ -8,7 +8,7 @@ import {
 } from "../lib/api";
 import { labelProvider, type ProviderId } from "../lib/providers";
 
-type Mode = "single" | "bulk" | "pat" | "keys";
+type Mode = "single" | "bulk" | "pat" | "keys" | "tokens";
 
 const BYOK_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -35,6 +35,7 @@ export function AddAccountModal({
   const modes = useMemo<Mode[]>(() => {
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "blackbox") return ["single", "keys", "bulk"];
+    if (provider === "freebuff") return ["single", "tokens", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);
@@ -47,6 +48,7 @@ export function AddAccountModal({
   const [clientId, setClientId] = useState("");
   const [personalToken, setPersonalToken] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [accountToken, setAccountToken] = useState("");
   const [bulkText, setBulkText] = useState("");
   const [skipExisting, setSkipExisting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +71,7 @@ export function AddAccountModal({
     setClientId("");
     setPersonalToken("");
     setApiKey("");
+    setAccountToken("");
     setBulkText("");
     setSkipExisting(false);
     setError(null);
@@ -115,11 +118,12 @@ export function AddAccountModal({
         byokApiKeyTrimmed !== ""
       );
     }
-    if (mode === "bulk" || mode === "pat" || mode === "keys") {
+    if (mode === "bulk" || mode === "pat" || mode === "keys" || mode === "tokens") {
       return Boolean(bulkText.trim());
     }
     if (provider === "qoder") return Boolean(personalToken.trim());
     if (provider === "blackbox") return Boolean(apiKey.trim());
+    if (provider === "freebuff") return Boolean(accountToken.trim());
     return Boolean(accessToken.trim() && refreshToken.trim());
   })();
 
@@ -213,6 +217,7 @@ export function AddAccountModal({
         clientId,
         personalToken,
         apiKey,
+        accountToken,
         bulkText,
       });
       const res = await importAccounts(body, undefined, skipExisting);
@@ -235,6 +240,7 @@ export function AddAccountModal({
     if (m === "single") return "Single";
     if (m === "pat") return "PAT lines";
     if (m === "keys") return "API key lines";
+    if (m === "tokens") return "Token lines";
     return "Bulk JSON";
   }
 
@@ -559,6 +565,38 @@ export function AddAccountModal({
             </>
           )}
 
+          {mode === "single" && provider === "freebuff" && (
+            <>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-email-f">Email / label (optional)</label>
+                <input
+                  id="add-email-f"
+                  className="input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="account@example.com"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-account-token">Account token</label>
+                <input
+                  id="add-account-token"
+                  className="input"
+                  value={accountToken}
+                  onChange={(e) => setAccountToken(e.target.value)}
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="cb_… (optionally cb_…:uid)"
+                />
+                <span className="hint">
+                  Static cb_… token — no auth refresh needed
+                </span>
+              </div>
+            </>
+          )}
+
           {mode === "pat" && (
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="add-pat-lines">Personal tokens (one per line)</label>
@@ -593,6 +631,25 @@ export function AddAccountModal({
             </div>
           )}
 
+          {mode === "tokens" && (
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label htmlFor="add-token-lines">Account tokens (one per line)</label>
+              <textarea
+                id="add-token-lines"
+                className="textarea"
+                rows={10}
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                placeholder={"cb_…\ncb_…:uid"}
+                required
+                spellCheck={false}
+              />
+              <span className="hint">
+                Line = cb_… token, or cb_…:uid to record the upstream uid
+              </span>
+            </div>
+          )}
+
           {mode === "bulk" && (
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="add-bulk-json">JSON array or object</label>
@@ -607,7 +664,9 @@ export function AddAccountModal({
                     ? '[{"email":"a@b.com","personalToken":"..."}]'
                     : provider === "blackbox"
                       ? '[{"email":"a@b.com","apiKey":"sk-..."}]'
-                      : '[{"email":"a@b.com","accessToken":"...","refreshToken":"..."}]'
+                      : provider === "freebuff"
+                        ? '[{"email":"a@b.com","token":"cb_..."}]'
+                        : '[{"email":"a@b.com","accessToken":"...","refreshToken":"..."}]'
                 }
                 required
                 spellCheck={false}
@@ -675,8 +734,17 @@ type Fields = {
   clientId: string;
   personalToken: string;
   apiKey: string;
+  accountToken: string;
   bulkText: string;
 };
+
+function splitFreebuffToken(raw: string): Record<string, string> {
+  const idx = raw.indexOf(":");
+  if (idx <= 0) return { token: raw };
+  const token = raw.slice(0, idx).trim();
+  const uid = raw.slice(idx + 1).trim();
+  return uid ? { token, uid } : { token };
+}
 
 function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
   if (mode === "single") {
@@ -696,6 +764,14 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
       if (f.email.trim()) row.email = f.email.trim();
       return row;
     }
+    if (provider === "freebuff") {
+      const row: Record<string, string> = {
+        provider,
+        ...splitFreebuffToken(f.accountToken.trim()),
+      };
+      if (f.email.trim()) row.email = f.email.trim();
+      return row;
+    }
     const row: Record<string, string> = {
       provider,
       accessToken: f.accessToken.trim(),
@@ -705,6 +781,18 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
     if (f.expiresAt.trim()) row.expiresAt = f.expiresAt.trim();
     if (f.clientId.trim()) row.clientId = f.clientId.trim();
     return row;
+  }
+
+  if (mode === "tokens") {
+    const lines = f.bulkText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) throw new Error("No tokens");
+    return lines.map((line) => ({
+      provider,
+      ...splitFreebuffToken(line),
+    }));
   }
 
   if (mode === "pat" || mode === "keys") {

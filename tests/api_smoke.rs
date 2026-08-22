@@ -568,6 +568,152 @@ async fn byok_create_happy_path_and_duplicate_409() {
     assert_eq!(dup.status(), StatusCode::CONFLICT);
 }
 
+#[tokio::test]
+async fn provider_routing_freebuff() {
+    use marionette::openai::provider_id_for_model;
+    assert_eq!(provider_id_for_model("fb/deepseek/deepseek-v4-flash"), Some("freebuff"));
+    assert_eq!(provider_id_for_model("fb/z-ai/glm-5.2"), Some("freebuff"));
+    // bare freebuff prefix routes to freebuff
+    assert_eq!(provider_id_for_model("freebuff-x"), Some("freebuff"));
+    // existing providers unchanged
+    assert_eq!(provider_id_for_model("gcli/grok-4.5"), Some("grok-cli"));
+    assert_eq!(provider_id_for_model("grok-3"), Some("grok-cli"));
+    assert_eq!(provider_id_for_model("bb/z-ai/glm-5.2"), Some("blackbox"));
+    assert_eq!(provider_id_for_model("qd/auto"), Some("qoder"));
+    assert_eq!(provider_id_for_model("unknown-model"), None);
+}
+
+#[tokio::test]
+async fn freebuff_models_in_catalog() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    let data = v["data"].as_array().expect("data array");
+    let fb_ids: Vec<&str> = data
+        .iter()
+        .filter(|m| m["owned_by"] == "freebuff")
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(fb_ids.len(), 6, "expected 6 freebuff catalog entries");
+    assert!(fb_ids.contains(&"fb/deepseek/deepseek-v4-flash"));
+    assert!(fb_ids.contains(&"fb/openai/gpt-5.6-luna"));
+}
+
+#[tokio::test]
+async fn freebuff_import_mask_and_refresh_paths() {
+    let (app, _dir) = test_app().await;
+
+    // import a freebuff account via POST /admin/accounts (token inferred)
+    let imported = admin_request(
+        &app,
+        "POST",
+        "/admin/accounts",
+        Some(r#"{"provider":"freebuff","email":"fb-user-1","token":"cb_test-token-abcdef123456"}"#),
+    )
+    .await;
+    assert_eq!(imported.status(), StatusCode::OK);
+    let iv = body_json(imported).await;
+    assert_eq!(iv["inserted"], 1);
+
+    // GET /admin/accounts masks the token
+    let listed = admin_request(&app, "GET", "/admin/accounts?provider=freebuff", None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let lv = body_json(listed).await;
+    let accounts = lv["accounts"].as_array().expect("accounts array");
+    assert_eq!(accounts.len(), 1);
+    let acc = &accounts[0];
+    assert_eq!(acc["provider"], "freebuff");
+    assert_eq!(acc["email"], "fb-user-1");
+    let masked = acc["data"]["token"].as_str().expect("token present (masked)");
+    assert!(
+        masked.contains('…') || masked.contains("..."),
+        "token must be masked in admin listing, got: {masked}"
+    );
+    assert_eq!(acc["quota_kind"], "none");
+
+    let account_id = acc["id"].as_str().unwrap().to_string();
+
+    // refresh of an account WITHOUT a token → 400 (no network)
+    let no_token = admin_request(
+        &app,
+        "POST",
+        "/admin/accounts",
+        Some(r#"{"provider":"freebuff","email":"fb-user-2","token":""}"#),
+    )
+    .await;
+    assert_eq!(no_token.status(), StatusCode::OK);
+    let nv = body_json(no_token).await;
+    assert_eq!(nv["inserted"], 1);
+
+    let listed2 = admin_request(&app, "GET", "/admin/accounts?provider=freebuff", None).await;
+    let lv2 = body_json(listed2).await;
+    let empty_id = lv2["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["email"] == "fb-user-2")
+        .expect("fb-user-2 imported")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let refresh_bad = admin_request(&app, "POST", &format!("/admin/accounts/{empty_id}/refresh"), None).await;
+    assert_eq!(refresh_bad.status(), StatusCode::BAD_REQUEST);
+
+    // refresh of a non-existent account → 404
+    let refresh_404 = admin_request(&app, "POST", "/admin/accounts/ghost-id/refresh", None).await;
+    assert_eq!(refresh_404.status(), StatusCode::NOT_FOUND);
+
+    let deleted = admin_request(&app, "DELETE", &format!("/admin/accounts/{account_id}"), None).await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn freebuff_provider_settings_patchable() {
+    let (app, _dir) = test_app().await;
+    let res = admin_request(
+        &app,
+        "PATCH",
+        "/admin/providers/freebuff",
+        Some(r#"{"load_balance":"least_used"}"#),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["provider"], "freebuff");
+    assert_eq!(v["load_balance"], "least_used");
+}
+
+#[tokio::test]
+async fn freebuff_byok_slug_reserved() {
+    let (app, _dir) = test_app().await;
+    for slug in ["fb", "freebuff-x"] {
+        let res = post_byok(
+            &app,
+            &format!(
+                r#"{{"slug":"{slug}","base_url":"https://openrouter.ai/api/v1","api_key":"sk-test","auto_fetch":false}}"#
+            ),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "reserved freebuff slug '{slug}' must be rejected"
+        );
+    }
+}
+
 async fn admin_request(
     app: &axum::Router,
     method: &str,

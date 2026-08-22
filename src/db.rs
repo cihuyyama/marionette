@@ -598,6 +598,7 @@ pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
         "grok-cli" => (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA),
         "qoder" => (0, 0),
         "blackbox" => (0, 0),
+        "freebuff" => (0, 0),
         "byok" => (0, 0),
         _ => (0, 0),
     }
@@ -608,6 +609,7 @@ pub fn quota_kind_for_provider(provider: &str) -> &'static str {
         "grok-cli" => "tokens",
         "qoder" => "credits",
         "blackbox" => "none",
+        "freebuff" => "none",
         "byok" => "none",
         _ => "none",
     }
@@ -785,7 +787,7 @@ pub async fn get_provider_settings(
 }
 
 pub async fn list_provider_settings(pool: &SqlitePool) -> AppResult<Vec<ProviderSettingsRow>> {
-    let providers = ["grok-cli", "qoder", "blackbox"];
+    let providers = ["grok-cli", "qoder", "blackbox", "freebuff"];
     let mut out = Vec::with_capacity(providers.len());
     for p in providers {
         out.push(get_provider_settings(pool, p).await?);
@@ -1320,7 +1322,11 @@ pub fn validate_combo_slug(slug: &str) -> AppResult<()> {
             "combo slug must be lowercase alphanumerics separated by single hyphens".into(),
         ));
     }
-    if s.contains("grok") || s.contains("qoder") || s.contains("blackbox") {
+    if s.contains("grok")
+        || s.contains("qoder")
+        || s.contains("blackbox")
+        || s.contains("freebuff")
+    {
         return Err(AppError::BadRequest(
             "combo slug must not contain provider names".into(),
         ));
@@ -1638,6 +1644,7 @@ fn mask_secrets(v: &mut Value) {
         "securityOauthToken",
         "machineToken",
         "apiKey",
+        "token",
         "access_token",
         "refresh_token",
         "id_token",
@@ -2724,6 +2731,7 @@ mod tests {
         assert_eq!(quota_kind_for_provider("qoder"), "credits");
         assert_eq!(quota_kind_for_provider("grok-cli"), "tokens");
         assert_eq!(quota_kind_for_provider("blackbox"), "none");
+        assert_eq!(quota_kind_for_provider("freebuff"), "none");
         assert_eq!(quota_kind_for_provider("other"), "none");
     }
 
@@ -2731,6 +2739,7 @@ mod tests {
     fn default_quota_qoder_stays_zero() {
         assert_eq!(default_quota_for_provider("qoder"), (0, 0));
         assert_eq!(default_quota_for_provider("blackbox"), (0, 0));
+        assert_eq!(default_quota_for_provider("freebuff"), (0, 0));
         assert_eq!(
             default_quota_for_provider("grok-cli"),
             (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA)
@@ -2749,6 +2758,21 @@ mod tests {
         assert_ne!(v["apiKey"], "sk-blackbox-very-long-secret");
         assert_ne!(v["api_key"], "sk-snake-case-long-secret");
         assert_eq!(v["password"], "hunter2", "password is not a masked key");
+    }
+
+    #[test]
+    fn mask_secrets_covers_freebuff_token() {
+        use serde_json::json;
+        let mut v = json!({
+            "token": "cb_freebuff-very-long-secret",
+            "uid": "u-123",
+            "modelsFetchedAt": null,
+        });
+        mask_secrets(&mut v);
+        let masked = v["token"].as_str().unwrap();
+        assert_ne!(masked, "cb_freebuff-very-long-secret");
+        assert!(masked.contains('…') || masked.contains("..."));
+        assert_eq!(v["uid"], "u-123", "uid is not a secret");
     }
 
     #[test]
@@ -3416,6 +3440,7 @@ mod tests {
         assert!(validate_combo_slug("grok-fast").is_err());
         assert!(validate_combo_slug("qoder-mix").is_err());
         assert!(validate_combo_slug("blackbox-mix").is_err());
+        assert!(validate_combo_slug("freebuff-mix").is_err());
         assert!(validate_combo_slug("bb-mix").is_ok());
     }
 
