@@ -605,9 +605,15 @@ async fn freebuff_models_in_catalog() {
         .filter(|m| m["owned_by"] == "freebuff")
         .filter_map(|m| m["id"].as_str())
         .collect();
-    assert_eq!(fb_ids.len(), 6, "expected 6 freebuff catalog entries");
+    assert_eq!(fb_ids.len(), 9, "expected 9 freebuff catalog entries (2026-08-22 refresh)");
     assert!(fb_ids.contains(&"fb/deepseek/deepseek-v4-flash"));
     assert!(fb_ids.contains(&"fb/openai/gpt-5.6-luna"));
+    // new models from the 2026-08-22 catalog refresh
+    assert!(fb_ids.contains(&"fb/mimo/mimo-v2.5"));
+    assert!(fb_ids.contains(&"fb/stealth/ox-alpha"));
+    assert!(fb_ids.contains(&"fb/anthropic/claude-fable-5"));
+    // minimax-m3 was withdrawn upstream on 2026-08-20
+    assert!(!fb_ids.contains(&"fb/minimax/minimax-m3"), "minimax-m3 must be withdrawn");
 }
 
 #[tokio::test]

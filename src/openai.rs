@@ -448,12 +448,15 @@ pub fn default_models() -> ModelsResponse {
             bb("bb/blackboxai/blackbox-pro", "Blackbox Pro"),
             bb("bb/blackboxai/amazon/nova-2-lite", "Nova 2 Lite"),
             bb("bb/blackboxai/meta/llama-3.1-70b", "Llama 3.1 70B"),
-            fb("fb/deepseek/deepseek-v4-flash", "DeepSeek-V4-Flash", true),
-            fb("fb/deepseek/deepseek-v4-pro", "DeepSeek-V4-Pro", false),
-            fb("fb/mimo/mimo-v2.5", "MiMo-v2.5", false),
-            fb("fb/minimax/minimax-m3", "MiniMax-M3", false),
-            fb("fb/z-ai/glm-5.2", "GLM-5.2", false),
-            fb("fb/openai/gpt-5.6-luna", "GPT-5.6-Luna", false),
+            fb("fb/mimo/mimo-v2.5", "MiMo-v2.5 (unlimited)", true),
+            fb("fb/deepseek/deepseek-v4-flash", "DeepSeek-V4-Flash (premium)", false),
+            fb("fb/deepseek/deepseek-v4-pro", "DeepSeek-V4-Pro (premium)", false),
+            fb("fb/openai/gpt-5.6-luna", "GPT-5.6-Luna (premium)", false),
+            fb("fb/z-ai/glm-5.2", "GLM-5.2 (referral)", false),
+            fb("fb/anthropic/claude-fable-5", "Claude-Fable-5 (trial)", false),
+            fb("fb/meta/muse-spark-1.2-contributor", "Muse-Spark-1.2 (web)", false),
+            fb("fb/crof/kimi-k3-eco", "Kimi-K3-Eco (web)", false),
+            fb("fb/stealth/ox-alpha", "Ox-Alpha (unmetered)", false),
         ],
     }
 }
@@ -649,15 +652,18 @@ mod tests {
             .iter()
             .filter(|m| m.owned_by == "freebuff")
             .collect();
-        assert_eq!(fb_models.len(), 6);
+        // 2026-08-22 catalog refresh: minimax-m3 withdrawn, added
+        // claude-fable-5 / muse-spark / kimi-k3-eco / ox-alpha.
+        assert_eq!(fb_models.len(), 9);
         assert!(fb_models.iter().all(|m| m.id.starts_with("fb/")));
-        let flash = fb_models
+        let mimo = fb_models
             .iter()
-            .find(|m| m.id == "fb/deepseek/deepseek-v4-flash")
-            .expect("fb/deepseek/deepseek-v4-flash in catalog");
-        assert!(flash.is_default, "deepseek-v4-flash is the freebuff default");
+            .find(|m| m.id == "fb/mimo/mimo-v2.5")
+            .expect("fb/mimo/mimo-v2.5 in catalog");
+        assert!(mimo.is_default, "mimo-v2.5 is the freebuff default (unlimited fallback)");
         assert!(is_valid_combo_target("fb/deepseek/deepseek-v4-flash"));
         assert!(is_valid_combo_target("fb/z-ai/glm-5.2"));
+        assert!(is_valid_combo_target("fb/stealth/ox-alpha"));
     }
 
     #[test]

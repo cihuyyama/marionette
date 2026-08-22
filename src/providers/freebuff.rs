@@ -54,8 +54,15 @@ const MODEL_EFFORTS: &[(&str, &[&str])] = &[
     ("deepseek/deepseek-v4-flash", &["low", "high", "max"]),
     ("deepseek/deepseek-v4-pro", &["low", "high", "max"]),
     ("openai/gpt-5.6-luna", &["low", "medium", "high", "xhigh", "max"]),
+    ("anthropic/claude-fable-5", &["low", "medium", "high", "xhigh", "max"]),
+    ("meta/muse-spark-1.2-contributor", &["low", "medium", "high", "xhigh"]),
+    ("stealth/ox-alpha", &["low", "medium", "high", "xhigh", "max"]),
 ];
 
+/// Upstream model → base2 root agent id (free-agents.ts
+/// FREEBUFF_ROOT_AGENT_ID_BY_MODEL, verified 2026-08-22 against main). The
+/// reviewer child is pinned per model server-side; we only start the root run
+/// plus the context-pruner child.
 fn agent_id_for_model(model: &str) -> &'static str {
     match model {
         "deepseek/deepseek-v4-flash" => "base2-free-deepseek-flash",
@@ -64,6 +71,10 @@ fn agent_id_for_model(model: &str) -> &'static str {
         "minimax/minimax-m3" => "base2-free-minimax-m3",
         "z-ai/glm-5.2" => "base2-free-glm",
         "openai/gpt-5.6-luna" => "base2-free-luna",
+        "anthropic/claude-fable-5" => "base2-free-fable",
+        "meta/muse-spark-1.2-contributor" => "base2-free-muse-spark",
+        "crof/kimi-k3-eco" => "base2-free-kimi-k3-eco",
+        "stealth/ox-alpha" => "base2-free-ox-alpha",
         _ => "base2-free",
     }
 }

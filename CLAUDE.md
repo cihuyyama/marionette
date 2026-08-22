@@ -26,23 +26,23 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 
 ---
 
-## 2. Golden rules (hard constraints)
+## 2. Golden rules (operational principles)
 
-1. **Only** `grok-cli`, `qoder`, `blackbox`, and `freebuff` as built-in providers. **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is a generic passthrough, not a new farmed provider. Do not add CodeBuddy/Kiro/Codex/Canva/etc.2. **Do not** port all of etteeum (no full pudidil/compression stack in v1).
-3. **Do not** put Playwright / browser automation in the Rust binary.
-4. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
-5. **Mask tokens** in every admin JSON response (`db::mask_token` / `mask_secrets`).
-6. **Grok vs Qoder error policy is different:**
-   - Global `classify_http_status` still maps HTTP codes; **pool effects** live in `apply_provider_error`.
+1. **Providers grow as needed.** Current: `grok-cli`, `qoder`, `blackbox`, `freebuff`, plus BYOK (user-supplied OpenAI-compatible endpoints). Add new ones when the use case is real — mirror verified upstream behavior, don't invent protocols.
+2. Browser automation stays in Python (`scripts/automation/`) — not in the Rust binary.
+3. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
+4. **Mask tokens** in every admin JSON response (`db::mask_token` / `mask_secrets`).
+5. **Per-provider error policies differ:**
+   - Global `classify_http_status` maps HTTP codes; **pool effects** live in `apply_provider_error`.
    - Grok **402 / PaymentRequired** (spending-limit / fleet credit) → **sealed** cooldown + `quota_remaining=0` (not cut). Auto-restores quota when cooldown ends.
    - Grok **403 / AccessDenied** and **AuthInvalid** (`invalid_grant`) → **cut**.
    - Qoder uses **local** `classify_qoder_status`: 402/403 → `RateLimited` (cooldown), **not** cut.
    - Blackbox uses **local** `classify_blackbox_status`: 401 → cut (dead key), 402 → sealed+quota-0, **403 → fallen (moderation, never cut/seal)**, 429 → sealed w/ parsed retry-after.
    - BYOK uses **local** `classify_byok_status`: 401 → cut (dead key), 429 → sealed w/ parsed retry-after, **402/403 → Upstream → fallen only** (`byok_billing_block` guard in `apply_provider_error` — user's own keys never sealed/cut for billing/permission).
-   - **Never change global `classify_http_status` to “fix” Qoder** — keep Qoder classification local.
-7. Dashboard: **React + Vite SPA only** — not Next, TanStack Start, or SSR.
-8. UI: `docs/DESIGN.md` — dark-only, English ops nav, soft LoTM on chips/empty/brand only.
-9. Prefer mirroring verified behavior from 9Router grok-cli + etteeum `qoder.ts` — do not invent Qoder auth.
+   - **Never change global `classify_http_status` to "fix" Qoder** — keep Qoder classification local.
+6. Dashboard stack: **React + Vite SPA** — not Next, TanStack Start, or SSR.
+7. UI: `docs/DESIGN.md` — dark-only, English ops nav, soft LoTM on chips/empty/brand only.
+8. Prefer mirroring verified behavior from live-probed upstreams + reference repos (`refs/`) — do not invent auth protocols.
 
 ---
 
@@ -268,7 +268,7 @@ Error JSON shape:
 
 **Blackbox:** `bb/z-ai/glm-5.2`, `bb/blackboxai/moonshotai/kimi-k3`, `bb/blackboxai/x-ai/grok-4.3`, `bb/blackboxai/openai/gpt-5.4`, `bb/blackboxai/anthropic/claude-sonnet-4.5`, `bb/blackboxai/google/gemini-3.5-flash`, `bb/blackboxai/blackbox-pro`, … (~20 curated ids from the live `api.blackbox.ai/v1/models` catalog) — bare `blackboxai/*` and `z-ai/*` upstream ids also route to blackbox
 
-**Freebuff:** `fb/deepseek/deepseek-v4-flash` (default), `fb/deepseek/deepseek-v4-pro`, `fb/mimo/mimo-v2.5`, `fb/minimax/minimax-m3`, `fb/z-ai/glm-5.2`, `fb/openai/gpt-5.6-luna` — upstream ids keep inner slashes; session protocol on `www.codebuff.com` (sessions cached 30 min per account+model — creation consumes daily quota)
+**Freebuff:** `fb/mimo/mimo-v2.5` (default, unlimited fallback), `fb/deepseek/deepseek-v4-flash` (premium), `fb/deepseek/deepseek-v4-pro` (premium), `fb/openai/gpt-5.6-luna` (premium), `fb/z-ai/glm-5.2` (referral), `fb/anthropic/claude-fable-5` (trial), `fb/meta/muse-spark-1.2-contributor`, `fb/crof/kimi-k3-eco`, `fb/stealth/ox-alpha` (unmetered) — catalog refreshed 2026-08-22 from upstream source (minimax-m3 withdrawn); upstream ids keep inner slashes; session protocol on `www.codebuff.com` (sessions cached 30 min per account+model — creation consumes daily quota; default LB = sequential/session-affinity)
 
 **Combos:** `combo/<slug>` virtual chat models are admin-created (not in `default_models()`); active ones are merged into `/v1/models` + `/admin/models` at request time (`models.rs::models_payload`, `owned_by="combo"`). Targets must be canonical concrete chat catalog ids — no aliases, no `combo/*`, no image-only `*imagine-image*`.
 
@@ -568,7 +568,7 @@ Do not modify those repos unless the user explicitly asks.
 | 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
 | 6 Blackbox provider + farm | code complete (provider `bb/`, static `sk-` keys, local classifier, `blackbox_farm` novabox-port w/ our CF temp-mail); live farm validation pending |
 | 6.5 BYOK provider | code complete (`byok` static base-URL+API-key passthrough; `<slug>/<model>` routing; `POST /admin/byok` + auto/manual models fetch; slug-scoped picks; local classifier 401 cut / 429 seal / 402-403 fallen; dashboard Custom (BYOK)); 205 lib + 24 smoke pass |
-| 6.7 Freebuff provider | code complete (`fb/` native session-protocol port of `refs/freebuff2api`; static `cb_…` tokens; session cache w/ 30-min TTL + run-chain; Buffy envelope + `{data:…}` SSE unwrap; local classifier banned/country_blocked→cut, marker-drift→fallen, session-gate→fallen+evict, 429→sealed; dashboard Freebuff; NO farm); 237 lib + 31 smoke pass; live smoke needs `cb_` token |
+| 6.7 Freebuff provider | code complete (`fb/` native session-protocol port of `refs/freebuff2api`; static `cb_…` tokens; session cache w/ 30-min TTL + run-chain; Buffy envelope + `{data:…}` SSE unwrap; local classifier banned/country_blocked→cut, marker-drift→fallen, session-gate→fallen+evict, 429→sealed; dashboard Freebuff; NO farm); 237 lib + 31 smoke pass; **live e2e verified 2026-08-22** (device-code token → import → chat 200 first try) |
 | 7 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

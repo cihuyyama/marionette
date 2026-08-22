@@ -763,9 +763,18 @@ pub async fn get_provider_settings(
         return Ok(row);
     }
     let now = now_rfc3339();
+    // freebuff defaults to sequential (session affinity): a freebuff session
+    // lasts ~1h and serves many requests, so one account should drain its
+    // session before rotating. Round-robin would burn one session slot per
+    // account on every burst. Existing rows are never touched.
+    let default_lb = if provider == "freebuff" {
+        LoadBalance::Sequential
+    } else {
+        LoadBalance::default()
+    };
     let row = ProviderSettingsRow {
         provider: provider.into(),
-        load_balance: LoadBalance::default().as_str().into(),
+        load_balance: default_lb.as_str().into(),
         sticky_account_id: None,
         rr_cursor: None,
         pick_mode: QoderPickMode::default().as_str().into(),
@@ -3184,6 +3193,23 @@ mod tests {
             .unwrap();
         assert_eq!(acc.id, "byok-a");
         assert_eq!(strategy, LoadBalance::RoundRobin);
+    }
+
+    #[tokio::test]
+    async fn freebuff_provider_settings_default_is_sequential() {
+        let (pool, _dir) = temp_db("fbsettings").await;
+        let settings = get_provider_settings(&pool, "freebuff").await.unwrap();
+        assert_eq!(
+            LoadBalance::parse(&settings.load_balance),
+            Some(LoadBalance::Sequential),
+            "freebuff must default to sequential (session affinity)"
+        );
+        let other = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(
+            LoadBalance::parse(&other.load_balance),
+            Some(LoadBalance::RoundRobin),
+            "other providers keep the round-robin default"
+        );
     }
 
     #[tokio::test]
