@@ -1,40 +1,15 @@
 # AGENTS.md — Marionette
 
 ## Mission
-Build a **thin Rust OpenAI-compatible proxy pool** with four built-in providers:
-- `grok-cli` (first, complete)
-- `qoder` (after dashboard)
-- `blackbox` (after qoder; static API keys, farm via temp-mail signup)
-- `freebuff` (session-protocol upstream on codebuff.com; static `cb_…` account tokens, no refresh)
+A **Rust OpenAI-compatible proxy pool** with a React + Vite admin dashboard. Built to grow: providers, farms, integrations, and features are added as needed.
 
-Plus **BYOK** (user-supplied OpenAI-compatible endpoints: base URL + API key, 9Router-style) — a generic passthrough, not a farmed provider.
+Current providers: `grok-cli`, `qoder`, `blackbox`, `freebuff`, plus **BYOK** (user-supplied OpenAI-compatible endpoints).
 
-Plus a **React + Vite admin dashboard** (after Grok + Admin API), not a full etteeum rewrite.
-
-## Hard constraints
-1. **Do not** port all of etteeum-pool (no CodeBuddy/Kiro/Codex/Canva, no full pudidil/compression stack in v1). **Exception:** BYOK (`byok` — user-supplied OpenAI-compatible endpoints, static base URL + API key, 9Router-style) is allowed; it is a generic passthrough, not a new farmed provider. No other new built-in providers beyond the four listed in Mission.
-2. **Do not** put Playwright / browser automation in Rust v1.
-3. **Order locked:** skeleton → Grok CLI full → Admin JSON → React+Vite dashboard → **then** Qoder.
-4. Non-stream chat works before stream SSE.
-5. Secrets never committed: `.env`, `data/*.sqlite`, token dumps. **Mask tokens** in admin API responses.
-6. Prefer mirroring verified behavior from:
-   - 9Router grok-cli executor + token refresh
-   - etteeum `src/proxy/providers/qoder.ts` (Phase 5 only — do not invent)
-   - grok-farm inject format / grok-refresh-quota rules
-   - novabox (`refs/novabox`, MIT) for the Blackbox signup/key-harvest flow; our own CF temp-mail worker replaces catchmail.io
-   - Blackbox upstream: `api.blackbox.ai/v1/chat/completions` (OpenAI-shaped, Bearer sk-key, no refresh), live-probed
-7. Dashboard stack: **React + Vite + TS SPA only** — not TanStack Start / Next / SSR.
-8. UI design: follow `docs/DESIGN.md` (LoTM soft, dark-only, English ops nav). Use **Impeccable** + `frontend-ui-ux` when implementing `web/`.
-
-## Implementation order
-1. Scaffold Axum + `/health` + `/v1/models` + env + SQLite (`accounts`, `api_keys`) + Provider trait + `grok_cli` stub
-2. Grok CLI E2E: import, refresh, non-stream → stream, 429 ~25h cooldown, 401 refresh, 402/403 disable
-3. Admin JSON `/admin/*` with `MARIONETTE_ADMIN_KEY` (separate from pool key) + CORS for Vite
-4. Dashboard `web/`: scaffold Vite first, then Impeccable craft (Overview, Accounts, Import, Smoke test, Settings)
-5. Qoder auth + chat (port from etteeum)
-6. Blackbox provider: static `sk-` API keys, `bb/` model prefix, quota kind none, local error classifier (403 = moderation → fallen, never cut), farm = novabox flow ported with our CF temp-mail worker
-7. Freebuff provider: session-protocol port of `refs/freebuff2api` engine — `fb/` model prefix, static `cb_…` account tokens, quota kind none, session/run lifecycle + Buffy envelope + SSE `{data:…}` unwrap, local classifier (banned/country_blocked → cut, session-gate errors → fallen + session evict, 429 quota → sealed)
-8. Deploy polish (serve `web/dist`, systemd optional)
+## Principles (not gates)
+- **Secrets never committed**: `.env`, `data/*.sqlite`, token dumps. **Mask tokens** in admin API responses.
+- Browser automation lives in Python under `scripts/automation/` — not in the Rust binary.
+- Prefer mirroring verified behavior (live-probed upstreams, reference repos in `refs/`) over inventing protocols.
+- Dashboard stack: React + Vite + TS SPA. UI follows `docs/DESIGN.md` (LoTM soft, dark-only, English ops nav).
 
 ## Code style
 **Rust**
