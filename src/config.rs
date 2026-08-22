@@ -16,6 +16,7 @@ pub struct Config {
     pub refresh_interval_secs: u64,
     pub refresh_workers: usize,
     pub proxy_health_interval_secs: u64,
+    pub grok_proxy: Option<String>,
     pub static_dir: Option<PathBuf>,
 }
 
@@ -73,6 +74,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
+            grok_proxy: env::var("MARIONETTE_GROK_PROXY")
+                .ok()
+                .filter(|s| !s.is_empty()),
             static_dir,
         }
     }

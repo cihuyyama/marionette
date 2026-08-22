@@ -74,15 +74,22 @@ pub struct GrokCliProvider {
 
 impl GrokCliProvider {
     pub fn new(config: Arc<Config>) -> Self {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(15))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .tcp_keepalive(std::time::Duration::from_secs(60))
-            .tcp_nodelay(true)
-            .build()
-            .expect("reqwest client");
+            .tcp_nodelay(true);
+        if let Some(proxy_url) = &config.grok_proxy {
+            if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
+                builder = builder.proxy(proxy);
+                tracing::info!(proxy = %proxy_url, "grok-cli upstream routed via proxy");
+            } else {
+                tracing::warn!(proxy = %proxy_url, "invalid MARIONETTE_GROK_PROXY, using direct");
+            }
+        }
+        let client = builder.build().expect("reqwest client");
         Self { client, config }
     }
 
@@ -368,6 +375,11 @@ impl Provider for GrokCliProvider {
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError> {
+        let client = if self.config.grok_proxy.is_some() {
+            &self.client
+        } else {
+            client
+        };
         let data = account.data_json();
         let token = Self::access_token(&data)
             .ok_or_else(|| ProviderError::AuthInvalid("missing accessToken".into()))?;
