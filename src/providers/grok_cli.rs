@@ -18,11 +18,13 @@ use uuid::Uuid;
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing";
-const USER_AGENT: &str = "grok-shell/0.2.114 (linux; x86_64)";
+const USER_AGENT: &str = "grok-shell/1.0.5 (linux; x86_64)";
 const CLIENT_IDENTIFIER: &str = "grok-shell";
-const CLIENT_VERSION: &str = "0.2.114";
+const CLIENT_VERSION: &str = "1.0.5";
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
+const COMPACTIONS_REMAINING: &str = "1";
+const DOOM_LOOP_CHECK: &str = "1024";
 
 /// Returns Some(reason) when the access-token JWT payload marks the account
 /// as a bot ("bfs":1 or "bot_flag_source":1). Flagged accounts have thinking
@@ -51,6 +53,18 @@ pub fn jwt_payload_bot_flag(token: &str) -> Option<String> {
         return Some("bot_flag_source=1".to_string());
     }
     None
+}
+
+/// W3C Trace Context header (`traceparent`) as sent by grok-shell 1.0.5:
+/// `00-<32 hex trace-id>-<16 hex span-id>-01`.
+fn w3c_traceparent() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let trace: [u8; 16] = rng.gen();
+    let span: [u8; 8] = rng.gen();
+    let trace_hex: String = trace.iter().map(|b| format!("{b:02x}")).collect();
+    let span_hex: String = span.iter().map(|b| format!("{b:02x}")).collect();
+    format!("00-{trace_hex}-{span_hex}-01")
 }
 
 pub struct GrokCliProvider {
@@ -222,25 +236,29 @@ impl GrokCliProvider {
             .header("Accept", "text/event-stream")
             .header("User-Agent", USER_AGENT)
             .header("x-xai-token-auth", TOKEN_AUTH)
+            .header("x-authenticateresponse", "authenticate-response")
+            .header("x-grok-client-mode", "headless")
             .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
             .header("x-grok-client-version", CLIENT_VERSION)
-            .header("x-authenticateresponse", "authenticate-response")
             .header("x-compaction-at", COMPACTION_AT)
+            .header("x-compactions-remaining", COMPACTIONS_REMAINING)
+            .header("x-grok-doom-loop-check", DOOM_LOOP_CHECK)
+            .header("traceparent", w3c_traceparent())
             .header("x-grok-session-id", &session_id)
             .header("x-grok-conv-id", &session_id)
             .header("x-grok-req-id", &req_id)
             .header("x-grok-turn-idx", "1")
             .header("x-grok-model-override", &upstream_model_id);
 
-        if let Some(email) = data.get("email").and_then(|v| v.as_str()) {
-            req_builder = req_builder.header("x-email", email);
-        }
         if let Some(user_id) = data
             .get("userId")
             .or_else(|| data.get("user_id"))
             .and_then(|v| v.as_str())
         {
-            req_builder = req_builder.header("x-userid", user_id);
+            req_builder = req_builder.header("x-grok-user-id", user_id);
+        }
+        if let Some(agent_id) = data.get("agentId").and_then(|v| v.as_str()) {
+            req_builder = req_builder.header("x-grok-agent-id", agent_id);
         }
 
         let resp = req_builder
@@ -383,6 +401,7 @@ impl Provider for GrokCliProvider {
 
         let session_id = Uuid::new_v4().to_string();
         let req_id = Uuid::new_v4().to_string();
+        body["prompt_cache_key"] = json!(session_id);
 
         let mut req_builder = client
             .post(RESPONSES_URL)
@@ -391,21 +410,25 @@ impl Provider for GrokCliProvider {
             .header("Accept", "text/event-stream")
             .header("User-Agent", USER_AGENT)
             .header("x-xai-token-auth", TOKEN_AUTH)
+            .header("x-authenticateresponse", "authenticate-response")
+            .header("x-grok-client-mode", "headless")
             .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
             .header("x-grok-client-version", CLIENT_VERSION)
-            .header("x-authenticateresponse", "authenticate-response")
             .header("x-compaction-at", COMPACTION_AT)
+            .header("x-compactions-remaining", COMPACTIONS_REMAINING)
+            .header("x-grok-doom-loop-check", DOOM_LOOP_CHECK)
+            .header("traceparent", w3c_traceparent())
             .header("x-grok-session-id", &session_id)
             .header("x-grok-conv-id", &session_id)
             .header("x-grok-req-id", &req_id)
             .header("x-grok-turn-idx", "1")
             .header("x-grok-model-override", &upstream_model_id);
 
-        if let Some(email) = data.get("email").and_then(|v| v.as_str()) {
-            req_builder = req_builder.header("x-email", email);
-        }
         if let Some(user_id) = data.get("userId").or_else(|| data.get("user_id")).and_then(|v| v.as_str()) {
-            req_builder = req_builder.header("x-userid", user_id);
+            req_builder = req_builder.header("x-grok-user-id", user_id);
+        }
+        if let Some(agent_id) = data.get("agentId").and_then(|v| v.as_str()) {
+            req_builder = req_builder.header("x-grok-agent-id", agent_id);
         }
 
         let resp = req_builder
@@ -816,7 +839,10 @@ fn estimate_tokens(text: &str) -> i64 {
 }
 
 fn supports_reasoning_effort(model: &str) -> bool {
-    model == "grok-4.5" || model.starts_with("grok-4.5-")
+    model == "grok-4.5"
+        || model.starts_with("grok-4.5-")
+        || model == "grok-4.6"
+        || model.starts_with("grok-4.6-")
 }
 
 fn normalize_effort(raw: Option<&str>) -> String {
@@ -1649,14 +1675,32 @@ mod tests {
         let (m, e) = resolve_model_and_effort("grok-4.5-high");
         assert_eq!(m, "grok-4.5");
         assert_eq!(e.as_deref(), Some("high"));
+        let (m, e) = resolve_model_and_effort("grok-4.6-xhigh");
+        assert_eq!(m, "grok-4.6");
+        assert_eq!(e.as_deref(), Some("xhigh"));
     }
 
     #[test]
-    fn effort_gate_only_grok_45() {
+    fn effort_gate_grok_45_and_46() {
         assert!(supports_reasoning_effort("grok-4.5"));
         assert!(supports_reasoning_effort("grok-4.5-something"));
+        assert!(supports_reasoning_effort("grok-4.6"));
+        assert!(supports_reasoning_effort("grok-4.6-low"));
         assert!(!supports_reasoning_effort("grok-build"));
         assert!(!supports_reasoning_effort("grok-4"));
+    }
+
+    #[test]
+    fn traceparent_shape() {
+        let tp = w3c_traceparent();
+        let parts: Vec<&str> = tp.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00");
+        assert_eq!(parts[1].len(), 32);
+        assert_eq!(parts[2].len(), 16);
+        assert_eq!(parts[3], "01");
+        assert!(parts[1].chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

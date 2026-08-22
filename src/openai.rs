@@ -223,6 +223,11 @@ pub fn default_models() -> ModelsResponse {
         object: "list",
         data: vec![
             gcli("gcli/grok-build", "grok-build", "Grok Build"),
+            gcli("gcli/grok-4.6", "grok-4.6", "Grok 4.6"),
+            gcli("gcli/grok-4.6-xhigh", "grok-4.6-xhigh", "Grok 4.6 xHigh"),
+            gcli("gcli/grok-4.6-high", "grok-4.6-high", "Grok 4.6 High"),
+            gcli("gcli/grok-4.6-medium", "grok-4.6-medium", "Grok 4.6 Medium"),
+            gcli("gcli/grok-4.6-low", "grok-4.6-low", "Grok 4.6 Low"),
             gcli("gcli/grok-4.5", "grok-4.5", "Grok 4.5"),
             gcli("gcli/grok-4.5-xhigh", "grok-4.5-xhigh", "Grok 4.5 xHigh"),
             gcli("gcli/grok-4.5-high", "grok-4.5-high", "Grok 4.5 High"),
