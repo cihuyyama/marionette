@@ -83,7 +83,10 @@ export default function App() {
                 path="accounts/byok"
                 element={<Navigate to="/accounts" replace />}
               />
-              <Route path="accounts/byok/:slug" element={<AccountList />} />
+              <Route
+                path="accounts/byok/:slug"
+                element={<AccountList fixedProvider="byok" />}
+              />
               <Route path="accounts/:provider" element={<AccountList />} />
               <Route path="models" element={<ModelsPage />} />
               <Route path="combos" element={<CombosPage />} />

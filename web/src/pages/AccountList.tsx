@@ -38,13 +38,17 @@ const STATUS_PILLS: { id: StatusFilter; label: string }[] = [
 
 const PER_PAGE = 25;
 
-export function AccountList() {
+export function AccountList({
+  fixedProvider,
+}: {
+  fixedProvider?: ProviderId;
+} = {}) {
   const { provider: rawProvider, slug } = useParams<{
     provider: string;
     slug: string;
   }>();
   const navigate = useNavigate();
-  const provider = isProviderId(rawProvider) ? rawProvider : null;
+  const provider = isProviderId(rawProvider) ? rawProvider : fixedProvider ?? null;
   const byokSlug = provider === "byok" && slug ? slug : null;
 
   const [accounts, setAccounts] = useState<Account[]>([]);
