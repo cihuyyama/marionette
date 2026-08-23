@@ -71,6 +71,8 @@ pub async fn connection(
 pub struct ProviderLbBody {
     pub load_balance: Option<String>,
     pub pick_mode: Option<String>,
+    pub sticky_account_id: Option<String>,
+    pub sticky_pinned: Option<bool>,
 }
 
 fn provider_settings_json(row: &db::ProviderSettingsRow) -> Value {
@@ -83,6 +85,7 @@ fn provider_settings_json(row: &db::ProviderSettingsRow) -> Value {
         "pick_mode": pick.as_str(),
         "pick_mode_label": pick.label(),
         "sticky_account_id": row.sticky_account_id,
+        "sticky_pinned": row.sticky_pinned != 0,
         "rr_cursor": row.rr_cursor,
         "updated_at": row.updated_at,
     })
@@ -127,9 +130,13 @@ pub async fn patch_provider_settings(
     if provider != "grok-cli" && provider != "qoder" && provider != "blackbox" && provider != "freebuff" {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
-    if body.load_balance.is_none() && body.pick_mode.is_none() {
+    if body.load_balance.is_none()
+        && body.pick_mode.is_none()
+        && body.sticky_account_id.is_none()
+        && body.sticky_pinned.is_none()
+    {
         return Err(AppError::BadRequest(
-            "provide load_balance and/or pick_mode".into(),
+            "provide load_balance, pick_mode, and/or sticky_account_id/sticky_pinned".into(),
         ));
     }
     if let Some(ref lb) = body.load_balance {
@@ -139,6 +146,26 @@ pub async fn patch_provider_settings(
             ))
         })?;
         db::set_provider_load_balance(&state.pool, &provider, strategy).await?;
+    }
+    if body.sticky_account_id.is_some() || body.sticky_pinned.is_some() {
+        let current = db::get_provider_settings(&state.pool, &provider).await?;
+        let account_id = match body.sticky_account_id.as_deref() {
+            Some("") => None,
+            Some(id) => Some(id.to_string()),
+            None => current.sticky_account_id.clone(),
+        };
+        if let Some(ref id) = account_id {
+            let acc = db::get_account(&state.pool, id).await?;
+            if acc.provider != provider {
+                return Err(AppError::BadRequest(format!(
+                    "sticky account {id} belongs to provider {}, not {provider}",
+                    acc.provider
+                )));
+            }
+        }
+        let pinned = body.sticky_pinned.unwrap_or(true);
+        db::set_provider_sticky_pin(&state.pool, &provider, account_id.as_deref(), pinned)
+            .await?;
     }
     if let Some(ref mode_s) = body.pick_mode {
         if provider != "qoder" {

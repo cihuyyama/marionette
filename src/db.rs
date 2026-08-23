@@ -590,6 +590,17 @@ async fn migrate_provider_settings_columns(pool: &SqlitePool) -> AppResult<()> {
             return Err(e.into());
         }
     }
+    if let Err(e) = sqlx::query(
+        "ALTER TABLE provider_settings ADD COLUMN sticky_pinned INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await
+    {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            return Err(e.into());
+        }
+    }
     Ok(())
 }
 
@@ -746,6 +757,7 @@ pub struct ProviderSettingsRow {
     pub sticky_account_id: Option<String>,
     pub rr_cursor: Option<String>,
     pub pick_mode: String,
+    pub sticky_pinned: i64,
     pub updated_at: String,
 }
 
@@ -778,6 +790,7 @@ pub async fn get_provider_settings(
         sticky_account_id: None,
         rr_cursor: None,
         pick_mode: QoderPickMode::default().as_str().into(),
+        sticky_pinned: 0,
         updated_at: now.clone(),
     };
     sqlx::query(
@@ -814,7 +827,7 @@ pub async fn set_provider_load_balance(
     sqlx::query(
         r#"
         UPDATE provider_settings
-        SET load_balance = ?, sticky_account_id = NULL, rr_cursor = NULL, updated_at = ?
+        SET load_balance = ?, sticky_account_id = NULL, rr_cursor = NULL, sticky_pinned = 0, updated_at = ?
         WHERE provider = ?
         "#,
     )
@@ -870,17 +883,44 @@ async fn set_sticky_account(
     pool: &SqlitePool,
     provider: &str,
     account_id: Option<&str>,
+    pinned: bool,
 ) -> AppResult<()> {
     let now = now_rfc3339();
+    let pinned_i = if account_id.is_some() && pinned { 1 } else { 0 };
     sqlx::query(
-        "UPDATE provider_settings SET sticky_account_id = ?, updated_at = ? WHERE provider = ?",
+        "UPDATE provider_settings SET sticky_account_id = ?, sticky_pinned = ?, updated_at = ? WHERE provider = ?",
     )
     .bind(account_id)
+    .bind(pinned_i)
     .bind(&now)
     .bind(provider)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Operator-controlled sticky pin. A pinned sticky is never overwritten by
+/// fallback picks (`note_pick_success`) and never cleared by transient
+/// failures (`note_pick_failure`); only an explicit admin change moves it.
+pub async fn set_provider_sticky_pin(
+    pool: &SqlitePool,
+    provider: &str,
+    account_id: Option<&str>,
+    pinned: bool,
+) -> AppResult<ProviderSettingsRow> {
+    let _ = get_provider_settings(pool, provider).await?;
+    let now = now_rfc3339();
+    let pinned_i = if account_id.is_some() && pinned { 1 } else { 0 };
+    sqlx::query(
+        "UPDATE provider_settings SET sticky_account_id = ?, sticky_pinned = ?, updated_at = ? WHERE provider = ?",
+    )
+    .bind(account_id)
+    .bind(pinned_i)
+    .bind(&now)
+    .bind(provider)
+    .execute(pool)
+    .await?;
+    get_provider_settings(pool, provider).await
 }
 
 pub async fn note_pick_success(
@@ -891,7 +931,19 @@ pub async fn note_pick_success(
 ) -> AppResult<()> {
     match strategy {
         LoadBalance::RoundRobin => set_rr_cursor(pool, provider, account_id).await,
-        LoadBalance::Sequential => set_sticky_account(pool, provider, Some(account_id)).await,
+        LoadBalance::Sequential => {
+            let settings = get_provider_settings(pool, provider).await?;
+            match settings.sticky_account_id.as_deref() {
+                None => set_sticky_account(pool, provider, Some(account_id), false).await,
+                Some(cur) if cur == account_id => Ok(()),
+                // Unpinned auto-sticky follows the last successful account.
+                Some(_) if settings.sticky_pinned == 0 => {
+                    set_sticky_account(pool, provider, Some(account_id), false).await
+                }
+                // Pinned: a fallback success must not clobber the operator pin.
+                Some(_) => Ok(()),
+            }
+        }
         _ => Ok(()),
     }
 }
@@ -904,8 +956,10 @@ pub async fn note_pick_failure(
 ) -> AppResult<()> {
     if strategy == LoadBalance::Sequential {
         let settings = get_provider_settings(pool, provider).await?;
-        if settings.sticky_account_id.as_deref() == Some(account_id) {
-            set_sticky_account(pool, provider, None).await?;
+        if settings.sticky_account_id.as_deref() == Some(account_id)
+            && settings.sticky_pinned == 0
+        {
+            set_sticky_account(pool, provider, None, false).await?;
         }
     }
     Ok(())
@@ -3209,6 +3263,84 @@ mod tests {
             LoadBalance::parse(&other.load_balance),
             Some(LoadBalance::RoundRobin),
             "other providers keep the round-robin default"
+        );
+    }
+
+    fn grok_account(id: &str) -> Account {
+        let mut a = sample_account();
+        a.id = id.into();
+        a.email = Some(format!("{id}@example.test"));
+        a
+    }
+
+    #[tokio::test]
+    async fn pinned_sticky_survives_fallback_success_and_transient_failure() {
+        let (pool, _dir) = temp_db("stickypin").await;
+        upsert_account(&pool, &grok_account("a1")).await.unwrap();
+        upsert_account(&pool, &grok_account("a2")).await.unwrap();
+        set_provider_load_balance(&pool, "grok-cli", LoadBalance::Sequential)
+            .await
+            .unwrap();
+
+        set_provider_sticky_pin(&pool, "grok-cli", Some("a1"), true)
+            .await
+            .unwrap();
+
+        note_pick_success(&pool, "grok-cli", LoadBalance::Sequential, "a2")
+            .await
+            .unwrap();
+        let s = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(
+            s.sticky_account_id.as_deref(),
+            Some("a1"),
+            "fallback success must not clobber a pinned sticky"
+        );
+        assert_eq!(s.sticky_pinned, 1);
+
+        note_pick_failure(&pool, "grok-cli", LoadBalance::Sequential, "a1")
+            .await
+            .unwrap();
+        let s = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(
+            s.sticky_account_id.as_deref(),
+            Some("a1"),
+            "transient failure must not clear a pinned sticky"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpinned_sticky_follows_success_and_clears_on_failure() {
+        let (pool, _dir) = temp_db("stickyauto").await;
+        upsert_account(&pool, &grok_account("a1")).await.unwrap();
+        upsert_account(&pool, &grok_account("a2")).await.unwrap();
+        set_provider_load_balance(&pool, "grok-cli", LoadBalance::Sequential)
+            .await
+            .unwrap();
+
+        note_pick_success(&pool, "grok-cli", LoadBalance::Sequential, "a1")
+            .await
+            .unwrap();
+        let s = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(s.sticky_account_id.as_deref(), Some("a1"));
+        assert_eq!(s.sticky_pinned, 0);
+
+        note_pick_success(&pool, "grok-cli", LoadBalance::Sequential, "a2")
+            .await
+            .unwrap();
+        let s = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(
+            s.sticky_account_id.as_deref(),
+            Some("a2"),
+            "unpinned auto-sticky follows the last successful account"
+        );
+
+        note_pick_failure(&pool, "grok-cli", LoadBalance::Sequential, "a2")
+            .await
+            .unwrap();
+        let s = get_provider_settings(&pool, "grok-cli").await.unwrap();
+        assert_eq!(
+            s.sticky_account_id, None,
+            "unpinned sticky still clears when the sticky account fails"
         );
     }
 
