@@ -1,5 +1,7 @@
 # Rust
 /target/
+/target2/
+/target3/
 **/*.rs.bk
 **/__pycache__/
 **/*.pyc
