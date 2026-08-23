@@ -1,46 +1,68 @@
 import { lazy, Suspense } from "react";
+import type { ComponentType } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Overview } from "./pages/Overview";
 import { AuthGate } from "./components/AuthGate";
 
-const Accounts = lazy(() =>
+const CHUNK_RELOAD_KEY = "marionette.chunk-reload.v1";
+
+function lazyPage(
+  importer: () => Promise<{ default: ComponentType }>,
+): ReturnType<typeof lazy> {
+  return lazy(() =>
+    importer()
+      .then((m) => {
+        sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+        return m;
+      })
+      .catch((err) => {
+        if (!sessionStorage.getItem(CHUNK_RELOAD_KEY)) {
+          sessionStorage.setItem(CHUNK_RELOAD_KEY, "1");
+          window.location.reload();
+        }
+        throw err;
+      }),
+  );
+}
+
+const Accounts = lazyPage(() =>
   import("./pages/Accounts").then((m) => ({ default: m.Accounts })),
 );
-const AccountList = lazy(() =>
+const AccountList = lazyPage(() =>
   import("./pages/AccountList").then((m) => ({ default: m.AccountList })),
 );
-const ModelsPage = lazy(() =>
+const ModelsPage = lazyPage(() =>
   import("./pages/Models").then((m) => ({ default: m.ModelsPage })),
 );
-const CombosPage = lazy(() =>
+const CombosPage = lazyPage(() =>
   import("./pages/Combos").then((m) => ({ default: m.CombosPage })),
 );
-const ApiKeysPage = lazy(() =>
+const ApiKeysPage = lazyPage(() =>
   import("./pages/ApiKeys").then((m) => ({ default: m.ApiKeysPage })),
 );
-const ActivityPage = lazy(() =>
+const ActivityPage = lazyPage(() =>
   import("./pages/Activity").then((m) => ({ default: m.ActivityPage })),
 );
-const SetupPage = lazy(() =>
+const SetupPage = lazyPage(() =>
   import("./pages/Setup").then((m) => ({ default: m.SetupPage })),
 );
-const SmokeTest = lazy(() =>
+const SmokeTest = lazyPage(() =>
   import("./pages/SmokeTest").then((m) => ({ default: m.SmokeTest })),
 );
-const SettingsPage = lazy(() =>
+const SettingsPage = lazyPage(() =>
   import("./pages/Settings").then((m) => ({ default: m.SettingsPage })),
 );
-const AutomationPage = lazy(() =>
+const AutomationPage = lazyPage(() =>
   import("./pages/Automation").then((m) => ({ default: m.AutomationPage })),
 );
-const FarmPage = lazy(() =>
+const FarmPage = lazyPage(() =>
   import("./pages/Farm").then((m) => ({ default: m.FarmPage })),
 );
-const InjectJobPage = lazy(() =>
+const InjectJobPage = lazyPage(() =>
   import("./pages/InjectJob").then((m) => ({ default: m.InjectJobPage })),
 );
-const ProxiesPage = lazy(() =>
+const ProxiesPage = lazyPage(() =>
   import("./pages/Proxies").then((m) => ({ default: m.ProxiesPage })),
 );
 

@@ -53,14 +53,35 @@ export function ModelsPage() {
   }, [copied]);
 
   const owners = useMemo(() => {
-    const set = new Set(models.map((m) => m.owned_by));
-    return ["all", ...Array.from(set).sort()];
+    const set = new Set<string>();
+    const byokSlugs = new Set<string>();
+    for (const m of models) {
+      if (m.owned_by === "byok") {
+        set.add("byok");
+        if (m.slug) byokSlugs.add(m.slug);
+      } else {
+        set.add(m.owned_by);
+      }
+    }
+    return [
+      "all",
+      ...Array.from(set).sort(),
+      ...Array.from(byokSlugs)
+        .sort()
+        .map((s) => `byok:${s}`),
+    ];
   }, [models]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return models.filter((m) => {
-      if (owner !== "all" && m.owned_by !== owner) return false;
+      if (owner.startsWith("byok:")) {
+        if (!(m.owned_by === "byok" && m.slug === owner.slice(5))) {
+          return false;
+        }
+      } else if (owner !== "all" && m.owned_by !== owner) {
+        return false;
+      }
       if (!q) return true;
       return (
         m.id.toLowerCase().includes(q) ||
@@ -139,7 +160,11 @@ export function ModelsPage() {
               className={`status-pill${owner === o ? " active" : ""}`}
               onClick={() => setOwner(o)}
             >
-              {o === "all" ? "All" : labelProvider(o)}
+              {o === "all"
+                ? "All"
+                : o.startsWith("byok:")
+                  ? `Custom · ${o.slice(5)}`
+                  : labelProvider(o)}
             </button>
           ))}
         </div>
@@ -155,7 +180,7 @@ export function ModelsPage() {
                 “Refresh models” on its row to fetch the model list.
               </p>
               <div className="btn-row" style={{ justifyContent: "center" }}>
-                <Link to="/accounts/byok" className="btn btn-primary">
+                <Link to="/accounts" className="btn btn-primary">
                   Accounts → Custom (BYOK)
                 </Link>
               </div>
