@@ -1037,6 +1037,10 @@ async fn commandcode_dynamic_models_dedupe_against_static_catalog() {
     let data = serde_json::json!({
         "apiKey": "user_test_commandcode_key",
         "models": ["xiaomi/mimo-v2.5", "zai-org/GLM-5.3"],
+        "modelMeta": [
+            { "id": "xiaomi/mimo-v2.5", "name": "MiMo V2.5", "context_length": 1000000 },
+            { "id": "zai-org/GLM-5.3", "name": "GLM-5.3", "context_length": 1000000 }
+        ],
         "modelsFetchedAt": "2026-08-24T00:00:00.000Z"
     });
     let acc = db::Account {
@@ -1084,5 +1088,29 @@ async fn commandcode_dynamic_models_dedupe_against_static_catalog() {
         ids.iter().filter(|i| **i == "cmc/zai-org/GLM-5.3").count(),
         1,
         "dynamic-only entry must appear exactly once"
+    );
+    let by_id = |id: &str| {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"].as_str() == Some(id))
+            .cloned()
+            .expect("model present")
+    };
+    assert_eq!(
+        by_id("cmc/xiaomi/mimo-v2.5")["max_input"].as_str(),
+        Some("1M"),
+        "static entry enriched with live context_length"
+    );
+    assert_eq!(
+        by_id("cmc/xiaomi/mimo-v2.5")["display_name"].as_str(),
+        Some("MiMo V2.5"),
+        "static entry display_name from live meta"
+    );
+    assert_eq!(
+        by_id("cmc/zai-org/GLM-5.3")["max_input"].as_str(),
+        Some("1M"),
+        "dynamic entry carries max_input"
     );
 }
