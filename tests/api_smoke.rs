@@ -1029,3 +1029,60 @@ async fn byok_models_listed_only_after_models_present() {
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn commandcode_dynamic_models_dedupe_against_static_catalog() {
+    let (app, dir) = test_app().await;
+    let pool = db::connect(&dir.join("test.sqlite")).await.unwrap();
+    let data = serde_json::json!({
+        "apiKey": "user_test_commandcode_key",
+        "models": ["xiaomi/mimo-v2.5", "zai-org/GLM-5.3"],
+        "modelsFetchedAt": "2026-08-24T00:00:00.000Z"
+    });
+    let acc = db::Account {
+        id: "cc-test-1".into(),
+        provider: "commandcode".into(),
+        email: Some("cc-test".into()),
+        name: None,
+        is_active: 1,
+        priority: 0,
+        data: data.to_string(),
+        cooldown_until: None,
+        last_error: None,
+        last_used_at: None,
+        created_at: "t".into(),
+        updated_at: "t".into(),
+        quota_limit: 0,
+        quota_remaining: 0,
+    };
+    db::upsert_account(&pool, &acc).await.unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    let ids: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids.iter().filter(|i| **i == "cmc/xiaomi/mimo-v2.5").count(),
+        1,
+        "static entry must not duplicate when the dynamic catalog lists it"
+    );
+    assert_eq!(
+        ids.iter().filter(|i| **i == "cmc/zai-org/GLM-5.3").count(),
+        1,
+        "dynamic-only entry must appear exactly once"
+    );
+}
