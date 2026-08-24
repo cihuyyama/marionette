@@ -18,6 +18,7 @@ use axum::response::Response;
 use chrono::Utc;
 use futures_util::StreamExt;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -28,6 +29,31 @@ const CC_VERSION: &str = "1.4.4";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 pub const COMMANDCODE_PROVIDER: &str = "commandcode";
+
+/// One upstream catalog row (`GET /provider/v1/models`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcModelInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<i64>,
+}
+
+pub fn fmt_context_length(tokens: i64) -> String {
+    if tokens >= 1_000_000 {
+        let m = tokens / 1_000_000;
+        if tokens % 1_000_000 == 0 {
+            format!("{m}M")
+        } else {
+            format!("{}K", tokens / 1000)
+        }
+    } else if tokens >= 1000 {
+        format!("{}K", tokens / 1000)
+    } else {
+        format!("{tokens}")
+    }
+}
 
 /// Static catalog (mirrors Cartethyia `COMMANDCODE_MODELS`). Upstream ids keep
 /// their own slashes; public ids are `cmc/<upstream-id>`.
@@ -83,7 +109,7 @@ impl CommandCodeProvider {
     /// Fetch the live model catalog. The Go plan blocks chat on
     /// `/provider/v1` but the models list is open, so the catalog stays
     /// current (Ox Alpha etc. appear as soon as upstream lists them).
-    pub async fn fetch_models(&self, api_key: &str) -> Result<Vec<String>, ProviderError> {
+    pub async fn fetch_models(&self, api_key: &str) -> Result<Vec<CcModelInfo>, ProviderError> {
         let resp = self
             .client
             .get(MODELS_URL)
@@ -105,11 +131,21 @@ impl CommandCodeProvider {
         let mut out = Vec::new();
         if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
             for m in arr {
-                if let Some(id) = m.get("id").and_then(|s| s.as_str()) {
-                    if !id.trim().is_empty() {
-                        out.push(id.trim().to_string());
-                    }
+                let Some(id) = m.get("id").and_then(|s| s.as_str()) else {
+                    continue;
+                };
+                let id = id.trim();
+                if id.is_empty() {
+                    continue;
                 }
+                out.push(CcModelInfo {
+                    id: id.to_string(),
+                    name: m
+                        .get("name")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
+                    context_length: m.get("context_length").and_then(|v| v.as_i64()),
+                });
             }
         }
         Ok(out)
@@ -643,6 +679,15 @@ impl Provider for CommandCodeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_context_length_units() {
+        assert_eq!(fmt_context_length(1_000_000), "1M");
+        assert_eq!(fmt_context_length(1_048_576), "1048K");
+        assert_eq!(fmt_context_length(256_000), "256K");
+        assert_eq!(fmt_context_length(262_144), "262K");
+        assert_eq!(fmt_context_length(900), "900");
+    }
 
     #[test]
     fn decode_text_delta() {

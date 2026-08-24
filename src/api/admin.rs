@@ -787,16 +787,18 @@ pub async fn refetch_commandcode_models(
         .await
         .map_err(AppError::from)?;
     let fetched_at = db::now_rfc3339();
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
     let mut new_data = data;
-    new_data["models"] = json!(models);
+    new_data["models"] = json!(ids);
+    new_data["modelMeta"] = json!(models);
     new_data["modelsFetchedAt"] = json!(fetched_at);
     acc.set_data_json(&new_data);
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
     Ok(Json(json!({
-        "models": models,
+        "models": ids,
         "fetched_at": fetched_at,
-        "count": models.len(),
+        "count": ids.len(),
     })))
 }
 
@@ -1741,8 +1743,10 @@ async fn prime_commandcode_models(state: &AppState) -> AppResult<Option<String>>
     match state.commandcode.fetch_models(&api_key).await {
         Ok(models) => {
             let fetched_at = db::now_rfc3339();
+            let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
             let mut new_data = data;
-            new_data["models"] = json!(models);
+            new_data["models"] = json!(ids);
+            new_data["modelMeta"] = json!(models);
             new_data["modelsFetchedAt"] = json!(fetched_at);
             let mut acc = acc;
             acc.set_data_json(&new_data);

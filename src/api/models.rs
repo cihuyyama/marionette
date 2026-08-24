@@ -36,19 +36,51 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
         if acc.is_active == 0 {
             continue;
         }
-        let models = acc.data_json().get("models").and_then(|v| v.as_array()).cloned();
+        let acc_data = acc.data_json();
+        let meta: std::collections::HashMap<String, crate::providers::commandcode::CcModelInfo> =
+            acc_data
+                .get("modelMeta")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            serde_json::from_value::<
+                                crate::providers::commandcode::CcModelInfo,
+                            >(m.clone())
+                            .ok()
+                            .map(|info| (info.id.clone(), info))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        let models = acc_data.get("models").and_then(|v| v.as_array()).cloned();
         let Some(models) = models else { continue };
         for m in models {
             let Some(id) = m.as_str() else { continue };
             let full = format!("cmc/{id}");
+            let info = meta.get(id);
+            let max_input = info
+                .and_then(|i| i.context_length)
+                .map(crate::providers::commandcode::fmt_context_length);
+            let display = info
+                .and_then(|i| i.name.clone())
+                .unwrap_or_else(|| id.to_string());
             if !seen_ids.insert(full.clone()) {
+                // Static entry already listed: enrich it with live meta.
+                if let Some(entry) = data.iter_mut().find(|e| e["id"] == full) {
+                    if let Some(mi) = &max_input {
+                        entry["max_input"] = json!(mi);
+                    }
+                    entry["display_name"] = json!(display);
+                }
                 continue;
             }
             data.push(json!({
                 "id": full,
                 "object": "model",
                 "owned_by": "commandcode",
-                "display_name": id,
+                "display_name": display,
+                "max_input": max_input,
                 "reasoning": true,
                 "vision": true,
                 "is_default": false,
