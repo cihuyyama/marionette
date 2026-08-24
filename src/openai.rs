@@ -608,6 +608,20 @@ mod tests {
     }
 
     #[test]
+    fn commandcode_models_route_to_commandcode() {
+        assert_eq!(
+            provider_id_for_model("cmc/xiaomi/mimo-v2.5"),
+            Some("commandcode")
+        );
+        assert_eq!(
+            provider_id_for_model("cmc/stealth/ox-alpha"),
+            Some("commandcode")
+        );
+        assert_eq!(provider_id_for_model("commandcode/x"), Some("commandcode"));
+        assert_eq!(provider_id_for_model("cc/x"), None);
+    }
+
+    #[test]
     fn blackbox_upstream_model_keeps_inner_slashes() {
         let req = ChatCompletionRequest {
             model: "bb/z-ai/glm-5.2".into(),

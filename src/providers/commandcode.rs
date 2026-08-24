@@ -567,7 +567,11 @@ impl Provider for CommandCodeProvider {
                 }
                 .normalized();
 
-                let finish_reason = if any_tool_calls { "tool_calls" } else { "stop" };
+                let finish_reason = if any_tool_calls {
+                    "tool_calls"
+                } else {
+                    map_finish(state.finish_reason.as_deref().unwrap_or("stop"))
+                };
                 let finish = json!({
                     "id": resp_id, "object": "chat.completion.chunk", "created": Utc::now().timestamp(), "model": req_model,
                     "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }]
