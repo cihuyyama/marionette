@@ -619,6 +619,14 @@ export function refreshByokModels(accountId: string, settings?: Settings) {
   );
 }
 
+export function refreshCommandCodeModels(accountId: string, settings?: Settings) {
+  return request<ByokModelsResult>(
+    `/admin/accounts/${encodeURIComponent(accountId)}/commandcode-models`,
+    { method: "POST", auth: "admin" },
+    settings,
+  );
+}
+
 export function importAccounts(
   body: unknown,
   settings?: Settings,

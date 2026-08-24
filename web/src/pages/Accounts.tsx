@@ -311,6 +311,7 @@ export function Accounts() {
       qoder: emptyCounts(),
       blackbox: emptyCounts(),
       freebuff: emptyCounts(),
+      commandcode: emptyCounts(),
     };
     for (const p of BUILTIN_PROVIDERS) {
       map[p] = countFor(accounts.filter((a) => a.provider === p));

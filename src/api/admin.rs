@@ -127,7 +127,12 @@ pub async fn patch_provider_settings(
     Path(provider): Path<String>,
     Json(body): Json<ProviderLbBody>,
 ) -> AppResult<Json<Value>> {
-    if provider != "grok-cli" && provider != "qoder" && provider != "blackbox" && provider != "freebuff" {
+    if provider != "grok-cli"
+        && provider != "qoder"
+        && provider != "blackbox"
+        && provider != "freebuff"
+        && provider != "commandcode"
+    {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
     if body.load_balance.is_none()
@@ -755,6 +760,39 @@ pub async fn refetch_byok_models(
     acc.updated_at = db::now_rfc3339();
     db::update_account(&state.pool, &acc).await?;
     propagate_byok_models(&state, &acc, &models, &fetched_at).await?;
+    Ok(Json(json!({
+        "models": models,
+        "fetched_at": fetched_at,
+        "count": models.len(),
+    })))
+}
+
+pub async fn refetch_commandcode_models(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let mut acc = db::get_account(&state.pool, &id).await?;
+    if acc.provider != "commandcode" {
+        return Err(AppError::NotFound(format!(
+            "account {id} is not a commandcode account"
+        )));
+    }
+    let data = acc.data_json();
+    let api_key = crate::providers::commandcode::CommandCodeProvider::api_key_of(&data)
+        .ok_or_else(|| AppError::BadRequest(format!("commandcode account {id} has no apiKey")))?;
+    let models = state
+        .commandcode
+        .fetch_models(&api_key)
+        .await
+        .map_err(AppError::from)?;
+    let fetched_at = db::now_rfc3339();
+    let mut new_data = data;
+    new_data["models"] = json!(models);
+    new_data["modelsFetchedAt"] = json!(fetched_at);
+    acc.set_data_json(&new_data);
+    acc.updated_at = db::now_rfc3339();
+    db::update_account(&state.pool, &acc).await?;
     Ok(Json(json!({
         "models": models,
         "fetched_at": fetched_at,
@@ -1671,11 +1709,52 @@ async fn run_import(
         }
     }
 
+    // Best-effort: seed the live commandcode catalog right after import so
+    // /v1/models shows the upstream list (Ox Alpha etc.) without a manual
+    // refresh click.
+    if inserted > 0 || updated > 0 {
+        if let Ok(Some(acc)) = prime_commandcode_models(state).await {
+            tracing::info!(account = %acc, "commandcode models primed");
+        }
+    }
+
     Ok(Json(json!({
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
     })))
+}
+
+async fn prime_commandcode_models(state: &AppState) -> AppResult<Option<String>> {
+    let rows = db::list_accounts(&state.pool, Some("commandcode"), None, None).await?;
+    let Some(acc) = rows.into_iter().find(|a| a.is_active != 0) else {
+        return Ok(None);
+    };
+    let data = acc.data_json();
+    if data.get("models").and_then(|v| v.as_array()).is_some() {
+        return Ok(None);
+    }
+    let Some(api_key) = crate::providers::commandcode::CommandCodeProvider::api_key_of(&data)
+    else {
+        return Ok(None);
+    };
+    match state.commandcode.fetch_models(&api_key).await {
+        Ok(models) => {
+            let fetched_at = db::now_rfc3339();
+            let mut new_data = data;
+            new_data["models"] = json!(models);
+            new_data["modelsFetchedAt"] = json!(fetched_at);
+            let mut acc = acc;
+            acc.set_data_json(&new_data);
+            acc.updated_at = db::now_rfc3339();
+            db::update_account(&state.pool, &acc).await?;
+            Ok(Some(acc.id))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "commandcode models prime failed");
+            Ok(None)
+        }
+    }
 }
 
 /// Case-insensitive provider+email existence check, mirroring the upsert

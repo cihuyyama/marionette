@@ -11,6 +11,7 @@ import {
   patchAccount,
   refreshAccount,
   refreshByokModels,
+  refreshCommandCodeModels,
   warmupQoderAccounts,
   type Account,
 } from "../lib/api";
@@ -172,7 +173,10 @@ export function AccountList({
       return next;
     });
     try {
-      const res = await refreshByokModels(a.id);
+      const res =
+        a.provider === "commandcode"
+          ? await refreshCommandCodeModels(a.id)
+          : await refreshByokModels(a.id);
       setByokRefreshed((prev) => ({
         ...prev,
         [a.id]: { count: res.count, fetched_at: res.fetched_at },
@@ -809,7 +813,7 @@ export function AccountList({
                       {a.last_used_at ? formatShort(a.last_used_at) : "—"}
                     </td>
                     <td className="health-cell" title={fmtCreditTitle(a)}>
-                      {a.provider === "byok" ? (
+                      {a.provider === "byok" || a.provider === "commandcode" ? (
                         <>
                           <ByokModelsInfo
                             a={a}
@@ -838,7 +842,8 @@ export function AccountList({
                       <div className="actions-cell">
                         {provider !== "blackbox" &&
                           provider !== "freebuff" &&
-                          provider !== "byok" && (
+                          provider !== "byok" &&
+                          provider !== "commandcode" && (
                           <button
                             type="button"
                             className="btn btn-sm"
@@ -863,6 +868,17 @@ export function AccountList({
                             className="btn btn-sm"
                             disabled={busy}
                             title="Re-fetch the model list from the endpoint"
+                            onClick={() => void handleByokRefreshModels(a)}
+                          >
+                            Models
+                          </button>
+                        )}
+                        {provider === "commandcode" && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Re-fetch the live model list from commandcode.ai"
                             onClick={() => void handleByokRefreshModels(a)}
                           >
                             Models
@@ -1073,6 +1089,16 @@ export function AccountList({
                   </dd>
                 </>
               )}
+              {detail.provider === "commandcode" && (
+                <>
+                  <dt>API key</dt>
+                  <dd className="mono">{byokApiKeyMasked(detail) ?? "—"}</dd>
+                  <dt>Models</dt>
+                  <dd>
+                    <ByokModelsInfo a={detail} refreshed={byokRefreshed[detail.id]} />
+                  </dd>
+                </>
+              )}
               <dt>Active</dt>
               <dd>{detail.is_active ? "true" : "false"}</dd>
               <dt>Priority</dt>
@@ -1147,7 +1173,8 @@ export function AccountList({
               )}
               {provider !== "blackbox" &&
                 provider !== "freebuff" &&
-                provider !== "byok" && (
+                provider !== "byok" &&
+                provider !== "commandcode" && (
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -1171,6 +1198,17 @@ export function AccountList({
                   className="btn btn-sm"
                   disabled={busyId === detail.id || bulkBusy}
                   title="Re-fetch the model list from the endpoint"
+                  onClick={() => void handleByokRefreshModels(detail)}
+                >
+                  Refresh models
+                </button>
+              )}
+              {provider === "commandcode" && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busyId === detail.id || bulkBusy}
+                  title="Re-fetch the live model list from commandcode.ai"
                   onClick={() => void handleByokRefreshModels(detail)}
                 >
                   Refresh models

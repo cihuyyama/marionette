@@ -22,7 +22,7 @@ use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "blackbox", "freebuff"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "blackbox", "freebuff", "commandcode"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -132,6 +132,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "qoder" => build_qoder_data(item),
         "blackbox" => build_blackbox_data(item),
         "freebuff" => build_freebuff_data(item),
+        "commandcode" => build_commandcode_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -241,6 +242,23 @@ fn build_blackbox_data(item: &Value) -> Result<Value, String> {
     let mut out = serde_json::Map::new();
     out.insert("apiKey".into(), json!(api_key));
     copy_str(item, &mut out, "password");
+
+    Ok(Value::Object(out))
+}
+
+/// commandcode data: a static bearer API key (`user_…`) for the
+/// api.commandcode.ai/alpha/generate NDJSON gateway — no OAuth, no refresh.
+fn build_commandcode_data(item: &Value) -> Result<Value, String> {
+    let api_key = item
+        .get("apiKey")
+        .or_else(|| item.get("api_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or("commandcode: missing apiKey")?;
+
+    let mut out = serde_json::Map::new();
+    out.insert("apiKey".into(), json!(api_key));
 
     Ok(Value::Object(out))
 }

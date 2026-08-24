@@ -28,6 +28,25 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
             "targets": targets,
         }));
     }
+    for acc in db::list_accounts(&state.pool, Some("commandcode"), None, None).await? {
+        if acc.is_active == 0 {
+            continue;
+        }
+        let models = acc.data_json().get("models").and_then(|v| v.as_array()).cloned();
+        let Some(models) = models else { continue };
+        for m in models {
+            let Some(id) = m.as_str() else { continue };
+            data.push(json!({
+                "id": format!("cmc/{id}"),
+                "object": "model",
+                "owned_by": "commandcode",
+                "display_name": id,
+                "reasoning": true,
+                "vision": true,
+                "is_default": false,
+            }));
+        }
+    }
     for acc in db::list_accounts(&state.pool, Some("byok"), None, None).await? {
         if acc.is_active == 0 {
             continue;

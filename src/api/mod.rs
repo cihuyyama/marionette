@@ -75,6 +75,10 @@ pub fn router(state: AppState) -> Router {
             "/admin/accounts/{id}/byok-models",
             post(admin::refetch_byok_models),
         )
+        .route(
+            "/admin/accounts/{id}/commandcode-models",
+            post(admin::refetch_commandcode_models),
+        )
         .route("/admin/accounts/{id}/grok-billing", get(admin::grok_billing))
         .route("/admin/accounts/export-pats", post(admin::export_qoder_pats))
         .route("/admin/accounts/export", post(admin::export_accounts))

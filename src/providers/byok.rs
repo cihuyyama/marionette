@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 /// Reserved BYOK slugs: any of these would collide with the static routing
 /// arms in `openai::provider_id_for_model` (checked case-insensitively).
-const RESERVED_BYOK_SLUGS: &[&str] = &["bb", "fb", "gcli", "qd", "combo"];
+const RESERVED_BYOK_SLUGS: &[&str] = &["bb", "fb", "gcli", "qd", "combo", "cmc"];
 
 /// A BYOK endpoint is one `accounts` row; no quota budget (kind "none").
 pub const BYOK_PROVIDER: &str = "byok";

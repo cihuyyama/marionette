@@ -36,6 +36,7 @@ export function AddAccountModal({
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "blackbox") return ["single", "keys", "bulk"];
     if (provider === "freebuff") return ["single", "tokens", "bulk"];
+    if (provider === "commandcode") return ["single", "keys", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);
@@ -123,6 +124,7 @@ export function AddAccountModal({
     }
     if (provider === "qoder") return Boolean(personalToken.trim());
     if (provider === "blackbox") return Boolean(apiKey.trim());
+    if (provider === "commandcode") return Boolean(apiKey.trim());
     if (provider === "freebuff") return Boolean(accountToken.trim());
     return Boolean(accessToken.trim() && refreshToken.trim());
   })();
@@ -565,6 +567,35 @@ export function AddAccountModal({
             </>
           )}
 
+          {mode === "single" && provider === "commandcode" && (
+            <>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-email-c">Email (optional)</label>
+                <input
+                  id="add-email-c"
+                  className="input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="account@example.com"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="add-apikey-c">API key</label>
+                <input
+                  id="add-apikey-c"
+                  className="input"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="user_..."
+                />
+              </div>
+            </>
+          )}
+
           {mode === "single" && provider === "freebuff" && (
             <>
               <div className="field" style={{ marginBottom: 0 }}>
@@ -757,6 +788,14 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
       return row;
     }
     if (provider === "blackbox") {
+      const row: Record<string, string> = {
+        provider,
+        apiKey: f.apiKey.trim(),
+      };
+      if (f.email.trim()) row.email = f.email.trim();
+      return row;
+    }
+    if (provider === "commandcode") {
       const row: Record<string, string> = {
         provider,
         apiKey: f.apiKey.trim(),

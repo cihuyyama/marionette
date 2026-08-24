@@ -74,6 +74,8 @@ pub fn strip_first_prefix_segment(model: &str) -> &str {
 pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
     if model.starts_with(COMBO_PREFIX) {
         None
+    } else if model.starts_with("cmc/") || model.starts_with("commandcode") {
+        Some("commandcode")
     } else if model.starts_with("bb/") || model.starts_with("blackbox") {
         // MUST precede the grok branches: some blackbox upstream ids contain
         // "grok" (e.g. blackboxai/x-ai/grok-4.3) and the grok arm uses
@@ -197,6 +199,22 @@ fn bb(id: &'static str, display: &'static str) -> ModelObject {
         None,
         None,
         false,
+        true,
+        false,
+    )
+}
+
+/// Command Code public ids are `cmc/<upstream-id>`; upstream ids keep their
+/// own slashes (upstream_model strips only the first `cmc/` segment).
+fn cmc(id: &'static str, display: &'static str) -> ModelObject {
+    model(
+        id,
+        "commandcode",
+        Some(id),
+        Some(display),
+        None,
+        None,
+        true,
         true,
         false,
     )
@@ -462,6 +480,23 @@ pub fn default_models() -> ModelsResponse {
             fb("fb/meta/muse-spark-1.2-contributor", "Muse-Spark-1.2 (web)", false),
             fb("fb/crof/kimi-k3-eco", "Kimi-K3-Eco (web)", false),
             fb("fb/stealth/ox-alpha", "Ox-Alpha (unmetered)", false),
+            cmc("cmc/moonshotai/Kimi-K2.6", "Kimi K2.6"),
+            cmc("cmc/moonshotai/Kimi-K3", "Kimi K3"),
+            cmc("cmc/moonshotai/Kimi-K2.7-Code", "Kimi K2.7 Code"),
+            cmc("cmc/qwen/qwen3.5-plus", "Qwen 3.5 Plus"),
+            cmc("cmc/Qwen/Qwen3.6-Plus", "Qwen 3.6 Plus"),
+            cmc("cmc/Qwen/Qwen3.7-Max", "Qwen 3.7 Max"),
+            cmc("cmc/minimax/minimax-m2.7-highspeed", "MiniMax M2.7"),
+            cmc("cmc/MiniMaxAI/MiniMax-M3", "MiniMax M3"),
+            cmc("cmc/z-ai/glm-5.1", "GLM 5.1"),
+            cmc("cmc/zai-org/GLM-5.2", "GLM 5.2"),
+            cmc("cmc/zai-org/GLM-5.2-Fast", "GLM 5.2 Fast"),
+            cmc("cmc/deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+            cmc("cmc/deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"),
+            cmc("cmc/xiaomi/mimo-v2.5-pro", "Xiaomi MiMo v2.5 Pro"),
+            cmc("cmc/xiaomi/mimo-v2.5", "Xiaomi MiMo v2.5"),
+            cmc("cmc/poolside/laguna-s-2.1-free", "Poolside Laguna S 2.1 Free"),
+            cmc("cmc/nvidia/nemotron-3-ultra-550b-a55b", "Nemotron 3 Ultra"),
         ],
     }
 }
