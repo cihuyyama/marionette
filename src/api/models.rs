@@ -28,6 +28,10 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
             "targets": targets,
         }));
     }
+    let mut seen_ids: std::collections::HashSet<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
     for acc in db::list_accounts(&state.pool, Some("commandcode"), None, None).await? {
         if acc.is_active == 0 {
             continue;
@@ -36,8 +40,12 @@ async fn models_payload(state: &AppState) -> AppResult<Value> {
         let Some(models) = models else { continue };
         for m in models {
             let Some(id) = m.as_str() else { continue };
+            let full = format!("cmc/{id}");
+            if !seen_ids.insert(full.clone()) {
+                continue;
+            }
             data.push(json!({
-                "id": format!("cmc/{id}"),
+                "id": full,
                 "object": "model",
                 "owned_by": "commandcode",
                 "display_name": id,
