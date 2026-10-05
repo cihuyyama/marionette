@@ -340,6 +340,26 @@ impl GrokCliProvider {
     }
 }
 
+/// Turn index for the `x-grok-turn-idx` header.
+///
+/// The official Grok CLI stamps this with the conversation's prompt index: it
+/// advances once per user prompt and is re-sent unchanged across the tool-loop
+/// iterations of one prompt. Sending a constant `1` makes the backend treat
+/// every request as the first turn of the conversation, which suppresses the
+/// reasoning/compaction behaviour that depends on turn depth.
+///
+/// The count comes from the request's own user turns, floored at 1 — a turn is
+/// never index 0. This needs no cross-request state, so it stays correct even
+/// though each dispatch opens a fresh session id.
+fn resolve_grok_turn_index(req: &ChatCompletionRequest) -> usize {
+    let count = req
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role.as_str(), "user"))
+        .count();
+    count.max(1)
+}
+
 #[async_trait]
 impl Provider for GrokCliProvider {
     fn id(&self) -> &'static str {
@@ -413,6 +433,7 @@ impl Provider for GrokCliProvider {
 
         let session_id = Uuid::new_v4().to_string();
         let req_id = Uuid::new_v4().to_string();
+        let turn_idx = resolve_grok_turn_index(req);
         body["prompt_cache_key"] = json!(session_id);
 
         let mut req_builder = client
@@ -433,7 +454,7 @@ impl Provider for GrokCliProvider {
             .header("x-grok-session-id", &session_id)
             .header("x-grok-conv-id", &session_id)
             .header("x-grok-req-id", &req_id)
-            .header("x-grok-turn-idx", "1")
+            .header("x-grok-turn-idx", turn_idx.to_string())
             .header("x-grok-model-override", &upstream_model_id);
 
         if let Some(user_id) = data.get("userId").or_else(|| data.get("user_id")).and_then(|v| v.as_str()) {
@@ -2048,4 +2069,58 @@ mod tests {
         assert_eq!(jwt_payload_bot_flag("a.b.c"), None);
         assert_eq!(jwt_payload_bot_flag(""), None);
     }
+
+    fn req_with_roles(roles: &[&str]) -> crate::openai::ChatCompletionRequest {
+        crate::openai::ChatCompletionRequest {
+            model: "grok-4".into(),
+            messages: roles
+                .iter()
+                .map(|r| crate::openai::ChatMessage {
+                    role: (*r).into(),
+                    content: serde_json::json!("x"),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                })
+                .collect(),
+            stream: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn turn_index_counts_user_turns() {
+        assert_eq!(resolve_grok_turn_index(&req_with_roles(&["user"])), 1);
+        assert_eq!(
+            resolve_grok_turn_index(&req_with_roles(&["user", "assistant", "user"])),
+            2
+        );
+        assert_eq!(
+            resolve_grok_turn_index(&req_with_roles(&["user", "assistant", "user", "tool", "assistant", "user"])),
+            3
+        );
+    }
+
+    #[test]
+    fn turn_index_never_zero() {
+        // A system-only payload has no user turn; a turn is never index 0.
+        assert_eq!(resolve_grok_turn_index(&req_with_roles(&["system"])), 1);
+        assert_eq!(resolve_grok_turn_index(&req_with_roles(&[])), 1);
+    }
+
+    #[test]
+    fn turn_index_ignores_non_user_roles() {
+        // Tool-loop iterations of one prompt must not advance the count.
+        assert_eq!(
+            resolve_grok_turn_index(&req_with_roles(&["user", "assistant", "tool", "assistant", "tool"])),
+            1
+        );
+    }
+
 }
