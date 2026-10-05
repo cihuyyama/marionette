@@ -6,6 +6,7 @@ pub mod images;
 pub mod keys;
 pub mod models;
 pub mod proxies;
+pub mod responses;
 
 use crate::state::AppState;
 use axum::{
@@ -29,7 +30,9 @@ pub fn router(state: AppState) -> Router {
         // Anthropic Messages surface: translated onto the same pool instead of
         // a second dispatch path, so routing, failover, and accounting are
         // identical to the OpenAI surface.
-        .route("/v1/messages", post(anthropic::messages));
+        .route("/v1/messages", post(anthropic::messages))
+        // OpenAI Responses surface, translated the same way.
+        .route("/v1/responses", post(responses::responses));
 
     let admin = Router::new()
         .route("/admin/stats", get(admin::stats))
