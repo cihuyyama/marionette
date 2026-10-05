@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(acc.email.as_deref(), Some("test@example.com"));
         assert_eq!(acc.is_active, 1);
         assert_eq!(acc.priority, 5);
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["accessToken"], "at_grok");
         assert_eq!(data["backoffLevel"], 0);
         // meta fields must NOT be in data
@@ -420,7 +420,7 @@ mod tests {
     fn parse_qoder_account() {
         let acc = map_connection(&qoder_item()).unwrap();
         assert_eq!(acc.provider, "qoder");
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["personalToken"], "pt_secret");
         assert_eq!(data["machineId"], "m-uuid");
         assert_eq!(data["accessToken"], "at_qoder");
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(acc.priority, 2);
         assert_eq!(acc.quota_limit, 0);
         assert_eq!(acc.quota_remaining, 0);
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["apiKey"], "sk-blackbox-secret");
         assert_eq!(data["password"], "signup-password");
         assert!(data.get("email").is_none());
@@ -473,7 +473,7 @@ mod tests {
         item.as_object_mut().unwrap().remove("apiKey");
         item["api_key"] = json!("sk-alias-secret");
         let acc = map_connection(&item).unwrap();
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["apiKey"], "sk-alias-secret");
     }
 
@@ -510,7 +510,7 @@ mod tests {
         let mut item = qoder_item();
         item["providerSpecificData"]["expireTime"] = json!(1893456000000i64);
         let acc = map_connection(&item).unwrap();
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(
             data["expireTime"],
             json!(1893456000000i64),
@@ -525,7 +525,7 @@ mod tests {
         // Place it at the top level of the connection object.
         item["expireTime"] = json!(1893456000000i64);
         let acc = map_connection(&item).unwrap();
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(
             data["expireTime"],
             json!(1893456000000i64),
@@ -537,7 +537,7 @@ mod tests {
     fn qoder_expiretime_absent_ok() {
         // qoder_item() has no expireTime anywhere.
         let acc = map_connection(&qoder_item()).unwrap();
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert!(
             data.get("expireTime").is_none(),
             "must NOT invent expireTime when absent"
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(acc.email.as_deref(), Some("freebuff-1"));
         assert_eq!(acc.quota_limit, 0);
         assert_eq!(acc.quota_remaining, 0);
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["token"], "cb_farm-token-1234567890");
         assert!(data.get("uid").unwrap().is_null());
         assert!(data["modelsFetchedAt"].is_null());
@@ -563,7 +563,7 @@ mod tests {
         let mut item = freebuff_item();
         item["token"] = json!("cb_long-token-value:uid-777");
         let acc = map_connection(&item).unwrap();
-        let data: Value = serde_json::from_str(&acc.data).unwrap();
+        let data: Value = acc.data_json();
         assert_eq!(data["token"], "cb_long-token-value");
         assert_eq!(data["uid"], "uid-777");
     }

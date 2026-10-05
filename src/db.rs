@@ -1151,6 +1151,77 @@ pub async fn update_request_log_usage(
     Ok(())
 }
 
+/// Null out captured request/response bodies older than `cutoff`, in bounded
+/// batches. Returns the number of rows whose bodies were dropped.
+///
+/// Batched rather than one `UPDATE`: these rows hold up to ~256 KB each, so a
+/// single statement would rewrite a large fraction of the file in one
+/// transaction. Each batch commits independently, so a failure mid-way leaves
+/// the earlier batches reclaimed instead of rolling the whole pass back.
+pub async fn null_old_log_bodies(pool: &SqlitePool, cutoff: &str, batch: i64) -> AppResult<u64> {
+    let mut total = 0u64;
+    loop {
+        let res = sqlx::query(
+            r#"
+            UPDATE request_logs
+            SET request_body = NULL, response_body = NULL
+            WHERE id IN (
+              SELECT id FROM request_logs
+              WHERE created_at < ?
+                AND (request_body IS NOT NULL OR response_body IS NOT NULL)
+              LIMIT ?
+            )
+            "#,
+        )
+        .bind(cutoff)
+        .bind(batch)
+        .execute(pool)
+        .await?;
+        let n = res.rows_affected();
+        total += n;
+        if n < batch as u64 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Delete request-log rows older than `cutoff`, in bounded batches.
+///
+/// Batched for the same reason as `null_old_log_bodies`: one unbounded
+/// `DELETE` can fail or hold a write lock long enough to stall request
+/// logging, and a failed pass must not silently stop retention forever.
+pub async fn delete_old_request_logs(pool: &SqlitePool, cutoff: &str, batch: i64) -> AppResult<u64> {
+    let mut total = 0u64;
+    loop {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM request_logs
+            WHERE id IN (
+              SELECT id FROM request_logs WHERE created_at < ? LIMIT ?
+            )
+            "#,
+        )
+        .bind(cutoff)
+        .bind(batch)
+        .execute(pool)
+        .await?;
+        let n = res.rows_affected();
+        total += n;
+        if n < batch as u64 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Total on-disk pages and free (reusable) pages, for retention logging.
+pub async fn db_page_stats(pool: &SqlitePool) -> AppResult<(i64, i64)> {
+    let page_count: i64 = sqlx::query_scalar("PRAGMA page_count").fetch_one(pool).await?;
+    let freelist: i64 = sqlx::query_scalar("PRAGMA freelist_count").fetch_one(pool).await?;
+    Ok((page_count, freelist))
+}
+
 pub async fn list_request_logs(
     pool: &SqlitePool,
     provider: Option<&str>,
@@ -1632,12 +1703,24 @@ pub async fn delete_model_combo(pool: &SqlitePool, id: &str) -> AppResult<bool> 
 }
 
 impl Account {
+    /// Parse the account's credential blob.
+    ///
+    /// Transparently decrypts when `MARIONETTE_DATA_KEY` is set. Rows written
+    /// before encryption was enabled carry no envelope and read through
+    /// unchanged, so turning the key on is a non-destructive migration.
     pub fn data_json(&self) -> Value {
-        serde_json::from_str(&self.data).unwrap_or_else(|_| Value::Object(Default::default()))
+        let plain = crate::crypto::open_or_passthrough(&self.data);
+        serde_json::from_str(&plain).unwrap_or_else(|_| Value::Object(Default::default()))
     }
 
+    /// Replace the account's credential blob.
+    ///
+    /// Encrypts on the way out when a key is configured, so the plaintext only
+    /// ever exists in memory. Falls back to storing as-is when encryption is
+    /// off rather than failing the write.
     pub fn set_data_json(&mut self, v: &Value) {
-        self.data = v.to_string();
+        let plain = v.to_string();
+        self.data = crate::crypto::seal(&plain).unwrap_or(plain);
     }
 
     pub fn is_cooling(&self) -> bool {

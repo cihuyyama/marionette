@@ -1345,7 +1345,7 @@ impl Provider for QoderProvider {
     }
 
     async fn ensure_fresh_auth(&self, account: &mut Account) -> Result<(), ProviderError> {
-        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let data: Value = account.data_json();
         let mut tokens = QoderTokens::from_data(&data)?;
         let mut dirty = tokens.machine_backfilled;
 
@@ -1366,23 +1366,23 @@ impl Provider for QoderProvider {
             dirty = true;
         }
         if dirty {
-            account.data = tokens.to_data().to_string();
+            account.set_data_json(&tokens.to_data());
         }
         Ok(())
     }
 
     async fn force_refresh(&self, account: &mut Account) -> Result<(), ProviderError> {
-        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let data: Value = account.data_json();
         let mut tokens = QoderTokens::from_data(&data)?;
         tokens.security_oauth_token = None;
         tokens.user_id = None;
         self.apply_job_token(&mut tokens).await?;
-        account.data = tokens.to_data().to_string();
+        account.set_data_json(&tokens.to_data());
         Ok(())
     }
 
     async fn sync_quota(&self, account: &mut Account) -> Result<(), ProviderError> {
-        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let data: Value = account.data_json();
         let mut tokens = QoderTokens::from_data(&data)?;
         let sot = match tokens
             .security_oauth_token
@@ -1392,7 +1392,7 @@ impl Provider for QoderProvider {
             Some(s) => s.to_string(),
             None => {
                 self.apply_job_token(&mut tokens).await?;
-                account.data = tokens.to_data().to_string();
+                account.set_data_json(&tokens.to_data());
                 tokens
                     .security_oauth_token
                     .clone()
@@ -1415,7 +1415,7 @@ impl Provider for QoderProvider {
             }
         }
 
-        let data: Value = serde_json::from_str(&account.data).unwrap_or(Value::Null);
+        let data: Value = account.data_json();
         match QoderTokens::from_data(&data) {
             Ok(tokens) => match self.fetch_activity(&tokens).await {
                 Ok(snap) => apply_activity_to_account(account, &snap),
@@ -1445,7 +1445,7 @@ impl Provider for QoderProvider {
         account: &Account,
         req: &ChatCompletionRequest,
     ) -> Result<ChatOutcome, ProviderError> {
-        let data: serde_json::Value = serde_json::from_str(&account.data).unwrap_or(serde_json::Value::Null);
+        let data: serde_json::Value = account.data_json();
         let tokens = QoderTokens::from_data(&data)?;
         if tokens.security_oauth_token.is_none()
             || tokens.security_oauth_token.as_deref() == Some("")
