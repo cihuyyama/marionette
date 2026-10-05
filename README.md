@@ -122,9 +122,42 @@ See [`.env.example`](.env.example). Names only — put real values in local `.en
 | `RUST_LOG` | Tracing | `info,marionette=debug` |
 | `MARIONETTE_COOLDOWN_HOURS` | Rate-limit seal | `25` |
 | `MARIONETTE_FARM_*` | Automation job runner | see `.env.example` |
+| `MARIONETTE_DATA_KEY` | Encrypt `accounts.data` at rest (opt-in, **back it up**) | unset = plaintext |
+| `MARIONETTE_LOG_BODY_RETENTION_DAYS` | Expire captured bodies | `7` |
+| `MARIONETTE_LOG_RETENTION_DAYS` | Delete request-log rows | `30` |
+| `MARIONETTE_RETENTION_INTERVAL_SECS` | Retention sweep interval (`0` disables) | `3600` |
 | `QODER_DUDUL_ACCESS_KEY` | Inject only (never commit) | empty |
 
 **Never commit:** `.env`, entire `data/`, farm `accounts*.txt`, farm `results/*.json`, OAuth/PAT dumps.
+
+
+---
+
+## Log retention
+
+`request_logs` stores captured request/response bodies, which dominate database
+size. A background worker keeps it bounded in two stages:
+
+1. **Bodies expire first** (`MARIONETTE_LOG_BODY_RETENTION_DAYS`, default 7) —
+   the body columns are nulled, but the metadata row (tokens, credits, status,
+   duration) stays queryable.
+2. **Rows are deleted later** (`MARIONETTE_LOG_RETENTION_DAYS`, default 30).
+
+Both run in bounded batches so a large backlog never holds the write lock long
+enough to stall request logging. Set `MARIONETTE_RETENTION_INTERVAL_SECS=0` to
+disable the worker.
+
+## Credentials at rest
+
+By default `accounts.data` (PATs, refresh tokens, API keys) is stored as
+plaintext JSON. Set `MARIONETTE_DATA_KEY` to encrypt it with AES-256-CBC — each
+value gets a fresh IV and an `enc1:` tag, so the database is opaque without the
+key while rows written before encryption still read normally.
+
+> **Warning:** the key is the only way back. Losing it makes every stored
+> credential unreadable — there is no recovery path. Back it up outside the
+> repo before enabling.
+
 
 ---
 

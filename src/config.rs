@@ -18,6 +18,14 @@ pub struct Config {
     pub proxy_health_interval_secs: u64,
     pub grok_proxy: Option<String>,
     pub static_dir: Option<PathBuf>,
+    /// Durable request-log retention window in days. Rows older than this are
+    /// deleted. Bodies are dropped earlier — see `log_body_retention_days`.
+    pub log_retention_days: u64,
+    /// Request/response body retention window in days. Bodies are ~99% of DB
+    /// volume, so they expire much sooner than the metadata row that owns them.
+    pub log_body_retention_days: u64,
+    /// How often the retention worker sweeps. 0 disables it.
+    pub retention_interval_secs: u64,
 }
 
 impl Config {
@@ -29,7 +37,11 @@ impl Config {
             .map(PathBuf::from)
             .or_else(|| {
                 let p = PathBuf::from("web/dist");
-                if p.exists() { Some(p) } else { None }
+                if p.exists() {
+                    Some(p)
+                } else {
+                    None
+                }
             });
 
         Self {
@@ -54,9 +66,8 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5),
-            grok_client_id: env::var("MARIONETTE_GROK_CLIENT_ID").unwrap_or_else(|_| {
-                "b1a00492-073a-47ea-816f-4c329264a828".into()
-            }),
+            grok_client_id: env::var("MARIONETTE_GROK_CLIENT_ID")
+                .unwrap_or_else(|_| "b1a00492-073a-47ea-816f-4c329264a828".into()),
             refresh_lead_secs: env::var("MARIONETTE_REFRESH_LEAD_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -77,6 +88,19 @@ impl Config {
             grok_proxy: env::var("MARIONETTE_GROK_PROXY")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            log_retention_days: env::var("MARIONETTE_LOG_RETENTION_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30)
+                .clamp(1, 3650),
+            log_body_retention_days: env::var("MARIONETTE_LOG_BODY_RETENTION_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(7),
+            retention_interval_secs: env::var("MARIONETTE_RETENTION_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3_600),
             static_dir,
         }
     }
