@@ -1,16 +1,24 @@
-export type StatusKind = "bound" | "sealed" | "cut" | "fallen" | "channeling";
+export type StatusKind = "bound" | "sealed" | "cut" | "fallen" | "dead" | "channeling";
 
 const LABELS: Record<StatusKind, string> = {
   bound: "Bound",
   sealed: "Sealed",
   cut: "Cut",
   fallen: "Fallen",
+  dead: "Dead",
   channeling: "Channeling",
 };
 
 export function normalizeStatus(raw: string | undefined | null): StatusKind {
   const s = (raw ?? "bound").toLowerCase();
-  if (s === "bound" || s === "sealed" || s === "cut" || s === "fallen" || s === "channeling") {
+  if (
+    s === "bound" ||
+    s === "sealed" ||
+    s === "cut" ||
+    s === "fallen" ||
+    s === "dead" ||
+    s === "channeling"
+  ) {
     return s;
   }
   return "bound";

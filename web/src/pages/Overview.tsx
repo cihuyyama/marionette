@@ -99,6 +99,7 @@ export function Overview() {
         <StatCard label="Sealed" value={stats?.sealed} tone="fog" />
         <StatCard label="Cut" value={stats?.cut} tone="seal" />
         <StatCard label="Fallen" value={stats?.fallen} tone="blood" />
+        <StatCard label="Dead" value={stats?.dead} tone="seal" />
       </div>
 
       <section className="panel" style={{ marginTop: 24 }}>
@@ -286,6 +287,7 @@ export function Overview() {
                   <th>Sealed</th>
                   <th>Cut</th>
                   <th>Fallen</th>
+                  <th>Dead</th>
                 </tr>
               </thead>
               <tbody>
@@ -297,6 +299,7 @@ export function Overview() {
                     <td>{v.sealed}</td>
                     <td>{v.cut}</td>
                     <td>{v.fallen}</td>
+                    <td>{v.dead}</td>
                   </tr>
                 ))}
               </tbody>

@@ -6,9 +6,10 @@ export type PoolStats = {
   sealed: number;
   cut: number;
   fallen: number;
+  dead: number;
   by_provider?: Record<
     string,
-    { total: number; bound: number; sealed: number; cut: number; fallen: number }
+    { total: number; bound: number; sealed: number; cut: number; fallen: number; dead: number }
   >;
 };
 

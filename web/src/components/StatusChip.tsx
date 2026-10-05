@@ -11,6 +11,7 @@ const CLASS: Record<StatusKind, string> = {
   sealed: "chip-sealed",
   cut: "chip-cut",
   fallen: "chip-fallen",
+  dead: "chip-cut",
   channeling: "chip-channeling",
 };
 
