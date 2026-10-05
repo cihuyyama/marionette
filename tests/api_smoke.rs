@@ -1314,3 +1314,52 @@ async fn account_roundtrip_preserves_data_blob() {
     assert_eq!(back["apiKey"], "sk-abcdefgh12345678");
     assert_eq!(back["n"], 42);
 }
+
+// ── Dead vs cut status (src/db.rs::Account::status_label) ─────────────
+
+fn acct(active: i64, last_error: Option<&str>) -> db::Account {
+    db::Account {
+        id: "a".into(),
+        provider: "grok-cli".into(),
+        email: None,
+        name: None,
+        is_active: active,
+        priority: 0,
+        data: "{}".into(),
+        cooldown_until: None,
+        last_error: last_error.map(|s| s.to_string()),
+        last_used_at: None,
+        created_at: "2026-01-01T00:00:00.000Z".into(),
+        updated_at: "2026-01-01T00:00:00.000Z".into(),
+        quota_limit: 0,
+        quota_remaining: 0,
+    }
+}
+
+#[test]
+fn revoked_and_missing_tokens_are_dead_not_cut() {
+    // Terminal: needs a new credential, not just time.
+    assert_eq!(acct(0, Some("auth invalid: no tokens")).status_label(), "dead");
+    assert_eq!(acct(0, Some(r#"auth invalid: {"error":"invalid_grant"}"#)).status_label(), "dead");
+    assert_eq!(acct(0, Some("Unauthorized")).status_label(), "dead");
+}
+
+#[test]
+fn rate_limited_stays_cut() {
+    // Recoverable: the account is fine, the limit is not.
+    assert_eq!(acct(0, Some("provider: rate limited")).status_label(), "cut");
+    assert_eq!(acct(0, Some("upstream error (502)")).status_label(), "cut");
+    assert_eq!(acct(0, None).status_label(), "cut");
+}
+
+#[test]
+fn dead_status_only_applies_to_inactive_accounts() {
+    // An active account with a stale auth error is still serving: it is
+    // "fallen", not "dead".
+    assert_eq!(acct(1, Some("auth invalid: no tokens")).status_label(), "fallen");
+}
+
+#[test]
+fn healthy_account_is_bound() {
+    assert_eq!(acct(1, None).status_label(), "bound");
+}

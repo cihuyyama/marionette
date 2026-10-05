@@ -1730,9 +1730,29 @@ impl Account {
         }
     }
 
+    /// Terminal vs recoverable failure.
+    ///
+    /// "Token revoked / never had one" and "rate limited" are not the same
+    /// operational state, but both collapsed into `cut`, which made a fleet
+    /// with 900 permanently dead accounts look like one having a bad day. A
+    /// dead account needs a new credential; a cut one just needs time.
+    pub fn is_dead(&self) -> bool {
+        let err = match self.last_error.as_deref() {
+            Some(e) => e,
+            None => return false,
+        };
+        let e = err.to_ascii_lowercase();
+        e.contains("no tokens")
+            || e.contains("invalid_grant")
+            || e.contains("invalid grant")
+            || e.contains("auth invalid")
+            || e.contains("unauthorized")
+    }
+
     pub fn status_label(&self) -> &'static str {
         if self.is_active == 0 {
-            return "cut";
+            // Terminal first: a dead account stays dead once its cooldown ends.
+            return if self.is_dead() { "dead" } else { "cut" };
         }
         if self.is_cooling() {
             return "sealed";
@@ -2756,6 +2776,7 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
     let mut sealed = 0u64;
     let mut cut = 0u64;
     let mut fallen = 0u64;
+    let mut dead = 0u64;
     let mut by_provider = serde_json::Map::new();
 
     for r in &rows {
@@ -2781,6 +2802,7 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
             "sealed" => sealed += 1,
             "cut" => cut += 1,
             "fallen" => fallen += 1,
+            "dead" => dead += 1,
             _ => {}
         }
         let status_key = probe.status_label();
@@ -2788,7 +2810,7 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
             .entry(r.provider.clone())
             .or_insert_with(|| {
                 serde_json::json!({
-                    "total": 0, "bound": 0, "sealed": 0, "cut": 0, "fallen": 0
+                    "total": 0, "bound": 0, "sealed": 0, "cut": 0, "fallen": 0, "dead": 0
                 })
             });
         if let Some(obj) = entry.as_object_mut() {
@@ -2806,6 +2828,7 @@ pub async fn stats(pool: &SqlitePool) -> AppResult<serde_json::Value> {
         "sealed": sealed,
         "cut": cut,
         "fallen": fallen,
+        "dead": dead,
         "by_provider": by_provider
     }))
 }
