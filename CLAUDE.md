@@ -199,6 +199,14 @@ Dashboard (`web/src/lib/settings.ts`):
 | GET | `/health` | none |
 | GET | `/v1/models` | pool |
 | POST | `/v1/chat/completions` | pool |
+| POST | `/v1/messages` | pool (Anthropic Messages, translated) |
+| POST | `/v1/responses` | pool (OpenAI Responses, translated) |
+| POST | `/v1/images/generations` | pool |
+| POST | `/v1/images/edits` | pool |
+
+`/v1/messages` and `/v1/responses` are translation layers over the same pool
+path — account selection, failover, quota, and request logging are identical
+to `/v1/chat/completions`. Only the wire shape differs.
 
 ### Admin
 

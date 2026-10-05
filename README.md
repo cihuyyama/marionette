@@ -212,6 +212,15 @@ Start jobs from **Automation** in the UI (needs farm env + Python), or run packa
 | `GET` | `/health` | none |
 | `GET` | `/v1/models` | pool |
 | `POST` | `/v1/chat/completions` | pool |
+| `POST` | `/v1/messages` | pool (Anthropic Messages) |
+| `POST` | `/v1/responses` | pool (OpenAI Responses) |
+| `POST` | `/v1/images/generations` | pool |
+
+`/v1/messages` and `/v1/responses` are translation layers: the request folds
+into a Chat Completions request and goes through the same pool, so account
+selection, failover, quota, and request logging behave identically. Only the
+wire shape differs — Anthropic clients (Claude Code) and Responses clients
+(Codex) can be pointed at the same pool.
 
 **Admin** (Bearer `MARIONETTE_ADMIN_KEY`): stats, accounts CRUD, import, refresh, usage/requests, providers, inject / warmup / claim-trial, farm jobs.
 
