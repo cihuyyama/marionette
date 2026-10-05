@@ -465,141 +465,148 @@ async fn migrate(pool: &SqlitePool) -> AppResult<()> {
     )
     .execute(pool)
     .await?;
-    migrate_quota_columns(pool).await?;
-    migrate_provider_settings_columns(pool).await?;
-    migrate_request_log_body_columns(pool).await?;
-    migrate_request_log_combo_columns(pool).await?;
-    migrate_api_key_limit_columns(pool).await?;
-    migrate_request_log_api_key_column(pool).await?;
+    apply_schema_steps(pool).await?;
     Ok(())
 }
 
-async fn migrate_api_key_limit_columns(pool: &SqlitePool) -> AppResult<()> {
-    let alters = [
-        "ALTER TABLE api_keys ADD COLUMN rate_limit_rpm INTEGER",
-        "ALTER TABLE api_keys ADD COLUMN request_limit INTEGER",
-        "ALTER TABLE api_keys ADD COLUMN requests_used INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE api_keys ADD COLUMN token_limit INTEGER",
-        "ALTER TABLE api_keys ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE api_keys ADD COLUMN model_allowlist TEXT",
-        "ALTER TABLE api_keys ADD COLUMN key_prefix TEXT",
-        "ALTER TABLE api_keys ADD COLUMN last_used_at TEXT",
-    ];
-    for sql in alters {
-        if let Err(e) = sqlx::query(sql).execute(pool).await {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e.into());
-            }
-        }
+/// Schema version stamp. Bump `LATEST` and append a step for every change.
+///
+/// Previously each migration ran on every boot and swallowed errors whose
+/// message contained "duplicate column" — which silently depends on SQLite's
+/// English wording. A versioned ledger makes each step run once, makes the
+/// current version inspectable, and makes a real failure loud instead of
+/// hidden behind a string match.
+const LATEST_SCHEMA_VERSION: i64 = 1;
+
+/// True when `table` already has `column`.
+///
+/// Asking the catalog beats catching an error: it is exact, locale-proof, and
+/// works whether the column predates migrations or was just added.
+async fn has_column(pool: &SqlitePool, table: &str, column: &str) -> AppResult<bool> {
+    // `PRAGMA table_info` exposes cid first; pragma_table_info() as a table
+    // lets the name column be selected directly instead.
+    let rows: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().any(|c| c == column))
+}
+
+/// Add `column` to `table` when missing. No-op when already present.
+async fn add_column(pool: &SqlitePool, table: &str, column: &str, decl: &str) -> AppResult<()> {
+    if has_column(pool, table, column).await? {
+        return Ok(());
     }
-    Ok(())
-}
-
-async fn migrate_request_log_api_key_column(pool: &SqlitePool) -> AppResult<()> {
-    if let Err(e) = sqlx::query("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT")
+    sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
         .execute(pool)
-        .await
-    {
-        let msg = e.to_string();
-        if !msg.contains("duplicate column") {
-            return Err(e.into());
-        }
-    }
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key ON request_logs(api_key_id)",
-    )
-    .execute(pool)
-    .await?;
+        .await?;
     Ok(())
 }
 
-async fn migrate_request_log_combo_columns(pool: &SqlitePool) -> AppResult<()> {
-    let alters = [
-        "ALTER TABLE request_logs ADD COLUMN requested_model TEXT",
-        "ALTER TABLE request_logs ADD COLUMN combo_id TEXT",
-        "ALTER TABLE request_logs ADD COLUMN fallback_count INTEGER",
-        "ALTER TABLE request_logs ADD COLUMN attempt_trace TEXT",
-    ];
-    for sql in alters {
-        if let Err(e) = sqlx::query(sql).execute(pool).await {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e.into());
-            }
-        }
-    }
+/// Record `version` as applied, so a step never runs twice.
+async fn stamp_version(pool: &SqlitePool, version: i64) -> AppResult<()> {
+    sqlx::query("INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, ?, ?)")
+        .bind(version)
+        .bind(now_rfc3339())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
-async fn migrate_request_log_body_columns(pool: &SqlitePool) -> AppResult<()> {
-    let alters = [
-        "ALTER TABLE request_logs ADD COLUMN request_body TEXT",
-        "ALTER TABLE request_logs ADD COLUMN response_body TEXT",
-    ];
-    for sql in alters {
-        if let Err(e) = sqlx::query(sql).execute(pool).await {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e.into());
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn migrate_quota_columns(pool: &SqlitePool) -> AppResult<()> {
-    let alters = [
-        "ALTER TABLE accounts ADD COLUMN quota_limit INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE accounts ADD COLUMN quota_remaining INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE request_logs ADD COLUMN credits_used INTEGER",
-        "ALTER TABLE request_logs ADD COLUMN account_quota_before INTEGER",
-        "ALTER TABLE request_logs ADD COLUMN account_quota_after INTEGER",
-    ];
-    for sql in alters {
-        if let Err(e) = sqlx::query(sql).execute(pool).await {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e.into());
-            }
-        }
-    }
+async fn current_version(pool: &SqlitePool) -> AppResult<i64> {
     sqlx::query(
         r#"
-        UPDATE accounts
-        SET quota_limit = ?, quota_remaining = ?
-        WHERE provider = 'grok-cli' AND quota_limit = 0 AND quota_remaining = 0
+        CREATE TABLE IF NOT EXISTS schema_version (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          version INTEGER NOT NULL,
+          applied_at TEXT NOT NULL
+        )
         "#,
     )
-    .bind(GROK_TOKEN_QUOTA)
-    .bind(GROK_TOKEN_QUOTA)
     .execute(pool)
     .await?;
-    Ok(())
+    let v: Option<i64> = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(v.unwrap_or(0))
 }
 
-async fn migrate_provider_settings_columns(pool: &SqlitePool) -> AppResult<()> {
-    if let Err(e) = sqlx::query(
-        "ALTER TABLE provider_settings ADD COLUMN pick_mode TEXT NOT NULL DEFAULT 'normal'",
-    )
-    .execute(pool)
-    .await
-    {
-        let msg = e.to_string();
-        if !msg.contains("duplicate column") {
-            return Err(e.into());
-        }
+/// Apply every outstanding step, in order, once each.
+///
+/// Steps are cumulative and append-only: a shipped version number is never
+/// reused or rewritten, because a database that already stamped it will not
+/// run it again.
+async fn apply_schema_steps(pool: &SqlitePool) -> AppResult<()> {
+    let version = current_version(pool).await?;
+
+    // v1 — the columns the old error-swallowing helpers used to apply. They
+    // were never versioned, so a database reaching here may already have any
+    // subset of them; the per-column guards make this idempotent either way.
+    if version < 1 {
+        add_column(pool, "accounts", "quota_limit", "INTEGER NOT NULL DEFAULT 0").await?;
+        add_column(pool, "accounts", "quota_remaining", "INTEGER NOT NULL DEFAULT 0").await?;
+        add_column(pool, "request_logs", "credits_used", "INTEGER").await?;
+        add_column(pool, "request_logs", "account_quota_before", "INTEGER").await?;
+        add_column(pool, "request_logs", "account_quota_after", "INTEGER").await?;
+        add_column(pool, "request_logs", "request_body", "TEXT").await?;
+        add_column(pool, "request_logs", "response_body", "TEXT").await?;
+        add_column(pool, "request_logs", "requested_model", "TEXT").await?;
+        add_column(pool, "request_logs", "combo_id", "TEXT").await?;
+        add_column(pool, "request_logs", "fallback_count", "INTEGER").await?;
+        add_column(pool, "request_logs", "attempt_trace", "TEXT").await?;
+        add_column(pool, "request_logs", "api_key_id", "TEXT").await?;
+        add_column(pool, "api_keys", "rate_limit_rpm", "INTEGER").await?;
+        add_column(pool, "api_keys", "request_limit", "INTEGER").await?;
+        add_column(pool, "api_keys", "requests_used", "INTEGER NOT NULL DEFAULT 0").await?;
+        add_column(pool, "api_keys", "token_limit", "INTEGER").await?;
+        add_column(pool, "api_keys", "tokens_used", "INTEGER NOT NULL DEFAULT 0").await?;
+        add_column(pool, "api_keys", "model_allowlist", "TEXT").await?;
+        add_column(pool, "api_keys", "key_prefix", "TEXT").await?;
+        add_column(pool, "api_keys", "last_used_at", "TEXT").await?;
+        add_column(
+            pool,
+            "provider_settings",
+            "pick_mode",
+            "TEXT NOT NULL DEFAULT 'normal'",
+        )
+        .await?;
+        add_column(
+            pool,
+            "provider_settings",
+            "sticky_pinned",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key ON request_logs(api_key_id)",
+        )
+        .execute(pool)
+        .await?;
+
+        // Grok accounts created before quota tracking existed start at the
+        // token budget instead of 0, so they are not read as exhausted.
+        sqlx::query(
+            r#"
+            UPDATE accounts
+            SET quota_limit = ?, quota_remaining = ?
+            WHERE provider = 'grok-cli' AND quota_limit = 0 AND quota_remaining = 0
+            "#,
+        )
+        .bind(GROK_TOKEN_QUOTA)
+        .bind(GROK_TOKEN_QUOTA)
+        .execute(pool)
+        .await?;
+
+        stamp_version(pool, 1).await?;
     }
-    if let Err(e) = sqlx::query(
-        "ALTER TABLE provider_settings ADD COLUMN sticky_pinned INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await
-    {
-        let msg = e.to_string();
-        if !msg.contains("duplicate column") {
-            return Err(e.into());
-        }
+
+    if version > LATEST_SCHEMA_VERSION {
+        tracing::warn!(
+            found = version,
+            known = LATEST_SCHEMA_VERSION,
+            "database schema is newer than this binary"
+        );
     }
     Ok(())
 }

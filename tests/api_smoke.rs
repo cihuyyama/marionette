@@ -1363,3 +1363,71 @@ fn dead_status_only_applies_to_inactive_accounts() {
 fn healthy_account_is_bound() {
     assert_eq!(acct(1, None).status_label(), "bound");
 }
+
+// ── Versioned schema migrations ───────────────────────────────────────
+
+#[tokio::test]
+async fn migration_stamps_version_and_is_idempotent() {
+    let dir = std::env::temp_dir().join(format!("marionette-mig-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sqlite");
+
+    // First boot: applies v1.
+    let pool = db::connect(&path).await.unwrap();
+    let v: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(v, 1, "fresh database must stamp version 1");
+    pool.close().await;
+
+    // Second boot on the same file: must not re-apply or fail.
+    let pool2 = db::connect(&path).await.unwrap();
+    let v2: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_one(&pool2)
+        .await
+        .unwrap();
+    assert_eq!(v2, 1, "reconnecting must not change the version");
+}
+
+#[tokio::test]
+async fn migration_adds_every_expected_column() {
+    let dir = std::env::temp_dir().join(format!("marionette-cols-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = db::connect(&dir.join("test.sqlite")).await.unwrap();
+
+    let expected: &[(&str, &str)] = &[
+        ("accounts", "quota_limit"),
+        ("accounts", "quota_remaining"),
+        ("request_logs", "credits_used"),
+        ("request_logs", "request_body"),
+        ("request_logs", "response_body"),
+        ("request_logs", "requested_model"),
+        ("request_logs", "combo_id"),
+        ("request_logs", "fallback_count"),
+        ("request_logs", "attempt_trace"),
+        ("request_logs", "api_key_id"),
+        ("api_keys", "rate_limit_rpm"),
+        ("api_keys", "request_limit"),
+        ("api_keys", "requests_used"),
+        ("api_keys", "token_limit"),
+        ("api_keys", "tokens_used"),
+        ("api_keys", "model_allowlist"),
+        ("api_keys", "key_prefix"),
+        ("api_keys", "last_used_at"),
+        ("provider_settings", "pick_mode"),
+        ("provider_settings", "sticky_pinned"),
+    ];
+    for (table, col) in expected {
+        let cols: Vec<String> =
+            sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info(?)")
+                .bind(table)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            cols.iter().any(|c| c == col),
+            "{table}.{col} missing after migration (have: {cols:?})"
+        );
+    }
+}
