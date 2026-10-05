@@ -1114,3 +1114,203 @@ async fn commandcode_dynamic_models_dedupe_against_static_catalog() {
         "dynamic entry carries max_input"
     );
 }
+
+// ── Log retention (workers/retention.rs) ──────────────────────────────
+
+async fn retention_pool() -> sqlx::SqlitePool {
+    let dir = std::env::temp_dir().join(format!("marionette-retention-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    db::connect(&dir.join("test.sqlite")).await.unwrap()
+}
+
+fn days_ago(d: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(d)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+async fn seed_log(pool: &sqlx::SqlitePool, created_at: &str, with_body: bool) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let body = if with_body { Some("{\"messages\":[]}") } else { None };
+    sqlx::query(
+        "INSERT INTO request_logs (id, created_at, provider, model, status, stream, request_body, response_body)
+         VALUES (?,?,?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(created_at)
+    .bind("grok-cli")
+    .bind("m1")
+    .bind("success")
+    .bind(0)
+    .bind(body)
+    .bind(body)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn retention_bodies_expire_before_rows() {
+    let pool = retention_pool().await;
+    let old = seed_log(&pool, &days_ago(40), true).await;
+    let recent = seed_log(&pool, &days_ago(1), true).await;
+
+    // Bodies have their own, shorter window: 7 days vs the row's 30.
+    let nulled = db::null_old_log_bodies(&pool, &days_ago(7), 500).await.unwrap();
+    assert_eq!(nulled, 1, "only the 40-day-old row loses its body");
+
+    let (old_body, recent_body) = (
+        sqlx::query_scalar::<_, Option<String>>("SELECT request_body FROM request_logs WHERE id = ?")
+            .bind(&old).fetch_one(&pool).await.unwrap(),
+        sqlx::query_scalar::<_, Option<String>>("SELECT request_body FROM request_logs WHERE id = ?")
+            .bind(&recent).fetch_one(&pool).await.unwrap(),
+    );
+    assert!(old_body.is_none(), "expired body must be dropped");
+    assert!(recent_body.is_some(), "body inside the window must survive");
+
+    // The metadata row outlives its body.
+    let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(still, 2, "body expiry must not delete the row");
+}
+
+#[tokio::test]
+async fn retention_deletes_rows_past_long_window() {
+    let pool = retention_pool().await;
+    seed_log(&pool, &days_ago(40), true).await;
+    let keep = seed_log(&pool, &days_ago(5), true).await;
+
+    let deleted = db::delete_old_request_logs(&pool, &days_ago(30), 500).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(left, 1);
+    let survivor: String = sqlx::query_scalar("SELECT id FROM request_logs")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(survivor, keep);
+}
+
+#[tokio::test]
+async fn retention_batch_loops_until_drained() {
+    let pool = retention_pool().await;
+    for _ in 0..7 {
+        seed_log(&pool, &days_ago(60), true).await;
+    }
+    // Batch of 2 against 7 rows: the fn must loop, not stop after one batch.
+    let deleted = db::delete_old_request_logs(&pool, &days_ago(30), 2).await.unwrap();
+    assert_eq!(deleted, 7);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_logs").fetch_one(&pool).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn retention_never_touches_rows_inside_window() {
+    let pool = retention_pool().await;
+    for d in [0, 1, 10, 29] {
+        seed_log(&pool, &days_ago(d), true).await;
+    }
+    assert_eq!(db::delete_old_request_logs(&pool, &days_ago(30), 500).await.unwrap(), 0);
+    assert_eq!(db::null_old_log_bodies(&pool, &days_ago(30), 500).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_logs").fetch_one(&pool).await.unwrap(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn retention_reclaims_file_space() {
+    let dir = std::env::temp_dir().join(format!("marionette-shrink-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sqlite");
+    let pool = db::connect(&path).await.unwrap();
+
+    // 30 rows x ~200 KB of body = ~6 MB of payload, mimicking production rows
+    // (measured avg: 257 KB, and bodies are ~99% of the file).
+    let body = "z".repeat(200_000);
+    for i in 0..30 {
+        seed_log(&pool, &days_ago(100 + i), true).await;
+    }
+    sqlx::query("UPDATE request_logs SET request_body = ?, response_body = ?")
+        .bind(&body).bind(&body).execute(&pool).await.unwrap();
+
+    let before = std::fs::metadata(&path).unwrap().len();
+    assert!(before > 10_000_000, "sanity: seeded file should be >10MB, got {before}");
+
+    let nulled = db::null_old_log_bodies(&pool, &days_ago(7), 500).await.unwrap();
+    assert_eq!(nulled, 30);
+    db::delete_old_request_logs(&pool, &days_ago(30), 500).await.unwrap();
+
+    // Without auto_vacuum the pages only become reusable, so assert on the
+    // freelist rather than the file size: that is what caps future growth.
+    let (_pages, freelist) = db::db_page_stats(&pool).await.unwrap();
+    assert!(freelist > 0, "freed pages must return to the free list");
+
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(left, 0);
+}
+
+// ── Credential encryption at rest (src/crypto.rs) ─────────────────────
+
+#[test]
+fn sealed_blob_hides_credentials_from_the_file() {
+    let k = vec![7u8; 32];
+    let plain = r#"{"apiKey":"sk-abcdefgh12345678","refreshToken":"rt_zzzzzzzzzzzz"}"#;
+    let sealed = marionette::crypto::seal_with(&k, plain).expect("seal");
+
+    // The whole point: the stored text must not contain the secrets.
+    assert!(!sealed.contains("sk-abcdefgh12345678"));
+    assert!(!sealed.contains("rt_zzzzzzzzzzzz"));
+    assert!(!sealed.contains("apiKey"), "structure must be opaque too");
+}
+
+#[test]
+fn wrong_key_yields_no_plaintext() {
+    let k = vec![7u8; 32];
+    let wrong = vec![9u8; 32];
+    let sealed = marionette::crypto::seal_with(&k, r#"{"apiKey":"sk-secret123456"}"#).unwrap();
+    assert!(
+        marionette::crypto::open_with(&wrong, &sealed).is_none(),
+        "a wrong key must fail, never return garbage"
+    );
+}
+
+#[test]
+fn legacy_rows_read_without_a_key() {
+    // Simulates a DB written before MARIONETTE_DATA_KEY existed.
+    let legacy = r#"{"apiKey":"x"}"#;
+    assert_eq!(
+        marionette::crypto::open_or_passthrough(legacy),
+        legacy,
+        "pre-encryption rows must still parse"
+    );
+}
+
+#[tokio::test]
+async fn account_roundtrip_preserves_data_blob() {
+    // Guards the helper pair used by every provider: whatever goes in must
+    // come back out byte-identical, encrypted or not.
+    let mut acc = db::Account {
+        id: "id1".into(),
+        provider: "qoder".into(),
+        email: Some("a@b.c".into()),
+        name: None,
+        is_active: 1,
+        priority: 0,
+        data: "{}".into(),
+        cooldown_until: None,
+        last_error: None,
+        last_used_at: None,
+        created_at: "2026-01-01T00:00:00.000Z".into(),
+        updated_at: "2026-01-01T00:00:00.000Z".into(),
+        quota_limit: 0,
+        quota_remaining: 0,
+    };
+    let v = serde_json::json!({"apiKey": "sk-abcdefgh12345678", "n": 42});
+    acc.set_data_json(&v);
+    let back = acc.data_json();
+    assert_eq!(back["apiKey"], "sk-abcdefgh12345678");
+    assert_eq!(back["n"], 42);
+}
