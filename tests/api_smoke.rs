@@ -4,6 +4,7 @@ use marionette::api;
 use marionette::config::Config;
 use marionette::db;
 use marionette::state::AppState;
+use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -1430,4 +1431,96 @@ async fn migration_adds_every_expected_column() {
             "{table}.{col} missing after migration (have: {cols:?})"
         );
     }
+}
+
+// ── Anthropic Messages surface (/v1/messages) ──────────────────────────
+
+fn messages_body(v: Value) -> Body {
+    Body::from(serde_json::to_vec(&v).unwrap())
+}
+
+#[tokio::test]
+async fn messages_requires_pool_key() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(messages_body(json!({
+                    "model": "qd/ultimate", "max_tokens": 16,
+                    "messages": [{"role":"user","content":"hi"}]
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn messages_rejects_empty_messages() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(messages_body(json!({"model":"qd/ultimate","max_tokens":16,"messages":[]})))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn messages_rejects_unknown_role() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(messages_body(json!({
+                    "model":"qd/ultimate","max_tokens":16,
+                    "messages":[{"role":"wizard","content":"hi"}]
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn messages_translates_and_reaches_the_pool() {
+    // No accounts in a fresh DB, so the pool reports no healthy account. The
+    // point is that the Anthropic shape was accepted and translated rather
+    // than rejected before routing — a parse failure would be 400.
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(messages_body(json!({
+                    "model": "qd/ultimate",
+                    "max_tokens": 16,
+                    "system": "be brief",
+                    "messages": [{"role":"user","content":"hi"}]
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::BAD_REQUEST, "request must be translated, not rejected");
+    assert_ne!(res.status(), StatusCode::NOT_FOUND, "route must exist");
 }

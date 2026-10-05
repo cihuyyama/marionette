@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod anthropic;
 pub mod chat;
 pub mod health;
 pub mod images;
@@ -24,7 +25,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/images/generations", post(images::images_generations))
         .route("/v1/images/edits", post(images::images_edits))
-        .route("/images/edits", post(images::images_edits));
+        .route("/images/edits", post(images::images_edits))
+        // Anthropic Messages surface: translated onto the same pool instead of
+        // a second dispatch path, so routing, failover, and accounting are
+        // identical to the OpenAI surface.
+        .route("/v1/messages", post(anthropic::messages));
 
     let admin = Router::new()
         .route("/admin/stats", get(admin::stats))
