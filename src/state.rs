@@ -1,9 +1,7 @@
 use crate::config::Config;
 use crate::farm::FarmManager;
-use crate::providers::blackbox::BlackboxProvider;
 use crate::providers::byok::ByokProvider;
 use crate::providers::commandcode::CommandCodeProvider;
-use crate::providers::freebuff::FreebuffProvider;
 use crate::providers::grok_cli::GrokCliProvider;
 use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
@@ -21,8 +19,6 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub grok: Arc<GrokCliProvider>,
     pub qoder: Arc<QoderProvider>,
-    pub blackbox: Arc<BlackboxProvider>,
-    pub freebuff: Arc<FreebuffProvider>,
     pub byok: Arc<ByokProvider>,
     pub commandcode: Arc<CommandCodeProvider>,
     pub farm: FarmManager,
@@ -50,8 +46,6 @@ impl AppState {
             .expect("http client");
         let grok = Arc::new(GrokCliProvider::new(config.clone()));
         let qoder = Arc::new(QoderProvider::new());
-        let blackbox = Arc::new(BlackboxProvider::new());
-        let freebuff = Arc::new(FreebuffProvider::new());
         let byok = Arc::new(ByokProvider::new());
         let commandcode = Arc::new(CommandCodeProvider::new());
         let proxies = ProxyManager::new(pool.clone());
@@ -61,8 +55,6 @@ impl AppState {
             http,
             grok,
             qoder,
-            blackbox,
-            freebuff,
             byok,
             commandcode,
             farm,

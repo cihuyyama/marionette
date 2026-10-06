@@ -564,8 +564,6 @@ async fn handle_concrete_chat(
     let provider: Arc<dyn Provider> = match provider_id {
         "grok-cli" => state.grok.clone() as Arc<dyn Provider>,
         "qoder" => state.qoder.clone() as Arc<dyn Provider>,
-        "blackbox" => state.blackbox.clone() as Arc<dyn Provider>,
-        "freebuff" => state.freebuff.clone() as Arc<dyn Provider>,
         "byok" => state.byok.clone() as Arc<dyn Provider>,
         "commandcode" => state.commandcode.clone() as Arc<dyn Provider>,
         other => return Err(AppError::NotImplemented(other.into())),
@@ -1327,13 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn blackbox_has_no_retry_no_decrement_no_resync() {
-        assert!(!should_retry_same_account("blackbox", &ProviderError::AuthExpired, false));
-        assert!(!should_local_token_decrement("blackbox"));
-        assert!(!should_server_resync_quota("blackbox"));
-    }
-
-    #[test]
     fn combo_fallback_advances_on_provider_failures_only() {
         assert!(should_fallback_to_next_target(&AppError::NoAccounts("qoder".into())));
         assert!(should_fallback_to_next_target(&AppError::Provider("rate limited".into())));
@@ -1615,12 +1606,6 @@ mod tests {
     async fn resolve_provider_prefers_static_arms_and_looks_up_byok_slug() {
         let (state, _dir) = test_state("resolve").await;
         assert_eq!(
-            resolve_provider_id(&state.pool, "bb/blackboxai/x-ai/grok-4.3")
-                .await
-                .unwrap(),
-            Some("blackbox")
-        );
-        assert_eq!(
             resolve_provider_id(&state.pool, "gcli/grok-4.5").await.unwrap(),
             Some("grok-cli")
         );
@@ -1685,8 +1670,8 @@ mod tests {
 
         // Built-in providers keep the old behavior on the same errors.
         let mut bb = acc.clone();
-        bb.id = "bb-1".into();
-        bb.provider = "blackbox".into();
+        bb.id = "qd-1".into();
+        bb.provider = "qoder".into();
         bb.email = None;
         db::upsert_account(&state.pool, &bb).await.unwrap();
         apply_provider_error(
@@ -1700,7 +1685,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(bb.is_active, 0, "blackbox 403 still cuts");
+        assert_eq!(bb.is_active, 0, "qoder 403 still cuts");
     }
 
     #[tokio::test]

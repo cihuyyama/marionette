@@ -251,8 +251,6 @@ pub struct FarmManager {
     package_dir: PathBuf,
     grok_package_dir: PathBuf,
     grok_package_parent: PathBuf,
-    blackbox_package_dir: PathBuf,
-    blackbox_package_parent: PathBuf,
     data_dir: PathBuf,
 }
 
@@ -296,16 +294,6 @@ impl FarmManager {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| package_parent.clone());
 
-        let blackbox_package_dir = resolve_path(
-            std::env::var("MARIONETTE_BLACKBOX_FARM_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("scripts/automation/blackbox_farm")),
-        );
-        let blackbox_package_parent = blackbox_package_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| package_parent.clone());
-
         let data_dir = resolve_path(
             std::env::var("MARIONETTE_FARM_DATA")
                 .map(PathBuf::from)
@@ -331,8 +319,6 @@ impl FarmManager {
             package_dir,
             grok_package_dir,
             grok_package_parent,
-            blackbox_package_dir,
-            blackbox_package_parent,
             data_dir,
         }
     }
@@ -373,12 +359,6 @@ impl FarmManager {
                 "grok_farm",
                 "grok-accounts.json",
             ),
-            "blackbox" => (
-                self.blackbox_package_dir.as_path(),
-                self.blackbox_package_parent.as_path(),
-                "blackbox_farm",
-                "blackbox-accounts.json",
-            ),
             _ => (
                 self.package_dir.as_path(),
                 self.package_parent.as_path(),
@@ -393,8 +373,6 @@ impl FarmManager {
             || self.package_dir.join("__init__.py").is_file();
         let grok_exists = self.grok_package_dir.join("__main__.py").is_file()
             || self.grok_package_dir.join("__init__.py").is_file();
-        let blackbox_exists = self.blackbox_package_dir.join("__main__.py").is_file()
-            || self.blackbox_package_dir.join("__init__.py").is_file();
         let qoder_hint = format!(
             "PYTHONPATH={} {} -m qoder_farm -f accounts.txt --json-progress",
             path_for_display(&self.package_parent),
@@ -403,11 +381,6 @@ impl FarmManager {
         let grok_hint = format!(
             "PYTHONPATH={} {} -m grok_farm -f accounts.txt --json-progress",
             path_for_display(&self.grok_package_parent),
-            path_for_display(&self.python)
-        );
-        let blackbox_hint = format!(
-            "PYTHONPATH={} {} -m blackbox_farm -f accounts.txt --json-progress",
-            path_for_display(&self.blackbox_package_parent),
             path_for_display(&self.python)
         );
         json!({
@@ -437,13 +410,6 @@ impl FarmManager {
                     "package_present": grok_exists,
                     "module": "grok_farm",
                     "run_hint": grok_hint,
-                },
-                "blackbox": {
-                    "package_dir": path_for_display(&self.blackbox_package_dir),
-                    "package_parent": path_for_display(&self.blackbox_package_parent),
-                    "package_present": blackbox_exists,
-                    "module": "blackbox_farm",
-                    "run_hint": blackbox_hint,
                 },
             },
         })
@@ -1089,7 +1055,6 @@ impl FarmManager {
     pub async fn start(&self, req: StartFarmRequest, pool: SqlitePool) -> AppResult<Value> {
         let provider = normalize_farm_provider(req.provider.as_deref());
         let is_grok = provider == "grok-cli";
-        let is_blackbox = provider == "blackbox";
         let (pkg_dir, pkg_parent, module, output_name) = self.package_paths_for(provider);
 
         let is_register_mode = req.accounts.trim_start().starts_with("register:");
@@ -1198,10 +1163,10 @@ impl FarmManager {
 
         let workers = clamp_concurrency(req.concurrency);
         let account_delay = req.account_delay.unwrap_or(0.0).max(0.0);
-        // grok/blackbox are register-only flows; inject/device_auth/settle are qoder-only CLI flags.
-        let inject = if is_grok || is_blackbox { false } else { req.inject };
-        let device_auth = if is_grok || is_blackbox { false } else { req.device_auth };
-        let settle_secs = if is_grok || is_blackbox { None } else { req.settle_secs };
+        // grok is a register-only flow; inject/device_auth/settle are qoder-only CLI flags.
+        let inject = if is_grok { false } else { req.inject };
+        let device_auth = if is_grok { false } else { req.device_auth };
+        let settle_secs = if is_grok { None } else { req.settle_secs };
         let now = chrono::Utc::now().to_rfc3339();
         let meta = FarmJob {
             id: id.clone(),
@@ -1240,16 +1205,10 @@ impl FarmManager {
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1");
         if is_register_mode {
-            let imap_prefix = if is_grok {
-                "GROK"
-            } else if is_blackbox {
-                "BLACKBOX"
-            } else {
-                "QODER"
-            };
+            let imap_prefix = if is_grok { "GROK" } else { "QODER" };
             if let Some(pw) = default_pw {
                 cmd.env(format!("{imap_prefix}_PASSWORD"), pw);
-                if !is_grok && !is_blackbox {
+                if !is_grok {
                     cmd.env("QODER_REGISTER_PASSWORD", pw);
                 }
             }
@@ -1274,13 +1233,13 @@ impl FarmManager {
             // /admin/mail-settings) and takes precedence over the package .env
             // (Python _load_dotenv uses setdefault, so cmd.env wins). When the
             // DB row is not configured we inject nothing and fall back to .env.
-            if is_grok || is_blackbox {
+            if is_grok {
                 if let Ok(mail) = db::get_mail_settings(&pool).await {
                     if !mail.base_url.trim().is_empty()
                         && !mail.domain.trim().is_empty()
                         && !mail.admin_password.is_empty()
                     {
-                        let mail_prefix = if is_grok { "GROK" } else { "BLACKBOX" };
+                        let mail_prefix = "GROK";
                         if is_grok {
                             cmd.env("GROK_MAIL_MODE", "cf");
                         }
@@ -1300,7 +1259,7 @@ impl FarmManager {
                 }
             }
         }
-        if !is_grok && !is_blackbox {
+        if !is_grok {
             if let Some(mode) = req
                 .captcha_mode
                 .as_deref()
@@ -1310,7 +1269,7 @@ impl FarmManager {
                 cmd.env("QODER_CAPTCHA_MODE", mode);
             }
         }
-        if !is_grok && !is_blackbox {
+        if !is_grok {
             if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
                 if !k.trim().is_empty() {
                     cmd.env("QODER_DUDUL_ACCESS_KEY", k);
@@ -1331,7 +1290,7 @@ impl FarmManager {
             .arg("--concurrency")
             .arg(workers.to_string());
 
-        if is_grok || is_blackbox {
+        if is_grok {
             if req.headless {
                 cmd.arg("--headless");
             } else {
@@ -1901,7 +1860,7 @@ impl FarmManager {
         };
         let path = output.unwrap_or_else(|| {
             let work = self.data_dir.join("jobs").join(job_id);
-            for name in ["grok-accounts.json", "blackbox-accounts.json"] {
+            for name in ["grok-accounts.json"] {
                 let p = work.join(name);
                 if p.is_file() {
                     return p;
@@ -1958,7 +1917,7 @@ impl FarmManager {
             &std::fs::read_to_string(&accounts_path).unwrap_or_default(),
             None,
         );
-        let out_path = ["grok-accounts.json", "blackbox-accounts.json"]
+        let out_path = ["grok-accounts.json"]
             .iter()
             .map(|name| work.join(name))
             .find(|p| p.is_file())
@@ -2012,8 +1971,6 @@ impl FarmManager {
                 let work = self.data_dir.join("jobs").join(job_id);
                 if work.join("grok-accounts.json").is_file() {
                     Some("grok-cli".into())
-                } else if work.join("blackbox-accounts.json").is_file() {
-                    Some("blackbox".into())
                 } else {
                     Some("qoder".into())
                 }
@@ -2142,7 +2099,6 @@ fn is_stderr_noise(line: &str) -> bool {
 fn normalize_farm_provider(raw: Option<&str>) -> &'static str {
     match raw.map(|s| s.trim().to_lowercase()).as_deref() {
         Some("grok-cli") | Some("grok") | Some("gcli") => "grok-cli",
-        Some("blackbox") | Some("bb") => "blackbox",
         Some("qoder") | None | Some("") => "qoder",
         _ => "qoder",
     }
@@ -2642,9 +2598,6 @@ mod tests {
         assert_eq!(normalize_farm_provider(Some("grok-cli")), "grok-cli");
         assert_eq!(normalize_farm_provider(Some("grok")), "grok-cli");
         assert_eq!(normalize_farm_provider(Some("GCLI")), "grok-cli");
-        assert_eq!(normalize_farm_provider(Some("blackbox")), "blackbox");
-        assert_eq!(normalize_farm_provider(Some("bb")), "blackbox");
-        assert_eq!(normalize_farm_provider(Some("BlackBox")), "blackbox");
         assert_eq!(normalize_farm_provider(Some("unknown")), "qoder");
     }
 
@@ -2698,16 +2651,6 @@ mod tests {
     #[test]
     fn grok_package_present_in_tree() {
         let package_dir = resolve_path(PathBuf::from("scripts/automation/grok_farm"));
-        assert!(
-            package_dir.join("__main__.py").is_file(),
-            "missing {}",
-            package_dir.display()
-        );
-    }
-
-    #[test]
-    fn blackbox_package_present_in_tree() {
-        let package_dir = resolve_path(PathBuf::from("scripts/automation/blackbox_farm"));
         assert!(
             package_dir.join("__main__.py").is_file(),
             "missing {}",

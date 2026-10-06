@@ -309,8 +309,6 @@ export function Accounts() {
     const map: Record<Exclude<ProviderId, "byok">, ProviderCounts> = {
       "grok-cli": emptyCounts(),
       qoder: emptyCounts(),
-      blackbox: emptyCounts(),
-      freebuff: emptyCounts(),
       commandcode: emptyCounts(),
     };
     for (const p of BUILTIN_PROVIDERS) {

@@ -32,7 +32,7 @@ const RESERVED_BYOK_SLUGS: &[&str] = &["bb", "fb", "gcli", "qd", "combo", "cmc"]
 pub const BYOK_PROVIDER: &str = "byok";
 
 /// Static API-key passthrough provider for user-supplied OpenAI-compatible
-/// endpoints. Like BlackboxProvider: no token refresh, no expiry; chat uses
+/// endpoints. No token refresh, no expiry; chat uses
 /// the provider's own client (the pool-resolved `client` argument is unused).
 pub struct ByokProvider {
     client: Client,
@@ -73,7 +73,7 @@ impl ByokProvider {
             .filter(|s| !s.is_empty())
     }
 
-    /// Copy of BlackboxProvider::build_body: upstream model = the request
+    /// Upstream model = the request
     /// model with the first `<slug>/` segment stripped (upstream_model),
     /// inner slashes preserved.
     fn build_body(req: &ChatCompletionRequest) -> Value {
@@ -363,10 +363,7 @@ pub fn validate_byok_slug(slug: &str) -> Result<(), String> {
     if RESERVED_BYOK_SLUGS.contains(&lower.as_str()) {
         return Err(format!("slug '{slug}' is reserved for a built-in provider"));
     }
-    if lower.starts_with("blackbox")
-        || lower.starts_with("freebuff")
-        || lower.starts_with("qoder")
-        || lower.contains("grok")
+    if lower.starts_with("qoder") || lower.contains("grok")
     {
         return Err(format!(
             "slug '{slug}' is reserved (must not reference a built-in provider)"
@@ -513,8 +510,6 @@ mod tests {
             "gcli",
             "qd",
             "combo",
-            "blackbox-x",
-            "freebuff-x",
             "qoder",
             "my-grok-api",
             "has space",

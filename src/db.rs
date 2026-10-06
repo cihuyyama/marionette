@@ -615,8 +615,6 @@ pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
     match provider {
         "grok-cli" => (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA),
         "qoder" => (0, 0),
-        "blackbox" => (0, 0),
-        "freebuff" => (0, 0),
         "byok" => (0, 0),
         "commandcode" => (0, 0),
         _ => (0, 0),
@@ -627,8 +625,6 @@ pub fn quota_kind_for_provider(provider: &str) -> &'static str {
     match provider {
         "grok-cli" => "tokens",
         "qoder" => "credits",
-        "blackbox" => "none",
-        "freebuff" => "none",
         "byok" => "none",
         "commandcode" => "none",
         _ => "none",
@@ -784,15 +780,7 @@ pub async fn get_provider_settings(
         return Ok(row);
     }
     let now = now_rfc3339();
-    // freebuff defaults to sequential (session affinity): a freebuff session
-    // lasts ~1h and serves many requests, so one account should drain its
-    // session before rotating. Round-robin would burn one session slot per
-    // account on every burst. Existing rows are never touched.
-    let default_lb = if provider == "freebuff" {
-        LoadBalance::Sequential
-    } else {
-        LoadBalance::default()
-    };
+    let default_lb = LoadBalance::default();
     let row = ProviderSettingsRow {
         provider: provider.into(),
         load_balance: default_lb.as_str().into(),
@@ -818,7 +806,7 @@ pub async fn get_provider_settings(
 }
 
 pub async fn list_provider_settings(pool: &SqlitePool) -> AppResult<Vec<ProviderSettingsRow>> {
-    let providers = ["grok-cli", "qoder", "blackbox", "freebuff", "commandcode"];
+    let providers = ["grok-cli", "qoder", "byok", "commandcode"];
     let mut out = Vec::with_capacity(providers.len());
     for p in providers {
         out.push(get_provider_settings(pool, p).await?);
@@ -1465,11 +1453,7 @@ pub fn validate_combo_slug(slug: &str) -> AppResult<()> {
             "combo slug must be lowercase alphanumerics separated by single hyphens".into(),
         ));
     }
-    if s.contains("grok")
-        || s.contains("qoder")
-        || s.contains("blackbox")
-        || s.contains("freebuff")
-    {
+    if s.contains("grok") || s.contains("qoder") {
         return Err(AppError::BadRequest(
             "combo slug must not contain provider names".into(),
         ));
@@ -2908,49 +2892,18 @@ mod tests {
     fn quota_kind_qoder_is_credits() {
         assert_eq!(quota_kind_for_provider("qoder"), "credits");
         assert_eq!(quota_kind_for_provider("grok-cli"), "tokens");
-        assert_eq!(quota_kind_for_provider("blackbox"), "none");
-        assert_eq!(quota_kind_for_provider("freebuff"), "none");
+        assert_eq!(quota_kind_for_provider("byok"), "none");
         assert_eq!(quota_kind_for_provider("other"), "none");
     }
 
     #[test]
     fn default_quota_qoder_stays_zero() {
         assert_eq!(default_quota_for_provider("qoder"), (0, 0));
-        assert_eq!(default_quota_for_provider("blackbox"), (0, 0));
-        assert_eq!(default_quota_for_provider("freebuff"), (0, 0));
+        assert_eq!(default_quota_for_provider("byok"), (0, 0));
         assert_eq!(
             default_quota_for_provider("grok-cli"),
             (GROK_TOKEN_QUOTA, GROK_TOKEN_QUOTA)
         );
-    }
-
-    #[test]
-    fn mask_secrets_covers_blackbox_api_key() {
-        use serde_json::json;
-        let mut v = json!({
-            "apiKey": "sk-blackbox-very-long-secret",
-            "api_key": "sk-snake-case-long-secret",
-            "password": "hunter2",
-        });
-        mask_secrets(&mut v);
-        assert_ne!(v["apiKey"], "sk-blackbox-very-long-secret");
-        assert_ne!(v["api_key"], "sk-snake-case-long-secret");
-        assert_eq!(v["password"], "hunter2", "password is not a masked key");
-    }
-
-    #[test]
-    fn mask_secrets_covers_freebuff_token() {
-        use serde_json::json;
-        let mut v = json!({
-            "token": "cb_freebuff-very-long-secret",
-            "uid": "u-123",
-            "modelsFetchedAt": null,
-        });
-        mask_secrets(&mut v);
-        let masked = v["token"].as_str().unwrap();
-        assert_ne!(masked, "cb_freebuff-very-long-secret");
-        assert!(masked.contains('…') || masked.contains("..."));
-        assert_eq!(v["uid"], "u-123", "uid is not a secret");
     }
 
     #[test]
@@ -3364,23 +3317,6 @@ mod tests {
         assert_eq!(strategy, LoadBalance::RoundRobin);
     }
 
-    #[tokio::test]
-    async fn freebuff_provider_settings_default_is_sequential() {
-        let (pool, _dir) = temp_db("fbsettings").await;
-        let settings = get_provider_settings(&pool, "freebuff").await.unwrap();
-        assert_eq!(
-            LoadBalance::parse(&settings.load_balance),
-            Some(LoadBalance::Sequential),
-            "freebuff must default to sequential (session affinity)"
-        );
-        let other = get_provider_settings(&pool, "grok-cli").await.unwrap();
-        assert_eq!(
-            LoadBalance::parse(&other.load_balance),
-            Some(LoadBalance::RoundRobin),
-            "other providers keep the round-robin default"
-        );
-    }
-
     fn grok_account(id: &str) -> Account {
         let mut a = sample_account();
         a.id = id.into();
@@ -3712,8 +3648,6 @@ mod tests {
         assert!(validate_combo_slug("double--dash").is_err());
         assert!(validate_combo_slug("grok-fast").is_err());
         assert!(validate_combo_slug("qoder-mix").is_err());
-        assert!(validate_combo_slug("blackbox-mix").is_err());
-        assert!(validate_combo_slug("freebuff-mix").is_err());
         assert!(validate_combo_slug("bb-mix").is_ok());
     }
 

@@ -129,8 +129,6 @@ pub async fn patch_provider_settings(
 ) -> AppResult<Json<Value>> {
     if provider != "grok-cli"
         && provider != "qoder"
-        && provider != "blackbox"
-        && provider != "freebuff"
         && provider != "commandcode"
     {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
@@ -463,35 +461,6 @@ pub async fn refresh_account(
                 .sync_quota(&mut acc)
                 .await
                 .map_err(AppError::from)?;
-        }
-        "blackbox" => {
-            state
-                .blackbox
-                .ensure_fresh_auth(&mut acc)
-                .await
-                .map_err(AppError::from)?;
-        }
-        "freebuff" => {
-            let data = acc.data_json();
-            let token = crate::providers::freebuff::FreebuffProvider::token_of(&data)
-                .ok_or_else(|| AppError::BadRequest("freebuff: missing token".into()))?;
-            match state.freebuff.fetch_user(&token).await {
-                Ok((uid, email)) => {
-                    let mut data = data;
-                    if let Some(uid) = uid {
-                        data["uid"] = json!(uid);
-                    }
-                    if acc.email.is_none() {
-                        if let Some(e) = email {
-                            acc.email = Some(e);
-                        }
-                    }
-                    acc.set_data_json(&data);
-                }
-                Err(e) => {
-                    return Err(AppError::from(e));
-                }
-            }
         }
         "byok" => {
             state
@@ -1003,43 +972,6 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
             }
             if masked(&data, &["personalToken", "personal_token"]) {
                 return Err("qoder: personalToken is masked");
-            }
-            if let Value::Object(m) = &data {
-                for (k, v) in m {
-                    conn.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        "blackbox" => {
-            if masked(&data, &["apiKey", "api_key"]) {
-                return Err("blackbox: apiKey is masked");
-            }
-            let has_key = data
-                .get("apiKey")
-                .or_else(|| data.get("api_key"))
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if !has_key {
-                return Err("blackbox: missing apiKey");
-            }
-            if let Value::Object(m) = &data {
-                for (k, v) in m {
-                    conn.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        "freebuff" => {
-            if masked(&data, &["token"]) {
-                return Err("freebuff: token is masked");
-            }
-            let has_token = data
-                .get("token")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if !has_token {
-                return Err("freebuff: missing token");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {
@@ -1804,12 +1736,8 @@ async fn upsert_import_item(
         .get("provider")
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| {
-            if item.get("apiKey").is_some() || item.get("api_key").is_some() {
-                "blackbox"
-            } else if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
+            if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
                 "qoder"
-            } else if item.get("token").is_some() {
-                "freebuff"
             } else {
                 "grok-cli"
             }

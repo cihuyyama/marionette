@@ -1011,7 +1011,6 @@ export type FarmInfo = {
   packages?: {
     qoder?: FarmPackageInfo;
     "grok-cli"?: FarmPackageInfo;
-    blackbox?: FarmPackageInfo;
   };
 };
 
