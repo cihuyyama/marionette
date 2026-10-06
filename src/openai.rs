@@ -78,6 +78,8 @@ pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
         Some("commandcode")
     } else if model.starts_with("cln/") || model.starts_with("cline") {
         Some("cline")
+    } else if model.starts_with("ag/") || model.starts_with("antigravity") {
+        Some("antigravity")
     } else if model.starts_with("gcli/") || model.starts_with("grok") {
         Some("grok-cli")
     } else if model.starts_with("qd/") || model.starts_with("qoder") {
@@ -205,6 +207,22 @@ fn cln(id: &'static str, display: &'static str) -> ModelObject {
     model(
         id,
         "cline",
+        Some(id),
+        Some(display),
+        None,
+        None,
+        true,
+        true,
+        false,
+    )
+}
+
+/// Antigravity public ids are `ag/<logical-id>`; the wire id is derived from
+/// the logical id (effort suffix lives on the wire, not the URL).
+fn ag(id: &'static str, display: &'static str) -> ModelObject {
+    model(
+        id,
+        "antigravity",
         Some(id),
         Some(display),
         None,
@@ -445,6 +463,15 @@ pub fn default_models() -> ModelsResponse {
             cln("cln/stealth/space-bunny-alpha", "Space Bunny Alpha"),
             cln("cln/cline-free/mimo-v2.6-flash", "MiMo v2.6 Flash (free)"),
             cln("cln/cline-free/muse-spark-1.3-contributor", "Muse Spark 1.3 (free)"),
+            ag("ag/claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ag("ag/claude-opus-4-6", "Claude Opus 4.6"),
+            ag("ag/gemini-3-flash", "Gemini 3 Flash"),
+            ag("ag/gemini-3.1-flash-image", "Gemini 3.1 Flash Image"),
+            ag("ag/gemini-3.1-pro", "Gemini 3.1 Pro"),
+            ag("ag/gemini-3.6-flash", "Gemini 3.6 Flash"),
+            ag("ag/gemini-3.7-flash", "Gemini 3.7 Flash"),
+            ag("ag/gemini-3.8-flash", "Gemini 3.8 Flash"),
+            ag("ag/gpt-oss-120b", "GPT-OSS 120B"),
         ],
     }
 }

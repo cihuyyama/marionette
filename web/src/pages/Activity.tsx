@@ -264,6 +264,7 @@ export function ActivityPage() {
             <option value="grok-cli">grok-cli</option>
             <option value="qoder">qoder</option>
             <option value="cline">cline</option>
+            <option value="antigravity">antigravity</option>
           </select>
         </div>
       </div>

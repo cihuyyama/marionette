@@ -36,6 +36,7 @@ export function AddAccountModal({
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "commandcode") return ["single", "keys", "bulk"];
     if (provider === "cline") return ["single", "tokens", "bulk"];
+    if (provider === "antigravity") return ["single", "tokens", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);

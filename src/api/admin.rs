@@ -131,6 +131,7 @@ pub async fn patch_provider_settings(
         && provider != "qoder"
         && provider != "commandcode"
         && provider != "cline"
+        && provider != "antigravity"
     {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
@@ -473,6 +474,13 @@ pub async fn refresh_account(
         "cline" => {
             state
                 .cline
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
+        "antigravity" => {
+            state
+                .antigravity
                 .ensure_fresh_auth(&mut acc)
                 .await
                 .map_err(AppError::from)?;
@@ -980,6 +988,25 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
             }
             if masked(&data, &["personalToken", "personal_token"]) {
                 return Err("qoder: personalToken is masked");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "antigravity" => {
+            let has_token = data
+                .get("accessToken")
+                .or_else(|| data.get("access_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_token {
+                return Err("antigravity: missing accessToken");
+            }
+            if masked(&data, &["accessToken", "refreshToken"]) {
+                return Err("antigravity: token is masked");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {

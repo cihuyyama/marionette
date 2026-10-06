@@ -1,4 +1,5 @@
 pub mod byok;
+pub mod antigravity;
 pub mod cline;
 pub mod commandcode;
 pub mod grok_cli;

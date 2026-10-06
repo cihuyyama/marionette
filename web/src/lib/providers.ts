@@ -3,6 +3,7 @@ export const PROVIDERS = [
   "qoder",
   "commandcode",
   "cline",
+  "antigravity",
   "byok",
 ] as const;
 
@@ -14,6 +15,7 @@ export function isProviderId(value: string | undefined): value is ProviderId {
     value === "qoder" ||
     value === "commandcode" ||
     value === "cline" ||
+    value === "antigravity" ||
     value === "byok"
   );
 }
@@ -23,6 +25,7 @@ export function labelProvider(provider: string): string {
   if (provider === "qoder") return "Qoder";
   if (provider === "commandcode") return "Command Code";
   if (provider === "cline") return "Cline";
+  if (provider === "antigravity") return "Antigravity";
   if (provider === "byok") return "Custom (BYOK)";
   return provider;
 }

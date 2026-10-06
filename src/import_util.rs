@@ -22,7 +22,7 @@ use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline", "antigravity"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -132,6 +132,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "qoder" => build_qoder_data(item),
         "commandcode" => build_commandcode_data(item),
         "cline" => build_cline_data(item),
+        "antigravity" => build_antigravity_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -232,6 +233,41 @@ fn build_qoder_data(item: &Value) -> Result<Value, String> {
 ///
 /// A refresh token alone is enough: `/auth/refresh` is a plain POST, so a
 /// pasted RT can bootstrap without the WorkOS device screen.
+/// antigravity data: a Google refresh token. `/token` needs no browser state,
+/// so a pasted RT bootstraps the account.
+fn build_antigravity_data(item: &Value) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+    if let Some(rt) = item
+        .get("refreshToken")
+        .or_else(|| item.get("refresh_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("refreshToken".into(), json!(rt));
+    }
+    if let Some(at) = item
+        .get("accessToken")
+        .or_else(|| item.get("access_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("accessToken".into(), json!(at));
+    }
+    if !out.contains_key("refreshToken") && !out.contains_key("accessToken") {
+        return Err("antigravity: missing refreshToken (or accessToken)".into());
+    }
+    // The access token arrives on first refresh; the project is provisioned
+    // lazily by loadCodeAssist.
+    if !out.contains_key("accessToken") {
+        out.insert("accessToken".into(), json!(""));
+    }
+    copy_str(item, &mut out, "expiresAt");
+    copy_str(item, &mut out, "projectId");
+    Ok(Value::Object(out))
+}
+
 fn build_cline_data(item: &Value) -> Result<Value, String> {
     let mut out = serde_json::Map::new();
 
