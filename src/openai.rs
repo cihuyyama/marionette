@@ -80,6 +80,8 @@ pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
         Some("cline")
     } else if model.starts_with("ag/") || model.starts_with("antigravity") {
         Some("antigravity")
+    } else if model.starts_with("kr/") || model.starts_with("kiro") {
+        Some("kiro")
     } else if model.starts_with("gcli/") || model.starts_with("grok") {
         Some("grok-cli")
     } else if model.starts_with("qd/") || model.starts_with("qoder") {
@@ -229,6 +231,21 @@ fn ag(id: &'static str, display: &'static str) -> ModelObject {
         None,
         true,
         true,
+        false,
+    )
+}
+
+/// Kiro public ids are `kr/<model-id>`.
+fn kr(id: &'static str, display: &'static str) -> ModelObject {
+    model(
+        id,
+        "kiro",
+        Some(id),
+        Some(display),
+        None,
+        None,
+        true,
+        false,
         false,
     )
 }
@@ -472,6 +489,19 @@ pub fn default_models() -> ModelsResponse {
             ag("ag/gemini-3.7-flash", "Gemini 3.7 Flash"),
             ag("ag/gemini-3.8-flash", "Gemini 3.8 Flash"),
             ag("ag/gpt-oss-120b", "GPT-OSS 120B"),
+            kr("kr/claude-opus-5", "Claude Opus 5"),
+            kr("kr/claude-opus-4.8", "Claude Opus 4.8"),
+            kr("kr/claude-opus-4.7", "Claude Opus 4.7"),
+            kr("kr/claude-opus-4.5", "Claude Opus 4.5"),
+            kr("kr/claude-haiku-4.5", "Claude Haiku 4.5"),
+            kr("kr/claude-sonnet-5", "Claude Sonnet 5"),
+            kr("kr/claude-sonnet-4.5", "Claude Sonnet 4.5"),
+            kr("kr/gpt-5.6-sol", "GPT-5.6 Sol"),
+            kr("kr/gpt-5.6-terra", "GPT-5.6 Terra"),
+            kr("kr/gpt-5.6-luna", "GPT-5.6 Luna"),
+            kr("kr/deepseek-3.2", "DeepSeek 3.2"),
+            kr("kr/qwen3-coder-next", "Qwen3 Coder Next"),
+            kr("kr/glm-5", "GLM-5"),
         ],
     }
 }

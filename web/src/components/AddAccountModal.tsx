@@ -37,6 +37,7 @@ export function AddAccountModal({
     if (provider === "commandcode") return ["single", "keys", "bulk"];
     if (provider === "cline") return ["single", "tokens", "bulk"];
     if (provider === "antigravity") return ["single", "tokens", "bulk"];
+    if (provider === "kiro") return ["single", "keys", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);

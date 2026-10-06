@@ -22,7 +22,7 @@ use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline", "antigravity"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline", "antigravity", "kiro"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -133,6 +133,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "commandcode" => build_commandcode_data(item),
         "cline" => build_cline_data(item),
         "antigravity" => build_antigravity_data(item),
+        "kiro" => build_kiro_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -235,6 +236,113 @@ fn build_qoder_data(item: &Value) -> Result<Value, String> {
 /// pasted RT can bootstrap without the WorkOS device screen.
 /// antigravity data: a Google refresh token. `/token` needs no browser state,
 /// so a pasted RT bootstraps the account.
+/// kiro data. Paste-only: the four import families all validate upstream
+/// before the row is persisted, so a dead credential cannot be stored.
+fn build_kiro_data(item: &Value) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+
+    let method = item
+        .get("authMethod")
+        .or_else(|| item.get("auth_method"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
+    let has_api_key = item
+        .get("apiKey")
+        .or_else(|| item.get("api_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .is_some();
+
+    // Infer api_key when a key is present and no method was stated.
+    let method = match (method, has_api_key) {
+        (Some(m), _) => m,
+        (None, true) => "api_key".to_string(),
+        (None, false) => "imported".to_string(),
+    };
+
+    match method.as_str() {
+        "api_key" => {
+            let key = item
+                .get("apiKey")
+                .or_else(|| item.get("api_key"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or("kiro: missing apiKey")?;
+            out.insert("authMethod".into(), json!("api_key"));
+            out.insert("accessToken".into(), json!(key));
+            // Static: no refresh, no expiry.
+            out.insert("expiresAt".into(), json!(null));
+        }
+        "external_idp" => {
+            for field in ["accessToken", "refreshToken", "clientId", "tokenEndpoint"] {
+                let v = item
+                    .get(field)
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| format!("kiro: external_idp missing {field}"))?;
+                out.insert(field.into(), json!(v));
+            }
+            // This posts the account's refresh token to whatever the JSON
+            // names, so the host must be one we accept.
+            let endpoint = out
+                .get("tokenEndpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !crate::providers::kiro::is_allowed_idp_endpoint(endpoint) {
+                return Err("kiro: tokenEndpoint is not an allowed Microsoft host".into());
+            }
+            out.insert("authMethod".into(), json!("external_idp"));
+            if let Some(s) = item.get("scope").and_then(|v| v.as_str()) {
+                out.insert("scope".into(), json!(s));
+            }
+        }
+        "idc" => {
+            for field in ["refreshToken", "clientId", "clientSecret"] {
+                let v = item
+                    .get(field)
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| format!("kiro: idc missing {field}"))?;
+                out.insert(field.into(), json!(v));
+            }
+            out.insert("authMethod".into(), json!("idc"));
+        }
+        _ => {
+            let rt = item
+                .get("refreshToken")
+                .or_else(|| item.get("refresh_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or("kiro: missing refreshToken")?;
+            out.insert("refreshToken".into(), json!(rt));
+            out.insert("authMethod".into(), json!("imported"));
+        }
+    }
+
+    if let Some(at) = item
+        .get("accessToken")
+        .or_else(|| item.get("access_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("accessToken".into(), json!(at));
+    }
+    if let Some(r) = item.get("region").and_then(|v| v.as_str()) {
+        out.insert("region".into(), json!(r));
+    }
+    copy_str(item, &mut out, "profileArn");
+    copy_str(item, &mut out, "machineId");
+    Ok(Value::Object(out))
+}
+
 fn build_antigravity_data(item: &Value) -> Result<Value, String> {
     let mut out = serde_json::Map::new();
     if let Some(rt) = item

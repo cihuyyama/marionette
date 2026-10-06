@@ -132,6 +132,7 @@ pub async fn patch_provider_settings(
         && provider != "commandcode"
         && provider != "cline"
         && provider != "antigravity"
+        && provider != "kiro"
     {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
@@ -481,6 +482,13 @@ pub async fn refresh_account(
         "antigravity" => {
             state
                 .antigravity
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
+        "kiro" => {
+            state
+                .kiro
                 .ensure_fresh_auth(&mut acc)
                 .await
                 .map_err(AppError::from)?;
@@ -988,6 +996,25 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
             }
             if masked(&data, &["personalToken", "personal_token"]) {
                 return Err("qoder: personalToken is masked");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "kiro" => {
+            let has_token = data
+                .get("accessToken")
+                .or_else(|| data.get("access_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_token {
+                return Err("kiro: missing accessToken");
+            }
+            if masked(&data, &["accessToken", "refreshToken"]) {
+                return Err("kiro: token is masked");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {

@@ -265,6 +265,7 @@ export function ActivityPage() {
             <option value="qoder">qoder</option>
             <option value="cline">cline</option>
             <option value="antigravity">antigravity</option>
+            <option value="kiro">kiro</option>
           </select>
         </div>
       </div>

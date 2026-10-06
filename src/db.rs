@@ -619,6 +619,7 @@ pub fn default_quota_for_provider(provider: &str) -> (i64, i64) {
         "commandcode" => (0, 0),
         "cline" => (0, 0),
         "antigravity" => (0, 0),
+        "kiro" => (0, 0),
         _ => (0, 0),
     }
 }
@@ -631,6 +632,7 @@ pub fn quota_kind_for_provider(provider: &str) -> &'static str {
         "commandcode" => "none",
         "cline" => "none",
         "antigravity" => "none",
+        "kiro" => "none",
         _ => "none",
     }
 }
@@ -810,7 +812,7 @@ pub async fn get_provider_settings(
 }
 
 pub async fn list_provider_settings(pool: &SqlitePool) -> AppResult<Vec<ProviderSettingsRow>> {
-    let providers = ["grok-cli", "qoder", "byok", "commandcode", "cline", "antigravity"];
+    let providers = ["grok-cli", "qoder", "byok", "commandcode", "cline", "antigravity", "kiro"];
     let mut out = Vec::with_capacity(providers.len());
     for p in providers {
         out.push(get_provider_settings(pool, p).await?);

@@ -567,6 +567,7 @@ async fn handle_concrete_chat(
         "byok" => state.byok.clone() as Arc<dyn Provider>,
         "cline" => state.cline.clone() as Arc<dyn Provider>,
         "antigravity" => state.antigravity.clone() as Arc<dyn Provider>,
+        "kiro" => state.kiro.clone() as Arc<dyn Provider>,
         "commandcode" => state.commandcode.clone() as Arc<dyn Provider>,
         other => return Err(AppError::NotImplemented(other.into())),
     };

@@ -5,6 +5,7 @@ use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::cline::ClineProvider;
 use crate::providers::commandcode::CommandCodeProvider;
 use crate::providers::grok_cli::GrokCliProvider;
+use crate::providers::kiro::KiroProvider;
 use crate::providers::qoder::QoderProvider;
 use crate::proxy::ProxyManager;
 use crate::refresh_job::RefreshManager;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub byok: Arc<ByokProvider>,
     pub cline: Arc<ClineProvider>,
     pub antigravity: Arc<AntigravityProvider>,
+    pub kiro: Arc<KiroProvider>,
     pub commandcode: Arc<CommandCodeProvider>,
     pub farm: FarmManager,
     pub refresh: RefreshManager,
@@ -53,6 +55,7 @@ impl AppState {
         let byok = Arc::new(ByokProvider::new());
         let cline = Arc::new(ClineProvider::new());
         let antigravity = Arc::new(AntigravityProvider::new());
+        let kiro = Arc::new(KiroProvider::new());
         let commandcode = Arc::new(CommandCodeProvider::new());
         let proxies = ProxyManager::new(pool.clone());
         Self {
@@ -64,6 +67,7 @@ impl AppState {
             byok,
             cline,
             antigravity,
+            kiro,
             commandcode,
             farm,
             refresh: RefreshManager::new(),
