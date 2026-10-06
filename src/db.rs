@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
@@ -1798,6 +1798,50 @@ impl Account {
     pub fn is_quota_exhausted(&self) -> bool {
         self.has_quota_budget() && self.quota_remaining <= 0
     }
+
+    /// True when upstream refused this account for `model` specifically.
+    ///
+    /// A Qoder 402/403 means "this account may not invoke *this* model", which
+    /// is far narrower than the 25h global cooldown it used to trigger: the
+    /// same account keeps serving `qd/lite`. Sealing it for a day took it out
+    /// of rotation for every model and let a single doomed request burn eight
+    /// accounts. This keeps the refusal scoped instead.
+    pub fn model_rejected(&self, model: &str) -> bool {
+        let data = self.data_json();
+        let entry = data.get("model_rejected").and_then(|v| v.get(model));
+        match entry {
+            // Legacy shape: a bare timestamp.
+            Some(Value::String(s)) => !s.is_empty(),
+            Some(v) => match v.get("until").and_then(|u| u.as_str()) {
+                Some(until) => parse_rfc3339(until).map(|t| t > Utc::now()).unwrap_or(false),
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Record a model-scoped refusal, preserving the other entries.
+    pub fn note_model_rejected(&mut self, model: &str, until: DateTime<Utc>) {
+        let mut data = self.data_json();
+        if !data.is_object() {
+            data = Value::Object(Default::default());
+        }
+        let obj = data.as_object_mut().expect("object");
+        let map = obj
+            .entry("model_rejected")
+            .or_insert_with(|| Value::Object(Default::default()));
+        if !map.is_object() {
+            *map = Value::Object(Default::default());
+        }
+        map.as_object_mut().expect("object").insert(
+            model.to_string(),
+            json!({
+                "until": until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "at": now_rfc3339(),
+            }),
+        );
+        self.set_data_json(&data);
+    }
 }
 
 fn mask_secrets(v: &mut Value) {
@@ -2627,6 +2671,12 @@ pub async fn list_eligible_accounts(
         .into_iter()
         .filter(|a| !quota_blocks_pick(a, model))
         .collect();
+
+    // A model-scoped refusal (Qoder 402/403) must not remove the account from
+    // rotation for other models -- it only disqualifies it for that one.
+    if let Some(m) = model {
+        eligible.retain(|a| !a.model_rejected(m));
+    }
 
     if provider == "qoder" {
         let settings = get_provider_settings(pool, provider).await?;

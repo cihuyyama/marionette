@@ -353,14 +353,20 @@ impl QoderTokens {
             machine_backfilled: !had_machine,
         })
     }
-    fn to_data(&self) -> Value {
-        let mut m = serde_json::Map::new();
+    /// Merge the token fields into `base`, keeping every other key.
+    ///
+    /// Callers used to pass a fresh `Value::Object` built here, which silently
+    /// dropped keys the provider does not own -- notably the pool's
+    /// `model_rejected` map, so a model-scoped refusal was forgotten the next
+    /// time the token was refreshed.
+    fn to_data_merged(&self, base: &Value) -> Value {
+        let mut m = base.as_object().cloned().unwrap_or_default();
         m.insert("personalToken".into(), json!(self.personal_token));
-        if let Some(ref v) = self.security_oauth_token { m.insert("securityOauthToken".into(), json!(v)); }
-        if let Some(ref v) = self.refresh_token { m.insert("refreshToken".into(), json!(v)); }
-        if let Some(ref v) = self.user_id { m.insert("userId".into(), json!(v)); }
-        if let Some(ref v) = self.user_name { m.insert("userName".into(), json!(v)); }
-        if let Some(ref v) = self.user_type { m.insert("userType".into(), json!(v)); }
+        if let Some(v) = &self.security_oauth_token { m.insert("securityOauthToken".into(), json!(v)); }
+        if let Some(v) = &self.refresh_token { m.insert("refreshToken".into(), json!(v)); }
+        if let Some(v) = &self.user_id { m.insert("userId".into(), json!(v)); }
+        if let Some(v) = &self.user_name { m.insert("userName".into(), json!(v)); }
+        if let Some(v) = &self.user_type { m.insert("userType".into(), json!(v)); }
         if let Some(v) = self.expire_time { m.insert("expireTime".into(), json!(v)); }
         m.insert("machineId".into(), json!(self.machine_id));
         m.insert("machineToken".into(), json!(self.machine_token));
@@ -1366,7 +1372,8 @@ impl Provider for QoderProvider {
             dirty = true;
         }
         if dirty {
-            account.set_data_json(&tokens.to_data());
+            let merged = tokens.to_data_merged(&data);
+            account.set_data_json(&merged);
         }
         Ok(())
     }
@@ -1377,7 +1384,8 @@ impl Provider for QoderProvider {
         tokens.security_oauth_token = None;
         tokens.user_id = None;
         self.apply_job_token(&mut tokens).await?;
-        account.set_data_json(&tokens.to_data());
+        let merged = tokens.to_data_merged(&data);
+        account.set_data_json(&merged);
         Ok(())
     }
 
@@ -1392,7 +1400,8 @@ impl Provider for QoderProvider {
             Some(s) => s.to_string(),
             None => {
                 self.apply_job_token(&mut tokens).await?;
-                account.set_data_json(&tokens.to_data());
+                let merged = tokens.to_data_merged(&data);
+                account.set_data_json(&merged);
                 tokens
                     .security_oauth_token
                     .clone()
@@ -2986,6 +2995,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn token_refresh_preserves_foreign_keys() {
+        // ensure_fresh_auth rewrites the credential blob on every chat. It used
+        // to rebuild that blob from the token fields alone, which dropped the
+        // pool's model_rejected map and made a model-scoped refusal forgettable.
+        let base = json!({
+            "personalToken": "pt",
+            "machineId": "m",
+            "machineToken": "mt",
+            "model_rejected": { "qd/ultimate": { "until": "2999-01-01T00:00:00.000Z" } },
+            "plan_is_paid": false,
+        });
+        let tokens = QoderTokens::from_data(&base).unwrap();
+        let merged = tokens.to_data_merged(&base);
+        assert!(
+            merged.get("model_rejected").is_some(),
+            "token refresh must not drop model_rejected"
+        );
+        assert!(
+            merged.get("plan_is_paid").is_some(),
+            "unrelated keys must survive too"
+        );
+        assert_eq!(
+            merged.get("personalToken").and_then(|v| v.as_str()),
+            Some("pt")
+        );
+    }
+
+    #[test]
     fn model_cfg_qmodel_preview_maps_qwen38() {
         let cfg = model_cfg("qmodel_preview");
         assert_eq!(cfg.key, "qmodel_preview");
@@ -3624,7 +3661,7 @@ mod tests {
             "name": null,
             "is_active": 1,
             "priority": 0,
-            "data": tokens.to_data().to_string(),
+            "data": tokens.to_data_merged(&Value::Object(Default::default())).to_string(),
             "cooldown_until": null,
             "last_error": null,
             "last_used_at": null,

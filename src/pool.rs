@@ -96,7 +96,7 @@ pub async fn handle_image(
         );
 
         if let Err(e) = state.grok.ensure_fresh_auth(&mut account).await {
-            apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+            apply_provider_error(&state.pool, &state.config, &mut account, &e, Some(model.as_str())).await?;
             let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
             last_account = Some(account);
             last_err = Some(e.into());
@@ -120,7 +120,7 @@ pub async fn handle_image(
                 if b64_list.is_empty() {
                     let e = ProviderError::Other("no image in upstream response".into());
                     warn!(account = %account.id, "image generation returned empty");
-                    apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                    apply_provider_error(&state.pool, &state.config, &mut account, &e, Some(model.as_str())).await?;
                     let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id)
                         .await;
                     last_account = Some(account);
@@ -223,6 +223,7 @@ pub async fn handle_image(
                                         &state.config,
                                         &mut account,
                                         &e2,
+                                        Some(model.as_str()),
                                     )
                                     .await?;
                                     let _ = db::note_pick_failure(
@@ -242,6 +243,7 @@ pub async fn handle_image(
                                         &state.config,
                                         &mut account,
                                         &e2,
+                                        Some(model.as_str()),
                                     )
                                     .await?;
                                     let _ = db::note_pick_failure(
@@ -258,8 +260,14 @@ pub async fn handle_image(
                             }
                         }
                         Err(re) => {
-                            apply_provider_error(&state.pool, &state.config, &mut account, &re)
-                                .await?;
+                            apply_provider_error(
+                                &state.pool,
+                                &state.config,
+                                &mut account,
+                                &re,
+                                Some(model.as_str()),
+                            )
+                            .await?;
                             let _ = db::note_pick_failure(
                                 &state.pool,
                                 provider_id,
@@ -274,7 +282,7 @@ pub async fn handle_image(
                     }
                 }
                 warn!(account = %account.id, error = %e, "upstream image failed");
-                apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                apply_provider_error(&state.pool, &state.config, &mut account, &e, Some(model.as_str())).await?;
                 let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                 last_account = Some(account);
                 last_err = Some(e.into());
@@ -625,7 +633,7 @@ async fn handle_concrete_chat(
         );
 
         if let Err(e) = provider.ensure_fresh_auth(&mut account).await {
-            apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+            apply_provider_error(&state.pool, &state.config, &mut account, &e, Some(model.as_str())).await?;
             let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
             last_account = Some(account);
             last_err = Some(e.into());
@@ -684,7 +692,7 @@ async fn handle_concrete_chat(
                                 }
                                 Err(e2) => {
                                     warn!(account = %account.id, provider = provider_id, error = %e2, "retry after force_refresh still failed");
-                                    apply_provider_error(&state.pool, &state.config, &mut account, &e2).await?;
+                                    apply_provider_error(&state.pool, &state.config, &mut account, &e2, Some(model.as_str())).await?;
                                     let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                                     last_account = Some(account);
                                     last_err = Some(e2.into());
@@ -694,7 +702,7 @@ async fn handle_concrete_chat(
                         }
                         Err(re) => {
                             warn!(account = %account.id, provider = provider_id, error = %re, "force_refresh failed");
-                            apply_provider_error(&state.pool, &state.config, &mut account, &re).await?;
+                            apply_provider_error(&state.pool, &state.config, &mut account, &re, Some(model.as_str())).await?;
                             let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                             last_account = Some(account);
                             last_err = Some(re.into());
@@ -703,7 +711,7 @@ async fn handle_concrete_chat(
                     }
                 }
                 warn!(account = %account.id, error = %e, "upstream chat failed");
-                apply_provider_error(&state.pool, &state.config, &mut account, &e).await?;
+                apply_provider_error(&state.pool, &state.config, &mut account, &e, Some(model.as_str())).await?;
                 let _ = db::note_pick_failure(&state.pool, provider_id, strategy, &account.id).await;
                 last_account = Some(account);
                 last_err = Some(e.into());
@@ -1207,9 +1215,33 @@ async fn apply_provider_error(
     config: &Config,
     account: &mut Account,
     err: &ProviderError,
+    model: Option<&str>,
 ) -> AppResult<()> {
     account.updated_at = db::now_rfc3339();
     account.last_error = Some(err.to_string().chars().take(500).collect());
+
+    // Qoder signals "this account may not invoke this model" as 402/403, which
+    // lands here as RateLimited. That is a model-scoped refusal, not account
+    // exhaustion: sealing for 25h removed the account from rotation for *every*
+    // model (the eligible query filters cooldown without looking at the model),
+    // so one doomed request would burn eight accounts and eventually starve
+    // qd/lite too. Scope it to the model instead and leave the account usable.
+    let qoder_model_refusal = account.provider == "qoder"
+        && matches!(err, ProviderError::RateLimited { .. })
+        && model.is_some();
+
+    if qoder_model_refusal {
+        let until = Utc::now() + Duration::hours(config.cooldown_hours as i64);
+        account.note_model_rejected(model.expect("checked"), until);
+        info!(
+            account = %account.id,
+            model = model.unwrap_or(""),
+            until = %until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "model-scoped refusal (qoder 402/403; not sealed globally)"
+        );
+        db::update_account(pool, account).await?;
+        return Ok(());
+    }
 
     // BYOK keys belong to the user, not a farm: billing/permission rejections
     // (402/403) must never seal or cut the account — they fall (last_error
@@ -1656,7 +1688,7 @@ mod tests {
                 body: "moderation".into(),
             },
         ] {
-            apply_provider_error(&state.pool, &state.config, &mut acc, &err)
+            apply_provider_error(&state.pool, &state.config, &mut acc, &err, Some("m"))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1685,10 +1717,90 @@ mod tests {
                 status: 403,
                 body: "x".into(),
             },
+            Some("qd/lite"),
         )
         .await
         .unwrap();
         assert_eq!(bb.is_active, 0, "qoder 403 still cuts");
+    }
+
+    #[tokio::test]
+    async fn qoder_rate_limit_is_model_scoped_not_global() {
+        let (state, _dir) = test_state("qdmodelscope").await;
+        let mut acc = byok_pool_account();
+        acc.id = "qd-scope".into();
+        acc.provider = "qoder".into();
+        acc.email = Some("q@example.com".into());
+        acc.data = "{}".into();
+        db::upsert_account(&state.pool, &acc).await.unwrap();
+
+        // Qoder surfaces "cannot invoke this model" as RateLimited.
+        apply_provider_error(
+            &state.pool,
+            &state.config,
+            &mut acc,
+            &ProviderError::RateLimited {
+                retry_after_secs: None,
+            },
+            Some("qd/ultimate"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            acc.cooldown_until.is_none(),
+            "model-scoped refusal must not seal the account globally"
+        );
+        assert_eq!(acc.is_active, 1, "account stays usable");
+        assert!(
+            acc.model_rejected("qd/ultimate"),
+            "refused model is remembered"
+        );
+        assert!(
+            !acc.model_rejected("qd/lite"),
+            "the same account must still be offered for other models"
+        );
+
+        // And the picker must honour it: rejected model excludes the account,
+        // a different model still selects it.
+        let rejected = db::pick_account(&state.pool, "qoder", &[], Some("qd/ultimate")).await;
+        assert!(
+            rejected.is_err(),
+            "account refused for this model must not be picked for it"
+        );
+        let other = db::pick_account(&state.pool, "qoder", &[], Some("qd/lite")).await;
+        assert!(
+            other.is_ok(),
+            "same account must still be picked for a different model"
+        );
+    }
+
+    #[tokio::test]
+    async fn qoder_rate_limit_without_model_still_seals() {
+        // No model context (e.g. auth/probe paths): keep the old, safer seal.
+        let (state, _dir) = test_state("qdnomodel").await;
+        let mut acc = byok_pool_account();
+        acc.id = "qd-nomodel".into();
+        acc.provider = "qoder".into();
+        acc.data = "{}".into();
+        db::upsert_account(&state.pool, &acc).await.unwrap();
+
+        apply_provider_error(
+            &state.pool,
+            &state.config,
+            &mut acc,
+            &ProviderError::RateLimited {
+                retry_after_secs: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            acc.cooldown_until.is_some(),
+            "without model context a 429 must still seal"
+        );
     }
 
     #[tokio::test]
@@ -1702,6 +1814,7 @@ mod tests {
             &state.config,
             &mut acc,
             &ProviderError::AuthInvalid("dead key".into()),
+            Some("m"),
         )
         .await
         .unwrap();
@@ -1717,6 +1830,7 @@ mod tests {
             &ProviderError::RateLimited {
                 retry_after_secs: Some(900),
             },
+            Some("m"),
         )
         .await
         .unwrap();
