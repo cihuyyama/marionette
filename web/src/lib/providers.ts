@@ -2,6 +2,7 @@ export const PROVIDERS = [
   "grok-cli",
   "qoder",
   "commandcode",
+  "cline",
   "byok",
 ] as const;
 
@@ -12,6 +13,7 @@ export function isProviderId(value: string | undefined): value is ProviderId {
     value === "grok-cli" ||
     value === "qoder" ||
     value === "commandcode" ||
+    value === "cline" ||
     value === "byok"
   );
 }
@@ -20,6 +22,7 @@ export function labelProvider(provider: string): string {
   if (provider === "grok-cli") return "Grok CLI";
   if (provider === "qoder") return "Qoder";
   if (provider === "commandcode") return "Command Code";
+  if (provider === "cline") return "Cline";
   if (provider === "byok") return "Custom (BYOK)";
   return provider;
 }

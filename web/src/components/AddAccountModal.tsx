@@ -8,7 +8,7 @@ import {
 } from "../lib/api";
 import { labelProvider, type ProviderId } from "../lib/providers";
 
-type Mode = "single" | "bulk" | "pat" | "keys";
+type Mode = "single" | "bulk" | "pat" | "keys" | "tokens";
 
 const BYOK_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -35,6 +35,7 @@ export function AddAccountModal({
   const modes = useMemo<Mode[]>(() => {
     if (provider === "qoder") return ["single", "pat", "bulk"];
     if (provider === "commandcode") return ["single", "keys", "bulk"];
+    if (provider === "cline") return ["single", "tokens", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);
@@ -115,7 +116,7 @@ export function AddAccountModal({
         byokApiKeyTrimmed !== ""
       );
     }
-    if (mode === "bulk" || mode === "pat" || mode === "keys") {
+    if (mode === "bulk" || mode === "pat" || mode === "keys" || mode === "tokens") {
       return Boolean(bulkText.trim());
     }
     if (provider === "qoder") return Boolean(personalToken.trim());
@@ -229,6 +230,7 @@ export function AddAccountModal({
     if (m === "single") return "Single";
     if (m === "pat") return "PAT lines";
     if (m === "keys") return "API key lines";
+    if (m === "tokens") return "Refresh token lines";
     return "Bulk JSON";
   }
 
@@ -566,6 +568,23 @@ export function AddAccountModal({
             </div>
           )}
 
+          {mode === "tokens" && (
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label htmlFor="add-rt-lines">Refresh tokens (one per line)</label>
+              <textarea
+                id="add-rt-lines"
+                className="textarea"
+                rows={10}
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                placeholder={"refresh_token\nemail@x.com|refresh_token"}
+                required
+                spellCheck={false}
+              />
+              <span className="hint">Line = refresh token, or email|refresh token</span>
+            </div>
+          )}
+
           {mode === "keys" && (
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="add-key-lines">API keys (one per line)</label>
@@ -694,6 +713,25 @@ function buildPayload(provider: ProviderId, mode: Mode, f: Fields): unknown {
     if (f.expiresAt.trim()) row.expiresAt = f.expiresAt.trim();
     if (f.clientId.trim()) row.clientId = f.clientId.trim();
     return row;
+  }
+
+  if (mode === "tokens") {
+    const lines = f.bulkText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) throw new Error("No tokens");
+    return lines.map((line) => {
+      const idx = line.indexOf("|");
+      if (idx > 0) {
+        return {
+          provider,
+          email: line.slice(0, idx).trim(),
+          refreshToken: line.slice(idx + 1).trim(),
+        };
+      }
+      return { provider, refreshToken: line };
+    });
   }
 
   if (mode === "pat" || mode === "keys") {

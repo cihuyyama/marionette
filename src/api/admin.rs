@@ -130,6 +130,7 @@ pub async fn patch_provider_settings(
     if provider != "grok-cli"
         && provider != "qoder"
         && provider != "commandcode"
+        && provider != "cline"
     {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
@@ -465,6 +466,13 @@ pub async fn refresh_account(
         "byok" => {
             state
                 .byok
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
+        "cline" => {
+            state
+                .cline
                 .ensure_fresh_auth(&mut acc)
                 .await
                 .map_err(AppError::from)?;
@@ -972,6 +980,25 @@ fn account_to_connection(acc: &Account) -> Result<Value, &'static str> {
             }
             if masked(&data, &["personalToken", "personal_token"]) {
                 return Err("qoder: personalToken is masked");
+            }
+            if let Value::Object(m) = &data {
+                for (k, v) in m {
+                    conn.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        "cline" => {
+            let has_token = data
+                .get("accessToken")
+                .or_else(|| data.get("access_token"))
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_token {
+                return Err("cline: missing accessToken");
+            }
+            if masked(&data, &["accessToken", "refreshToken"]) {
+                return Err("cline: token is masked");
             }
             if let Value::Object(m) = &data {
                 for (k, v) in m {

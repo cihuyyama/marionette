@@ -76,6 +76,8 @@ pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
         None
     } else if model.starts_with("cmc/") || model.starts_with("commandcode") {
         Some("commandcode")
+    } else if model.starts_with("cln/") || model.starts_with("cline") {
+        Some("cline")
     } else if model.starts_with("gcli/") || model.starts_with("grok") {
         Some("grok-cli")
     } else if model.starts_with("qd/") || model.starts_with("qoder") {
@@ -187,6 +189,22 @@ fn cmc(id: &'static str, display: &'static str) -> ModelObject {
     model(
         id,
         "commandcode",
+        Some(id),
+        Some(display),
+        None,
+        None,
+        true,
+        true,
+        false,
+    )
+}
+
+/// Cline public ids are `cln/<upstream-id>`; upstream ids keep their own
+/// slashes (upstream_model strips only the first `cln/` segment).
+fn cln(id: &'static str, display: &'static str) -> ModelObject {
+    model(
+        id,
+        "cline",
         Some(id),
         Some(display),
         None,
@@ -423,6 +441,10 @@ pub fn default_models() -> ModelsResponse {
             cmc("cmc/xiaomi/mimo-v2.5", "Xiaomi MiMo v2.5"),
             cmc("cmc/poolside/laguna-s-2.1-free", "Poolside Laguna S 2.1 Free"),
             cmc("cmc/nvidia/nemotron-3-ultra-550b-a55b", "Nemotron 3 Ultra"),
+            cln("cln/deepseek/deepseek-v4-flash", "DeepSeek V4 Flash (free)"),
+            cln("cln/stealth/space-bunny-alpha", "Space Bunny Alpha"),
+            cln("cln/cline-free/mimo-v2.6-flash", "MiMo v2.6 Flash (free)"),
+            cln("cln/cline-free/muse-spark-1.3-contributor", "Muse Spark 1.3 (free)"),
         ],
     }
 }

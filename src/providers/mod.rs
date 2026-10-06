@@ -1,4 +1,5 @@
 pub mod byok;
+pub mod cline;
 pub mod commandcode;
 pub mod grok_cli;
 pub mod qoder;

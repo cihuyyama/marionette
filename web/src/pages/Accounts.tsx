@@ -310,6 +310,7 @@ export function Accounts() {
       "grok-cli": emptyCounts(),
       qoder: emptyCounts(),
       commandcode: emptyCounts(),
+      cline: emptyCounts(),
     };
     for (const p of BUILTIN_PROVIDERS) {
       map[p] = countFor(accounts.filter((a) => a.provider === p));

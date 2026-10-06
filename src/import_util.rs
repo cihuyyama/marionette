@@ -22,7 +22,7 @@ use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline"];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -131,6 +131,7 @@ fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "grok-cli" => build_grok_data(item),
         "qoder" => build_qoder_data(item),
         "commandcode" => build_commandcode_data(item),
+        "cline" => build_cline_data(item),
         _ => Err(format!("unsupported: {provider}")),
     }
 }
@@ -227,6 +228,47 @@ fn build_qoder_data(item: &Value) -> Result<Value, String> {
 
 /// commandcode data: a static bearer API key (`user_…`) for the
 /// api.commandcode.ai/alpha/generate NDJSON gateway — no OAuth, no refresh.
+/// cline data. Accepts either a full OAuth pair or a bare refresh token.
+///
+/// A refresh token alone is enough: `/auth/refresh` is a plain POST, so a
+/// pasted RT can bootstrap without the WorkOS device screen.
+fn build_cline_data(item: &Value) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+
+    if let Some(rt) = item
+        .get("refreshToken")
+        .or_else(|| item.get("refresh_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("refreshToken".into(), json!(rt));
+    }
+
+    if let Some(at) = item
+        .get("accessToken")
+        .or_else(|| item.get("access_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("accessToken".into(), json!(at));
+        out.insert("credentialKind".into(), json!("oauth"));
+    }
+
+    if out.is_empty() {
+        return Err("cline: missing refreshToken (or accessToken)".into());
+    }
+    // A bare refresh token is the import-only path; the access token arrives
+    // on first refresh.
+    if !out.contains_key("accessToken") {
+        out.insert("accessToken".into(), json!(""));
+        out.insert("credentialKind".into(), json!("oauth"));
+    }
+    copy_str(item, &mut out, "expiresAt");
+    Ok(Value::Object(out))
+}
+
 fn build_commandcode_data(item: &Value) -> Result<Value, String> {
     let api_key = item
         .get("apiKey")
