@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, chatCompletion, listModels } from "../lib/api";
+import { ApiError, chatCompletion, listModels, type ModelObject } from "../lib/api";
+import { ModelPicker } from "../components/ModelPicker";
 
 export function SmokeTest() {
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelObject[]>([]);
   const [model, setModel] = useState("gcli/grok-4.5");
   const [message, setMessage] = useState("Reply with exactly: pong");
   const [loading, setLoading] = useState(false);
@@ -17,9 +18,11 @@ export function SmokeTest() {
     listModels()
       .then((r) => {
         if (cancelled) return;
-        const ids = r.data.map((m) => m.id);
-        setModels(ids);
-        setModel((current) => (ids.length && !ids.includes(current) ? ids[0] : current));
+        const list = r.data;
+        setModels(list);
+        setModel((current) =>
+          list.length && !list.some((m) => m.id === current) ? list[0].id : current,
+        );
         setModelsError(null);
       })
       .catch((e) => {
@@ -88,28 +91,7 @@ export function SmokeTest() {
         <div className="row-fields">
           <div className="field">
             <label htmlFor="smoke-model">Model</label>
-            {models.length > 0 ? (
-              <select
-                id="smoke-model"
-                className="select"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                {models.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                id="smoke-model"
-                className="input mono"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="gcli/grok-4.5"
-              />
-            )}
+            <ModelPicker id="smoke-model" value={model} onChange={setModel} models={models} />
           </div>
           <div className="field">
             <label htmlFor="smoke-msg">Message</label>
