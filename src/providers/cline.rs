@@ -54,10 +54,17 @@ const REFRESH_LEAD_SECS: i64 = 300;
 /// Static catalog (mirrors Cartethyia `CLINE_MODELS`). The served catalog
 /// normally comes from two unauthenticated GETs; this is the offline floor.
 pub const CLINE_MODELS: &[(&str, i64, i64)] = &[
-    ("deepseek/deepseek-v4-flash", 1_048_576, 384_000),
-    ("stealth/space-bunny-alpha", 1_000_000, 524_288),
+    // Live roster as of 2026-10-06. `cline-free/*` is daily-reset and free;
+    // everything else bills the one-off signup credit.
+    ("cline-free/solar-mini4", 1_048_576, 131_072),
     ("cline-free/mimo-v2.6-flash", 1_048_576, 131_072),
     ("cline-free/muse-spark-1.3-contributor", 1_048_576, 943_718),
+    ("anthropic/claude-sonnet-5.5", 200_000, 64_000),
+    ("anthropic/claude-opus-5.5", 200_000, 64_000),
+    ("openai/gpt-6-astra", 400_000, 128_000),
+    ("openai/gpt-6.1-sol", 400_000, 128_000),
+    ("spacexai/grok-4.7", 500_000, 64_000),
+    ("moonshotai/kimi-k3", 256_000, 64_000),
 ];
 
 /// One row of the live roster (`GET /ai/cline/recommended-models`).
@@ -588,6 +595,8 @@ impl Provider for ClineProvider {
             body: format!("bad chat json: {e}"),
         })?;
 
+        value = unwrap_data_envelope(value);
+
         // A JSON error envelope on a 2xx must not decode as an empty answer.
         if value.get("error").is_some()
             && value.get("choices").is_none()
@@ -706,6 +715,29 @@ fn json_window(l: &ClineUsageLimit, pct: f64) -> Option<Value> {
         return None;
     }
     Some(Value::Object(out))
+}
+
+
+/// cline wraps the non-stream completion in a `data` envelope
+/// (`{"data":{"choices":[...]}}`) while its streaming path emits plain chunks.
+///
+/// Passing that through would hand an OpenAI-shaped client a body whose
+/// `choices` is undefined. Only unwrap when the inner object actually carries a
+/// completion or an error, so an unrelated `data` field is left untouched.
+pub fn unwrap_data_envelope(mut value: Value) -> Value {
+    if value.get("choices").is_some() || value.get("output").is_some() {
+        return value;
+    }
+    let inner = value
+        .get("data")
+        .filter(|d| {
+            d.get("choices").is_some() || d.get("output").is_some() || d.get("error").is_some()
+        })
+        .cloned();
+    if let Some(inner) = inner {
+        value = inner;
+    }
+    value
 }
 
 #[cfg(test)]

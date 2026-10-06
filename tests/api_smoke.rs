@@ -1431,3 +1431,124 @@ async fn responses_rejects_unknown_role() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+// ── Import provider resolution ─────────────────────────────────────────
+
+#[tokio::test]
+async fn import_accepts_type_field_for_cline() {
+    // 9Router and Cartethyia exports label the provider as `type`, not
+    // `provider`. Reading only `provider` used to fall through to a guess that
+    // assumed grok-cli, silently importing a cline credential as a grok
+    // account: wrong provider, a grok token budget allocated to it, and a row
+    // the cline picker could never select.
+    let (app, dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/accounts")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!([{
+                        "type": "cline",
+                        "email": "cline-user@example.com",
+                        "accessToken": "at_cline",
+                        "refreshToken": "rt_cline",
+                        "expiresAt": "2027-01-01T00:00:00.000Z"
+                    }]))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let cfg = Config::from_env();
+    let pool = db::connect(&dir.join("test.sqlite")).await.unwrap();
+    let accounts = db::list_accounts(&pool, Some("cline"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1, "cline account must land under cline");
+    let data = accounts[0].data_json();
+    assert_eq!(
+        data.get("credentialKind").and_then(|v| v.as_str()),
+        Some("oauth"),
+        "cline data must carry credentialKind so the workos: prefix is used"
+    );
+    assert_eq!(accounts[0].quota_limit, db::default_quota_for_provider("cline").0);
+    let _ = cfg;
+
+    let grok = db::list_accounts(&pool, Some("grok-cli"), None, None)
+        .await
+        .unwrap();
+    assert!(
+        grok.is_empty(),
+        "a cline credential must never become a grok account"
+    );
+}
+
+#[tokio::test]
+async fn import_refuses_unlabelled_credentials() {
+    // No provider, no type, and no unambiguous token shape: guessing here is
+    // what produced the wrong-provider bug, so it must be refused.
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/accounts")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!([{
+                        "email": "mystery@example.com",
+                        "accessToken": "at_x",
+                        "refreshToken": "rt_x"
+                    }]))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The item is skipped (import is best-effort per row), so the request
+    // succeeds but nothing is stored under any provider.
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["inserted"], 0);
+    assert_eq!(body["skipped"], 1);
+}
+
+#[tokio::test]
+async fn cline_unwraps_data_envelope_on_non_stream() {
+    // cline returns {"data":{"choices":[...]}} for non-stream while its
+    // streaming path emits plain chunks. A client reading choices[0] would
+    // get undefined if the envelope were passed through.
+    use marionette::providers::cline::unwrap_data_envelope;
+    let wrapped = json!({"data":{"choices":[{"message":{"content":"hi"}}],"model":"m"}});
+    let out = unwrap_data_envelope(wrapped);
+    assert!(
+        out.get("choices").is_some(),
+        "choices must be hoisted out of the data envelope"
+    );
+    assert_eq!(out["model"], "m");
+
+    // A plain body is left alone.
+    let plain = json!({"choices":[{"message":{"content":"hi"}}]});
+    assert_eq!(unwrap_data_envelope(plain.clone()), plain);
+
+    // A wrapped error must still be recognisable as an error, not treated as
+    // an empty successful answer.
+    let wrapped_err = json!({"data":{"error":{"message":"nope"}}});
+    let out_err = unwrap_data_envelope(wrapped_err);
+    assert!(out_err.get("error").is_some());
+    assert!(out_err.get("choices").is_none());
+}

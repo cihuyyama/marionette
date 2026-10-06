@@ -1479,17 +1479,47 @@ async fn upsert_import_item(
     item: &Value,
     skip_existing: bool,
 ) -> AppResult<Option<bool>> {
-    let provider = item
+    // 9Router and Cartethyia exports label the provider as `type`, while
+    // Marionette's own exports use `provider`. Accept both.
+    //
+    // The fallback used to guess from whichever token field was present and
+    // otherwise assume `grok-cli`, so a cline credential with no `provider`
+    // key was silently imported as a grok account: wrong provider, a grok
+    // token budget allocated to it, and a row the cline picker can never
+    // select. A wrong provider is worse than a rejected row, so the guess is
+    // now limited to the unambiguous single-field shapes and everything else
+    // is refused with a reason.
+    let explicit = item
         .get("provider")
+        .or_else(|| item.get("type"))
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
-                "qoder"
-            } else {
-                "grok-cli"
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let provider = match explicit {
+        Some(p) => {
+            let normalized = normalize_provider_name(p);
+            if !import_util::SUPPORTED_PROVIDERS.contains(&normalized.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported provider `{p}`"
+                )));
             }
-        })
-        .to_string();
+            normalized
+        }
+        None => {
+            // Only two credential shapes identify themselves without a label.
+            if item.get("personalToken").is_some() || item.get("personal_token").is_some() {
+                "qoder".to_string()
+            } else if item.get("apiKey").is_some() || item.get("api_key").is_some() {
+                "commandcode".to_string()
+            } else {
+                return Err(AppError::BadRequest(
+                    "missing provider: supply `provider` (or `type`) — refusing to guess"
+                        .into(),
+                ));
+            }
+        }
+    };
 
     let email = item
         .get("email")
@@ -1503,10 +1533,15 @@ async fn upsert_import_item(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let data = if let Some(d) = item.get("data") {
-        normalize_token_data(d)
-    } else {
-        normalize_token_data(item)
+    // Build the provider's expected credential shape. Grok keeps its tokens
+    // flat, so the generic normaliser is right for it; every other provider
+    // has a specific shape that `normalize_token_data` would flatten wrongly
+    // (notably cline's `credentialKind`, which decides the auth prefix).
+    let data = match item.get("data") {
+        // Legacy shape: credentials already nested under `data`.
+        Some(d) if d.is_object() => normalize_token_data(d),
+        _ => import_util::build_data(item, &provider)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?,
     };
 
     let now = db::now_rfc3339();
@@ -1534,6 +1569,17 @@ async fn upsert_import_item(
     match db::upsert_account(&state.pool, &acc).await? {
         db::UpsertKind::Inserted => Ok(Some(true)),
         db::UpsertKind::Updated => Ok(Some(false)),
+    }
+}
+
+/// Map the provider spellings other tools emit onto Marionette's ids.
+///
+/// `xai` is grok, and Cartethyia keys grok under both names; an unmapped
+/// alias would otherwise be rejected as unsupported.
+fn normalize_provider_name(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "xai" | "grok" | "grok-shell" | "grok_cli" => "grok-cli".to_string(),
+        other => other.to_string(),
     }
 }
 

@@ -476,10 +476,19 @@ pub fn default_models() -> ModelsResponse {
             cmc("cmc/xiaomi/mimo-v2.5", "Xiaomi MiMo v2.5"),
             cmc("cmc/poolside/laguna-s-2.1-free", "Poolside Laguna S 2.1 Free"),
             cmc("cmc/nvidia/nemotron-3-ultra-550b-a55b", "Nemotron 3 Ultra"),
-            cln("cln/deepseek/deepseek-v4-flash", "DeepSeek V4 Flash (free)"),
-            cln("cln/stealth/space-bunny-alpha", "Space Bunny Alpha"),
+            // cline's live roster (GET /ai/cline/recommended-models) as of
+            // 2026-10-06. The free bucket is daily-reset and costs nothing;
+            // the recommended bucket bills the one-off $0.5 signup credit,
+            // which never refills. Kept separate for that reason.
+            cln("cln/cline-free/solar-mini4", "Solar Mini 4 (free)"),
             cln("cln/cline-free/mimo-v2.6-flash", "MiMo v2.6 Flash (free)"),
             cln("cln/cline-free/muse-spark-1.3-contributor", "Muse Spark 1.3 (free)"),
+            cln("cln/anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5 (credit)"),
+            cln("cln/anthropic/claude-opus-5.5", "Claude Opus 5.5 (credit)"),
+            cln("cln/openai/gpt-6-astra", "GPT-6 Astra (credit)"),
+            cln("cln/openai/gpt-6.1-sol", "GPT-6.1 Sol (credit)"),
+            cln("cln/spacexai/grok-4.7", "Grok 4.7 (credit)"),
+            cln("cln/moonshotai/kimi-k3", "Kimi K3 (credit)"),
             ag("ag/claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ag("ag/claude-opus-4-6", "Claude Opus 4.6"),
             ag("ag/gemini-3-flash", "Gemini 3 Flash"),

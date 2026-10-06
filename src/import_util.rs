@@ -126,7 +126,7 @@ fn map_connection(item: &Value) -> Result<Account, String> {
 
 /// Build the `data` JSON blob for a connection, normalised to Marionette's
 /// expected shape for each provider.
-fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
+pub fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
     match provider {
         "grok-cli" => build_grok_data(item),
         "qoder" => build_qoder_data(item),
