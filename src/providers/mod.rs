@@ -3,6 +3,7 @@ pub mod antigravity;
 pub mod cline;
 pub mod commandcode;
 pub mod grok_cli;
+pub mod kiro_event_stream;
 pub mod qoder;
 
 use crate::db::Account;
