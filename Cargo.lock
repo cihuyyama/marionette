@@ -1201,6 +1201,7 @@ dependencies = [
  "md-5",
  "mimalloc",
  "mime_guess",
+ "parking_lot",
  "pkcs1",
  "pkcs8",
  "rand 0.8.7",

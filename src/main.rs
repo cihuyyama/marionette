@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let static_dir = config.static_dir.clone();
     let cors_origin = config.cors_origin.clone();
     let state = AppState::new(pool, config);
+    marionette::workers::client_version::spawn(state.clone());
     marionette::workers::refresh::spawn(state.clone());
     marionette::workers::proxy_health::spawn(state.clone());
     marionette::workers::retention::spawn(state.clone());

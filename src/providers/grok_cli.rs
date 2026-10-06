@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::db::{Account, parse_rfc3339};
 use crate::error::ProviderError;
 use crate::openai::ChatCompletionRequest;
+use crate::providers::client_version::{ClientVersion, Extract, VersionSource};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -18,9 +19,40 @@ use uuid::Uuid;
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing";
-const USER_AGENT: &str = "grok-shell/1.0.5 (linux; x86_64)";
 const CLIENT_IDENTIFIER: &str = "grok-shell";
-const CLIENT_VERSION: &str = "1.0.5";
+
+/// Upstream gates dispatch on this version: a stale one returns
+/// `426 Upgrade Required` for every request and the provider is dead until the
+/// constant is edited and redeployed. It is therefore resolved at runtime.
+///
+/// The pinned fallback is the version that was current when this was written;
+/// it keeps the provider working if the release endpoints are unreachable.
+static CLIENT_VERSION: ClientVersion = ClientVersion::new(
+    "grok",
+    "1.0.46",
+    &[
+        // GCS release pointer: body is the bare version string.
+        VersionSource {
+            url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/stable",
+            extract: Extract::PlainText,
+        },
+        // npm dist-tag, as a second opinion if the pointer moves.
+        VersionSource {
+            url: "https://registry.npmjs.org/@xai-official/grok/latest",
+            extract: Extract::NpmLatest,
+        },
+    ],
+);
+
+/// The resolver behind `grok-shell` dispatch gating, for the version worker.
+pub fn client_version() -> &'static ClientVersion {
+    &CLIENT_VERSION
+}
+
+/// `grok-shell/<version> (linux; x86_64)`.
+fn user_agent() -> String {
+    format!("grok-shell/{} (linux; x86_64)", CLIENT_VERSION.get())
+}
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
 const COMPACTIONS_REMAINING: &str = "1";
@@ -75,7 +107,7 @@ pub struct GrokCliProvider {
 impl GrokCliProvider {
     pub fn new(config: Arc<Config>) -> Self {
         let mut builder = Client::builder()
-            .user_agent(USER_AGENT)
+            .user_agent(user_agent())
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(15))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
@@ -241,12 +273,12 @@ impl GrokCliProvider {
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", user_agent())
             .header("x-xai-token-auth", TOKEN_AUTH)
             .header("x-authenticateresponse", "authenticate-response")
             .header("x-grok-client-mode", "headless")
             .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
-            .header("x-grok-client-version", CLIENT_VERSION)
+            .header("x-grok-client-version", CLIENT_VERSION.get())
             .header("x-compaction-at", COMPACTION_AT)
             .header("x-compactions-remaining", COMPACTIONS_REMAINING)
             .header("x-grok-doom-loop-check", DOOM_LOOP_CHECK)
@@ -318,7 +350,7 @@ impl GrokCliProvider {
             .header("Accept", "application/json")
             .header("x-xai-token-auth", TOKEN_AUTH)
             .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
-            .header("x-grok-client-version", CLIENT_VERSION)
+            .header("x-grok-client-version", CLIENT_VERSION.get())
             .send()
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -441,12 +473,12 @@ impl Provider for GrokCliProvider {
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", user_agent())
             .header("x-xai-token-auth", TOKEN_AUTH)
             .header("x-authenticateresponse", "authenticate-response")
             .header("x-grok-client-mode", "headless")
             .header("x-grok-client-identifier", CLIENT_IDENTIFIER)
-            .header("x-grok-client-version", CLIENT_VERSION)
+            .header("x-grok-client-version", CLIENT_VERSION.get())
             .header("x-compaction-at", COMPACTION_AT)
             .header("x-compactions-remaining", COMPACTIONS_REMAINING)
             .header("x-grok-doom-loop-check", DOOM_LOOP_CHECK)

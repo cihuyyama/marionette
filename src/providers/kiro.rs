@@ -29,6 +29,7 @@ use super::{classify_http_status, ChatOutcome, Provider, StreamUsage};
 use crate::db::Account;
 use crate::error::ProviderError;
 use crate::openai::ChatCompletionRequest;
+use crate::providers::client_version::{ClientVersion, Extract, VersionSource};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::response::Response;
@@ -60,6 +61,30 @@ const OIDC_HOST_TEMPLATE: &str = "https://oidc.{region}.amazonaws.com";
 const SOCIAL_HOST: &str = "https://prod.us-east-1.auth.desktop.kiro.dev";
 
 pub const KIRO_PROVIDER: &str = "kiro";
+
+/// The IDE build stamped into `KiroIDE-<version>-<machine_id>` user-agents.
+///
+/// Upstream gates on this the same way grok does, so it is resolved at runtime
+/// rather than pinned in the binary. The download page publishes the current
+/// version; the pinned fallback keeps dispatch working if it is unreachable.
+static CLIENT_VERSION: ClientVersion = ClientVersion::new(
+    "kiro",
+    "1.2.37",
+    &[VersionSource {
+        url: "https://kiro.dev/downloads/",
+        extract: Extract::AfterField("currentVersion"),
+    }],
+);
+
+/// The resolver behind the KiroIDE user-agent, for the version worker.
+pub fn client_version() -> &'static ClientVersion {
+    &CLIENT_VERSION
+}
+
+/// `KiroIDE-<version>-<machine_id>`.
+fn kiro_ide_user_agent(machine_id: &str) -> String {
+    format!("KiroIDE-{}-{machine_id}", CLIENT_VERSION.get())
+}
 
 const REFRESH_LEAD_SECS: i64 = 300;
 const DEFAULT_REGION: &str = "us-east-1";
@@ -578,8 +603,8 @@ impl KiroProvider {
             ("x-amzn-kiro-agent-mode".into(), "spec".into()),
             ("amz-sdk-request".into(), "attempt=1; max=3".into()),
             ("amz-sdk-invocation-id".into(), Uuid::new_v4().to_string()),
-            ("user-agent".into(), format!("KiroIDE-1.2.4-{machine_id}")),
-            ("x-amz-user-agent".into(), format!("KiroIDE-1.2.4-{machine_id}")),
+            ("user-agent".into(), kiro_ide_user_agent(machine_id)),
+            ("x-amz-user-agent".into(), kiro_ide_user_agent(machine_id)),
             ("authorization".into(), format!("Bearer {token}")),
         ];
         // A blank machine id advertises a device with no identity, a shape no
@@ -1122,8 +1147,8 @@ impl Provider for KiroProvider {
             .header("accept", "application/json")
             .header("connection", "close")
             .header("x-amzn-kiro-agent-mode", "vibe")
-            .header("user-agent", format!("KiroIDE-1.2.4-{machine_id}"))
-            .header("x-amz-user-agent", format!("KiroIDE-1.2.4-{machine_id}"));
+            .header("user-agent", kiro_ide_user_agent(&machine_id))
+            .header("x-amz-user-agent", kiro_ide_user_agent(&machine_id));
         if let Some(tt) = method.token_type_header() {
             request = request.header("tokentype", tt);
         }
