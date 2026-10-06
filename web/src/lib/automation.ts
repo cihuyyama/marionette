@@ -23,7 +23,7 @@ export const AUTOMATION_PROVIDERS: AutomationProvider[] = [
   {
     id: "qoder",
     label: labelProvider("qoder"),
-    blurb: "GSuite → PAT → inject → pool import",
+    blurb: "GSuite → PAT → pool import",
     status: "ready",
     methods: [
       {
@@ -37,7 +37,7 @@ export const AUTOMATION_PROVIDERS: AutomationProvider[] = [
         id: "register",
         label: "Register",
         description:
-          "Signup new accounts: email + Aliyun slide captcha → IMAP OTP → PAT → optional inject → pool. Camoufox under scripts/automation/qoder_farm.",
+          "Signup new accounts: email + Aliyun slide captcha → IMAP OTP → PAT → pool. Camoufox under scripts/automation/qoder_farm.",
         status: "ready",
       },
       {

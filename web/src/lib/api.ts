@@ -382,144 +382,6 @@ export function claimProTrial(id: string, settings?: Settings) {
   );
 }
 
-export type InjectJobStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "cancelled"
-  | string;
-
-export type InjectJob = {
-  id: string;
-  kind: string;
-  status: string;
-  created_at?: string;
-  started_at?: string | null;
-  finished_at?: string | null;
-  exit_code?: number | null;
-  error?: string | null;
-  account_id: string;
-  account_ids?: string[];
-  bulk?: boolean;
-  bulk_total?: number;
-  bulk_ok?: number;
-  bulk_fail?: number;
-  email?: string | null;
-  headless: boolean;
-  refresh: boolean;
-  work_dir?: string;
-  log_path?: string;
-  current_step?: string | null;
-  inject_result?: Record<string, unknown> | null;
-  log_count: number;
-};
-
-export type InjectEvent = {
-  seq: number;
-  ts: string;
-  line: string;
-  parsed?: Record<string, unknown> | null;
-};
-
-export type InjectStartResult = {
-  ok: boolean;
-  job: InjectJob;
-};
-
-export type InjectRefreshResult = {
-  ok: boolean;
-  refreshed: boolean;
-  refresh_error?: string | null;
-  account: Account;
-  skipped?: boolean;
-  accounts_refreshed?: number;
-  accounts_failed?: number;
-  accounts_targeted?: number;
-};
-
-export function startInjectJob(
-  accountId: string,
-  opts?: { headless?: boolean; refresh?: boolean },
-  settings?: Settings,
-) {
-  const qs = new URLSearchParams();
-  if (opts?.headless === false) qs.set("headless", "false");
-  if (opts?.headless === true) qs.set("headless", "true");
-  if (opts?.refresh === false) qs.set("refresh", "false");
-  if (opts?.refresh === true) qs.set("refresh", "true");
-  const q = qs.toString();
-  return request<InjectStartResult>(
-    `/admin/accounts/${encodeURIComponent(accountId)}/inject${q ? `?${q}` : ""}`,
-    { method: "POST", auth: "admin" },
-    settings,
-  );
-}
-
-export type BulkInjectStartResult = InjectStartResult & {
-  total?: number;
-  skipped_no_pat?: number;
-  skipped_inactive?: number;
-  skipped_has_credit?: number;
-};
-
-export function startBulkInjectJob(
-  opts?: {
-    accountIds?: string[];
-    includeInactive?: boolean;
-    headless?: boolean;
-    refresh?: boolean;
-  },
-  settings?: Settings,
-) {
-  return request<BulkInjectStartResult>(
-    `/admin/providers/qoder/inject`,
-    {
-      method: "POST",
-      auth: "admin",
-      body: JSON.stringify({
-        account_ids: opts?.accountIds,
-        include_inactive: opts?.includeInactive ?? false,
-        headless: opts?.headless ?? true,
-        refresh: opts?.refresh ?? true,
-      }),
-    },
-    settings,
-  );
-}
-
-export function getInjectJob(id: string, settings?: Settings) {
-  return request<{ job: InjectJob; events: InjectEvent[] }>(
-    `/admin/inject/jobs/${encodeURIComponent(id)}`,
-    { auth: "admin" },
-    settings,
-  );
-}
-
-export function getInjectEvents(id: string, after = 0, settings?: Settings) {
-  return request<{ job: InjectJob; events: InjectEvent[]; after: number }>(
-    `/admin/inject/jobs/${encodeURIComponent(id)}/events?after=${after}`,
-    { auth: "admin" },
-    settings,
-  );
-}
-
-export function cancelInjectJob(id: string, settings?: Settings) {
-  return request<{ ok: boolean; job: InjectJob }>(
-    `/admin/inject/jobs/${encodeURIComponent(id)}/cancel`,
-    { method: "POST", auth: "admin" },
-    settings,
-  );
-}
-
-export function refreshAfterInject(id: string, settings?: Settings) {
-  return request<InjectRefreshResult>(
-    `/admin/inject/jobs/${encodeURIComponent(id)}/refresh`,
-    { method: "POST", auth: "admin" },
-    settings,
-  );
-}
-
 export type WarmupResultRow = {
   id: string;
   email?: string | null;
@@ -965,7 +827,6 @@ export type FarmJob = {
   exit_code?: number | null;
   error?: string | null;
   accounts_count: number;
-  inject: boolean;
   headless: boolean;
   device_auth: boolean;
   concurrency?: number;
@@ -1030,7 +891,6 @@ export function startFarmJob(
     accounts: string;
     default_password?: string | null;
     provider?: string;
-    inject?: boolean;
     headless?: boolean;
     device_auth?: boolean;
     skip_exchange?: boolean;
@@ -1093,7 +953,6 @@ export function retryFailedFarmJob(
   id: string,
   body?: {
     provider?: string;
-    inject?: boolean;
     headless?: boolean;
     device_auth?: boolean;
     skip_exchange?: boolean;

@@ -9,7 +9,6 @@ export type QoderRegisterPreset = {
   concurrency: number;
   headless: boolean;
   autoImport: boolean;
-  inject: boolean;
   captchaMode: QoderCaptchaMode;
   domain: string;
   gmailBase: string;
@@ -26,7 +25,6 @@ export const QODER_REGISTER_DEFAULTS: QoderRegisterPreset = {
   concurrency: 1,
   headless: false,
   autoImport: true,
-  inject: false,
   captchaMode: "auto",
   domain: "",
   gmailBase: "",
@@ -52,7 +50,6 @@ export function loadQoderRegisterPreset(): QoderRegisterPreset {
       concurrency: clampInt(p.concurrency, QODER_REGISTER_DEFAULTS.concurrency, 1, 64),
       headless: p.headless ?? QODER_REGISTER_DEFAULTS.headless,
       autoImport: p.autoImport ?? QODER_REGISTER_DEFAULTS.autoImport,
-      inject: p.inject ?? QODER_REGISTER_DEFAULTS.inject,
       captchaMode: isCaptchaMode(p.captchaMode) ? p.captchaMode : QODER_REGISTER_DEFAULTS.captchaMode,
       domain: p.domain ?? "",
       gmailBase: p.gmailBase ?? "",
@@ -74,7 +71,6 @@ export function saveQoderRegisterPreset(p: QoderRegisterPreset): void {
     concurrency: p.concurrency,
     headless: p.headless,
     autoImport: p.autoImport,
-    inject: p.inject,
     captchaMode: p.captchaMode,
     domain: p.domain.trim(),
     gmailBase: p.gmailBase.trim(),

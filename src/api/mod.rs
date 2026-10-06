@@ -117,7 +117,6 @@ pub fn router(state: AppState) -> Router {
             "/admin/accounts/{id}/proxy",
             axum::routing::delete(proxies::clear_assignments),
         )
-        .route("/admin/accounts/{id}/inject", post(admin::inject_account))
         .route(
             "/admin/accounts/{id}/claim-trial",
             post(admin::claim_trial_account),
@@ -125,23 +124,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/admin/providers/qoder/warmup",
             post(admin::warmup_qoder_accounts),
-        )
-        .route(
-            "/admin/providers/qoder/inject",
-            post(admin::inject_bulk),
-        )
-        .route("/admin/inject/jobs/{id}", get(admin::inject_get_job))
-        .route(
-            "/admin/inject/jobs/{id}/events",
-            get(admin::inject_events),
-        )
-        .route(
-            "/admin/inject/jobs/{id}/cancel",
-            post(admin::inject_cancel),
-        )
-        .route(
-            "/admin/inject/jobs/{id}/refresh",
-            post(admin::inject_finish_refresh),
         )
         .route("/admin/farm", get(admin::farm_status))
         .route("/admin/farm/start", post(admin::farm_start))

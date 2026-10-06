@@ -59,9 +59,6 @@ const AutomationPage = lazyPage(() =>
 const FarmPage = lazyPage(() =>
   import("./pages/Farm").then((m) => ({ default: m.FarmPage })),
 );
-const InjectJobPage = lazyPage(() =>
-  import("./pages/InjectJob").then((m) => ({ default: m.InjectJobPage })),
-);
 const ProxiesPage = lazyPage(() =>
   import("./pages/Proxies").then((m) => ({ default: m.ProxiesPage })),
 );
@@ -76,8 +73,6 @@ export default function App() {
               <Route index element={<Overview />} />
               <Route path="accounts" element={<Accounts />} />
               <Route
-                path="accounts/qoder/inject/:jobId"
-                element={<InjectJobPage />}
               />
               <Route
                 path="accounts/byok"

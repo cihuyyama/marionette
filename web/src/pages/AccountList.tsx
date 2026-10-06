@@ -16,10 +16,8 @@ import {
   type Account,
 } from "../lib/api";
 import { AddAccountModal } from "../components/AddAccountModal";
-import { BulkInjectModal } from "../components/BulkInjectModal";
 import { ExportPatModal } from "../components/ExportPatModal";
 import { ExportAccountsModal } from "../components/ExportAccountsModal";
-import { InjectModal } from "../components/InjectModal";
 import { StatusChip } from "../components/StatusChip";
 import { isProviderId, labelProvider, type ProviderId } from "../lib/providers";
 import { statusTooltip } from "../lib/status";
@@ -66,11 +64,6 @@ export function AccountList({
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [addOpen, setAddOpen] = useState(false);
-  const [injectTarget, setInjectTarget] = useState<{
-    id: string;
-    email: string | null;
-  } | null>(null);
-  const [bulkInjectOpen, setBulkInjectOpen] = useState(false);
   const [exportPatOpen, setExportPatOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [byokRefreshed, setByokRefreshed] = useState<
@@ -292,9 +285,6 @@ export function AccountList({
 
   const activeCount = accounts.filter((a) => a.is_active).length;
   const inactiveCount = accounts.length - activeCount;
-  const needInjectCount = accounts.filter(
-    (a) => a.is_active && (!a.quota_limit || (a.quota_remaining ?? 0) <= 0),
-  ).length;
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -484,15 +474,6 @@ export function AccountList({
             </button>
             {providerId === "qoder" && (
               <>
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary"
-                  disabled={bulkBusy || needInjectCount === 0}
-                  title="One job: dudul inject all active accounts with no credit / not synced"
-                  onClick={() => setBulkInjectOpen(true)}
-                >
-                  Inject dudul ({needInjectCount})
-                </button>
                 <button
                   type="button"
                   className="btn btn-sm"
@@ -928,20 +909,6 @@ export function AccountList({
                             >
                               Claim
                             </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              disabled={busy}
-                              title="Dudul inject — activate Pro Trial for this PAT"
-                              onClick={() =>
-                                setInjectTarget({
-                                  id: a.id,
-                                  email: a.email,
-                                })
-                              }
-                            >
-                              Inject
-                            </button>
                           </>
                         )}
                         {a.cooldown_until && (
@@ -1237,22 +1204,6 @@ export function AccountList({
                   Claim trial
                 </button>
               )}
-              {provider === "qoder" && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary"
-                  disabled={busyId === detail.id || bulkBusy}
-                  title="Dudul inject — activate Pro Trial"
-                  onClick={() =>
-                    setInjectTarget({
-                      id: detail.id,
-                      email: detail.email,
-                    })
-                  }
-                >
-                  Inject dudul
-                </button>
-              )}
               {detail.cooldown_until && (
                 <button
                   type="button"
@@ -1302,34 +1253,6 @@ export function AccountList({
               `${label} — ${res.email ?? res.id.slice(0, 8)} · ${n} model${n === 1 ? "" : "s"} fetched.`,
             );
             void load();
-          }}
-        />
-      )}
-
-      {injectTarget && (
-        <InjectModal
-          open
-          accountId={injectTarget.id}
-          email={injectTarget.email}
-          onClose={() => setInjectTarget(null)}
-          onStarted={(jobId) => {
-            setInjectTarget(null);
-            setMessage(`Inject job ${jobId.slice(0, 8)}… started`);
-            navigate(`/accounts/qoder/inject/${jobId}`);
-          }}
-        />
-      )}
-
-      {providerId === "qoder" && (
-        <BulkInjectModal
-          open={bulkInjectOpen}
-          needCount={needInjectCount}
-          activeCount={activeCount}
-          onClose={() => setBulkInjectOpen(false)}
-          onStarted={(jobId, summary) => {
-            setBulkInjectOpen(false);
-            setMessage(summary);
-            navigate(`/accounts/qoder/inject/${jobId}`);
           }}
         />
       )}

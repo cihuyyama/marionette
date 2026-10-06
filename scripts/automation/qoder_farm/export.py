@@ -26,7 +26,6 @@ def connection_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
     sot = result.get("securityOauthToken") or ""
     refresh = result.get("refreshToken") or ""
     quota = result.get("quota") or {}
-    inject = result.get("inject") or {}
 
     psd: dict[str, Any] = {
         "personalToken": pat,
@@ -50,9 +49,6 @@ def connection_from_result(result: dict[str, Any]) -> dict[str, Any] | None:
 
     farm_meta = {
         "farm": "qoder-farm",
-        "injectOk": bool(inject.get("ok")),
-        "injectSkipped": bool(inject.get("skipped")),
-        "injectReason": inject.get("reason"),
         "farmedAt": now,
     }
     if isinstance(quota, dict) and quota:

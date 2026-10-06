@@ -34,7 +34,7 @@ Admin UI / curl            Bearer admin key →  /admin/*
 - Account pool: pick, cooldown, cut/seal, Grok token budget + Qoder credits
 - Admin JSON + **React + Vite** dashboard (Overview, Accounts, Models, Activity, Automation, Smoke, Settings)
 - Import from JSON / 9Router SQLite / 9Router backup (Settings UI or CLI)
-- **Automation** (Python, outside Rust): Qoder Camoufox farm + dudul inject, Grok relogin OAuth farm
+- **Automation** (Python, outside Rust): Qoder Camoufox farm, Grok relogin OAuth farm
 - Background Grok token refresh worker
 
 ### Provider onboarding
@@ -148,7 +148,6 @@ See [`.env.example`](.env.example). Names only — put real values in local `.en
 | `MARIONETTE_LOG_BODY_RETENTION_DAYS` | Expire captured bodies | `7` |
 | `MARIONETTE_LOG_RETENTION_DAYS` | Delete request-log rows | `30` |
 | `MARIONETTE_RETENTION_INTERVAL_SECS` | Retention sweep interval (`0` disables) | `3600` |
-| `QODER_DUDUL_ACCESS_KEY` | Inject only (never commit) | empty |
 
 **Never commit:** `.env`, entire `data/`, farm `accounts*.txt`, farm `results/*.json`, OAuth/PAT dumps.
 
@@ -200,10 +199,10 @@ Dashboard: **Settings → 9Router import**, or **Accounts → + Add** for single
 | Nav | Purpose |
 |-----|---------|
 | Overview | Fleet pulse |
-| Accounts | Bound / Sealed / Cut / Fallen, plan chips, inject / warmup |
+| Accounts | Bound / Sealed / Cut / Fallen, plan chips, warmup |
 | Models | Catalog + credit rates |
 | Activity | Usage + request log (`day` / `week` / `month` / `all`) |
-| Automation | Qoder farm, Grok farm, inject jobs |
+| Automation | Qoder farm, Grok farm |
 | Smoke test | Pool chat probe |
 | Settings | Keys (localStorage), 9Router import |
 
@@ -217,7 +216,7 @@ Browser work lives under `scripts/automation/` — **not** in the Rust binary.
 
 | Package | Role |
 |---------|------|
-| [`scripts/automation/qoder_farm`](scripts/automation/qoder_farm/) | GSuite SSO → PAT → optional dudul inject |
+| [`scripts/automation/qoder_farm`](scripts/automation/qoder_farm/) | GSuite SSO → PAT |
 | [`scripts/automation/grok_farm`](scripts/automation/grok_farm/) | Relogin + PKCE OAuth for grok-cli |
 
 Start jobs from **Automation** in the UI (needs farm env + Python), or run packages from the CLI. Secrets stay in package-local `.env` / `accounts.txt` (gitignored).
@@ -243,7 +242,7 @@ selection, failover, quota, and request logging behave identically. Only the
 wire shape differs — Anthropic clients (Claude Code) and Responses clients
 (Codex) can be pointed at the same pool.
 
-**Admin** (Bearer `MARIONETTE_ADMIN_KEY`): stats, accounts CRUD, import, refresh, usage/requests, providers, inject / warmup / claim-trial, farm jobs.
+**Admin** (Bearer `MARIONETTE_ADMIN_KEY`): stats, accounts CRUD, import, refresh, usage/requests, providers, warmup / claim-trial, farm jobs.
 
 ```bash
 curl -s http://127.0.0.1:1940/health
@@ -289,7 +288,7 @@ Read in order:
 | Admin JSON | done |
 | Dashboard | done |
 | Qoder + recovery parity | done (live smoke needs PATs) |
-| Farm / inject automation | done (Python + admin UI) |
+| Farm automation | done (Python + admin UI) |
 | Deploy polish | partial (static serve; systemd optional) |
 
 ---

@@ -8,14 +8,12 @@ from typing import Any
 
 from .browser import close_session, launch_camoufox
 from .config import Config
-from .eligibility import inject_eligibility
 from .export import write_backup, write_failures
 from .google_sso import (
     click_qoder_google_button,
     drive_google_auth,
     is_sso_retryable_error,
 )
-from .inject import dudul_inject
 from .pat import (
     approve_device_auth,
     create_pat,
@@ -67,7 +65,6 @@ async def process_one(
     cfg: Config,
     prog: Progress,
     *,
-    do_inject: bool,
     do_device_auth: bool,
     skip_exchange: bool,
     count_result: bool = True,
@@ -79,7 +76,6 @@ async def process_one(
         "personalToken": None,
         "securityOauthToken": None,
         "machineId": None,
-        "inject": None,
         "quota": None,
         "error": None,
     }
@@ -198,18 +194,6 @@ async def process_one(
             except Exception as exc:
                 prog.log(f"quota fetch err: {exc}", "DBG", email=label)
 
-        inject_info: dict[str, Any]
-        if not (do_inject and cfg.dudul_inject):
-            inject_info = {"ok": False, "skipped": True, "reason": "inject disabled"}
-        else:
-            eligible, reason = inject_eligibility(result.get("quota"))
-            if not eligible:
-                prog.log(f"inject skipped — {reason}", "WAIT", email=label)
-                inject_info = {"ok": False, "skipped": True, "reason": reason}
-            else:
-                inject_info = await dudul_inject(page, pat, cfg, prog, label)
-        result["inject"] = inject_info
-
         result["ok"] = True
         result["authMethod"] = "gsuite"
         if count_result:
@@ -307,7 +291,6 @@ async def run_farm(
     cfg: Config,
     prog: Progress,
     *,
-    do_inject: bool = True,
     do_device_auth: bool = False,
     skip_exchange: bool = False,
     concurrency: int = 1,
@@ -370,7 +353,6 @@ async def run_farm(
                     password,
                     cfg,
                     prog,
-                    do_inject=do_inject,
                     do_device_auth=do_device_auth,
                     skip_exchange=skip_exchange,
                     count_result=False,

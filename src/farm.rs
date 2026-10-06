@@ -66,7 +66,6 @@ pub struct FarmJob {
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub accounts_count: usize,
-    pub inject: bool,
     pub headless: bool,
     pub device_auth: bool,
     pub concurrency: u32,
@@ -93,8 +92,6 @@ pub struct StartFarmRequest {
     pub default_password: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
-    #[serde(default = "default_true")]
-    pub inject: bool,
     #[serde(default)]
     pub headless: bool,
     #[serde(default)]
@@ -127,8 +124,6 @@ pub struct StartFarmRequest {
 pub struct RetryFarmRequest {
     #[serde(default)]
     pub provider: Option<String>,
-    #[serde(default = "default_true")]
-    pub inject: bool,
     #[serde(default)]
     pub headless: bool,
     #[serde(default)]
@@ -154,7 +149,6 @@ impl Default for RetryFarmRequest {
     fn default() -> Self {
         Self {
             provider: None,
-            inject: true,
             headless: false,
             device_auth: false,
             skip_exchange: false,
@@ -201,51 +195,9 @@ struct LiveJob {
     import_failed: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct InjectJob {
-    pub id: String,
-    pub kind: &'static str,
-    pub status: JobStatus,
-    pub created_at: String,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub exit_code: Option<i32>,
-    pub error: Option<String>,
-    pub account_id: String,
-    pub account_ids: Vec<String>,
-    pub bulk: bool,
-    pub bulk_total: u32,
-    pub bulk_ok: u32,
-    pub bulk_fail: u32,
-    pub email: Option<String>,
-    pub headless: bool,
-    pub refresh: bool,
-    pub work_dir: String,
-    pub log_path: String,
-    pub current_step: Option<String>,
-    pub inject_result: Option<Value>,
-    pub log_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct InjectPatItem {
-    pub account_id: String,
-    pub pat: String,
-    pub email: Option<String>,
-}
-
-struct LiveInjectJob {
-    meta: InjectJob,
-    events: VecDeque<FarmEvent>,
-    next_seq: u64,
-    child: Option<Child>,
-    kill_tx: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
 #[derive(Clone)]
 pub struct FarmManager {
     inner: Arc<Mutex<FarmState>>,
-    inject: Arc<Mutex<InjectState>>,
     python: PathBuf,
     package_parent: PathBuf,
     package_dir: PathBuf,
@@ -259,10 +211,6 @@ struct FarmState {
     history: VecDeque<FarmJob>,
 }
 
-struct InjectState {
-    current: Option<LiveInjectJob>,
-    history: VecDeque<InjectJob>,
-}
 
 impl FarmManager {
     pub fn from_env(db_path: &Path) -> Self {
@@ -310,10 +258,6 @@ impl FarmManager {
                 current: None,
                 history: VecDeque::new(),
             })),
-            inject: Arc::new(Mutex::new(InjectState {
-                current: None,
-                history: VecDeque::new(),
-            })),
             python,
             package_parent,
             package_dir,
@@ -323,23 +267,13 @@ impl FarmManager {
         }
     }
 
-    /// PIDs of every running automation subprocess (farm job + inject jobs).
+    /// PIDs of every running automation subprocess (farm jobs).
     /// Used by the usage sampler to account for the whole automation tree
     /// (python + the browsers it spawns), not just the Rust process.
     pub async fn automation_pids(&self) -> Vec<u32> {
         let mut pids = Vec::new();
         {
             let st = self.inner.lock().await;
-            if let Some(cur) = &st.current {
-                if let Some(child) = &cur.child {
-                    if let Some(pid) = child.id() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-        {
-            let st = self.inject.lock().await;
             if let Some(cur) = &st.current {
                 if let Some(child) = &cur.child {
                     if let Some(pid) = child.id() {
@@ -431,626 +365,15 @@ impl FarmManager {
         })
     }
 
-    pub async fn start_inject(
-        &self,
-        account_id: &str,
-        pat: &str,
-        email: Option<&str>,
-        headless: bool,
-        refresh: bool,
-        pool: SqlitePool,
-    ) -> AppResult<Value> {
-        self.start_inject_items(
-            vec![InjectPatItem {
-                account_id: account_id.to_string(),
-                pat: pat.to_string(),
-                email: email.map(|s| s.to_string()),
-            }],
-            headless,
-            refresh,
-            pool,
-        )
-        .await
-    }
 
-    pub async fn start_inject_bulk(
-        &self,
-        items: Vec<InjectPatItem>,
-        headless: bool,
-        refresh: bool,
-        pool: SqlitePool,
-    ) -> AppResult<Value> {
-        self.start_inject_items(items, headless, refresh, pool).await
-    }
 
-    async fn start_inject_items(
-        &self,
-        items: Vec<InjectPatItem>,
-        headless: bool,
-        refresh: bool,
-        pool: SqlitePool,
-    ) -> AppResult<Value> {
-        if items.is_empty() {
-            return Err(AppError::BadRequest(
-                "no qoder accounts with personalToken to inject".into(),
-            ));
-        }
-        for it in &items {
-            if it.pat.trim().is_empty() {
-                return Err(AppError::BadRequest(format!(
-                    "account {} has empty personalToken",
-                    it.account_id
-                )));
-            }
-        }
-        if !self.package_dir.join("__main__.py").is_file() {
-            return Err(AppError::Internal(format!(
-                "qoder_farm package missing at {}",
-                self.package_dir.display()
-            )));
-        }
 
-        {
-            let st = self.inject.lock().await;
-            if let Some(cur) = &st.current {
-                if !cur.meta.status.is_terminal() {
-                    return Err(AppError::BadRequest(format!(
-                        "inject job {} still {}",
-                        cur.meta.id,
-                        cur.meta.status.as_str()
-                    )));
-                }
-            }
-        }
 
-        let bulk = items.len() > 1;
-        let id = Uuid::new_v4().to_string();
-        let work = self.data_dir.join("inject").join(&id);
-        std::fs::create_dir_all(&work)?;
-        let log_path = work.join("inject.log");
-        let pats_path = work.join("pats.json");
-        let pats_json: Vec<Value> = items
-            .iter()
-            .map(|it| {
-                json!({
-                    "account_id": it.account_id,
-                    "pat": it.pat.trim(),
-                    "email": it.email.clone().unwrap_or_default(),
-                })
-            })
-            .collect();
-        std::fs::write(
-            &pats_path,
-            serde_json::to_string_pretty(&pats_json).unwrap_or_else(|_| "[]".into()),
-        )?;
 
-        let account_ids: Vec<String> = items.iter().map(|it| it.account_id.clone()).collect();
-        let primary_id = account_ids[0].clone();
-        let email_label = if bulk {
-            Some(format!("{} accounts", items.len()))
-        } else {
-            items[0].email.clone()
-        };
 
-        let now = chrono::Utc::now().to_rfc3339();
-        let meta = InjectJob {
-            id: id.clone(),
-            kind: if bulk { "inject_bulk" } else { "inject" },
-            status: JobStatus::Running,
-            created_at: now.clone(),
-            started_at: Some(now),
-            finished_at: None,
-            exit_code: None,
-            error: None,
-            account_id: primary_id,
-            account_ids: account_ids.clone(),
-            bulk,
-            bulk_total: items.len() as u32,
-            bulk_ok: 0,
-            bulk_fail: 0,
-            email: email_label,
-            headless,
-            refresh,
-            work_dir: path_for_display(&work),
-            log_path: path_for_display(&log_path),
-            current_step: Some("start".into()),
-            inject_result: None,
-            log_count: 0,
-        };
 
-        let pythonpath = resolve_path(self.package_parent.clone());
-        let mut cmd = Command::new(&self.python);
-        cmd.current_dir(&work)
-            .env("PYTHONPATH", &pythonpath)
-            .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONIOENCODING", "utf-8")
-            .env("PYTHONUTF8", "1");
-        if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
-            if !k.trim().is_empty() {
-                cmd.env("QODER_DUDUL_ACCESS_KEY", k);
-            }
-        } else if let Ok(k) = std::env::var("MARIONETTE_DUDUL_ACCESS_KEY") {
-            if !k.trim().is_empty() {
-                cmd.env("QODER_DUDUL_ACCESS_KEY", k);
-            }
-        }
-        cmd.arg("-m")
-            .arg("qoder_farm")
-            .arg("--inject-only")
-            .arg("--pats-file")
-            .arg(&pats_path)
-            .arg("--json-progress");
-        if headless {
-            cmd.arg("--headless");
-        } else {
-            cmd.arg("--no-headless");
-        }
-        let automation_proxy_on = db::get_proxy_settings(&pool)
-            .await
-            .map(|s| s.automation_mode != "off")
-            .unwrap_or(false);
-        let mut inject_proxy_plan = plan_farm_proxy(automation_proxy_on, None);
-        if inject_proxy_plan == FarmProxyPlan::DbPool {
-            inject_proxy_plan = match write_db_proxies(&pool, &work).await {
-                Some(path) => FarmProxyPlan::File(path),
-                None => FarmProxyPlan::DbPool,
-            };
-        }
-        apply_farm_proxy(&mut cmd, &inject_proxy_plan);
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
 
-        info!(
-            job = %id,
-            bulk,
-            total = items.len(),
-            headless,
-            work = %path_for_display(&work),
-            "starting dudul inject job"
-        );
 
-        let mut child = cmd.spawn().map_err(|e| {
-            AppError::Internal(format!(
-                "failed to spawn inject ({}): {e}. Set MARIONETTE_FARM_PYTHON if needed.",
-                self.python.display()
-            ))
-        })?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
-
-        {
-            let mut st = self.inject.lock().await;
-            if let Some(prev) = st.current.take() {
-                push_inject_history(&mut st.history, prev.meta);
-            }
-            st.current = Some(LiveInjectJob {
-                meta: meta.clone(),
-                events: VecDeque::new(),
-                next_seq: 1,
-                child: Some(child),
-                kill_tx: Some(kill_tx),
-            });
-        }
-
-        let mgr = self.clone();
-        let job_id = id.clone();
-        let log_path_c = log_path.clone();
-
-        tokio::spawn(async move {
-            let _ = append_log_file(
-                &log_path_c,
-                &format!("inject job {job_id} started (bulk={bulk})\n"),
-            )
-            .await;
-
-            let mut join_stdout = None;
-            let mut join_stderr = None;
-
-            if let Some(out) = stdout {
-                let mgr2 = mgr.clone();
-                let jid = job_id.clone();
-                let lp = log_path_c.clone();
-                join_stdout = Some(tokio::spawn(async move {
-                    let mut lines = BufReader::new(out).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let _ = append_log_file(&lp, &format!("{line}\n")).await;
-                        mgr2.push_inject_line(&jid, line).await;
-                    }
-                }));
-            }
-            if let Some(err) = stderr {
-                let mgr2 = mgr.clone();
-                let jid = job_id.clone();
-                let lp = log_path_c.clone();
-                join_stderr = Some(tokio::spawn(async move {
-                    let mut lines = BufReader::new(err).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let _ = append_log_file(&lp, &format!("[stderr] {line}\n")).await;
-                        mgr2.push_inject_line(&jid, format!("[stderr] {line}")).await;
-                    }
-                }));
-            }
-
-            let cancelled = tokio::select! {
-                _ = kill_rx => {
-                    mgr.kill_inject_child(&job_id).await;
-                    true
-                }
-                code = async {
-                    loop {
-                        let done = {
-                            let mut st = mgr.inject.lock().await;
-                            if let Some(cur) = st.current.as_mut() {
-                                if cur.meta.id != job_id {
-                                    return (true, None);
-                                }
-                                if let Some(child) = cur.child.as_mut() {
-                                    match child.try_wait() {
-                                        Ok(Some(s)) => {
-                                            cur.child = None;
-                                            return (false, s.code());
-                                        }
-                                        Ok(None) => false,
-                                        Err(_) => {
-                                            cur.child = None;
-                                            return (false, None);
-                                        }
-                                    }
-                                } else {
-                                    return (true, None);
-                                }
-                            } else {
-                                return (true, None);
-                            }
-                        };
-                        let _ = done;
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
-                } => {
-                    let (was_cancel, _code) = code;
-                    was_cancel
-                }
-            };
-
-            let exit_code = {
-                let mut st = mgr.inject.lock().await;
-                if let Some(cur) = st.current.as_mut() {
-                    if cur.meta.id == job_id {
-                        if let Some(mut child) = cur.child.take() {
-                            match child.try_wait() {
-                                Ok(Some(s)) => s.code(),
-                                _ => {
-                                    let _ = child.kill().await;
-                                    match child.wait().await {
-                                        Ok(s) => s.code(),
-                                        Err(_) => None,
-                                    }
-                                }
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-
-            if let Some(h) = join_stdout {
-                let _ = h.await;
-            }
-            if let Some(h) = join_stderr {
-                let _ = h.await;
-            }
-
-            mgr.finish_inject_job(&job_id, exit_code, cancelled).await;
-        });
-
-        Ok(json!({
-            "ok": true,
-            "job": inject_job_public(&meta, 0),
-        }))
-    }
-
-    async fn push_inject_line(&self, job_id: &str, line: String) {
-        let mut st = self.inject.lock().await;
-        let Some(cur) = st.current.as_mut() else {
-            return;
-        };
-        if cur.meta.id != job_id {
-            return;
-        }
-        let parsed = parse_farm_line(&line);
-        if let Some(ref v) = parsed {
-            if let Some(step) = v.get("step").and_then(|x| x.as_str()) {
-                if !step.is_empty() {
-                    cur.meta.current_step = Some(step.to_string());
-                }
-            }
-            let ty = v.get("type").and_then(|x| x.as_str());
-            if ty == Some("inject_result") {
-                cur.meta.inject_result = Some(v.clone());
-                if let Some(n) = v.get("ok_count").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_ok = n as u32;
-                }
-                if let Some(n) = v.get("fail_count").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_fail = n as u32;
-                }
-                if let Some(n) = v.get("total").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_total = n as u32;
-                }
-                if let Some(ok) = v.get("ok").and_then(|x| x.as_bool()) {
-                    if !ok {
-                        if let Some(reason) = v.get("reason").and_then(|x| x.as_str()) {
-                            cur.meta.error = Some(reason.to_string());
-                        }
-                    }
-                }
-            } else if ty == Some("inject_account_result") {
-                if let Some(n) = v.get("ok_count").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_ok = n as u32;
-                }
-                if let Some(n) = v.get("fail_count").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_fail = n as u32;
-                }
-                if let Some(n) = v.get("bulk_total").and_then(|x| x.as_u64()) {
-                    cur.meta.bulk_total = n as u32;
-                }
-                if let Some(idx) = v.get("bulk_index").and_then(|x| x.as_u64()) {
-                    cur.meta.current_step = Some(format!("inject {idx}/{}", cur.meta.bulk_total));
-                }
-            }
-        }
-        let seq = cur.next_seq;
-        cur.next_seq += 1;
-        cur.events.push_back(FarmEvent {
-            seq,
-            ts: chrono::Utc::now().to_rfc3339(),
-            line,
-            parsed,
-        });
-        while cur.events.len() > MAX_LOG_LINES {
-            cur.events.pop_front();
-        }
-        cur.meta.log_count = cur.events.len();
-    }
-
-    async fn kill_inject_child(&self, job_id: &str) {
-        let mut st = self.inject.lock().await;
-        if let Some(cur) = st.current.as_mut() {
-            if cur.meta.id == job_id {
-                if let Some(mut child) = cur.child.take() {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
-        }
-    }
-
-    async fn finish_inject_job(
-        &self,
-        job_id: &str,
-        exit_code: Option<i32>,
-        cancelled: bool,
-    ) {
-        let mut st = self.inject.lock().await;
-        let Some(cur) = st.current.as_mut() else {
-            return;
-        };
-        if cur.meta.id != job_id {
-            return;
-        }
-        cur.child = None;
-        cur.kill_tx = None;
-        cur.meta.finished_at = Some(chrono::Utc::now().to_rfc3339());
-        if cancelled || cur.meta.status == JobStatus::Cancelled {
-            cur.meta.status = JobStatus::Cancelled;
-            if cur.meta.error.is_none() {
-                cur.meta.error = Some("cancelled".into());
-            }
-        } else {
-            let code = exit_code.unwrap_or(-1);
-            cur.meta.exit_code = Some(code);
-            let result_ok = cur
-                .meta
-                .inject_result
-                .as_ref()
-                .and_then(|v| v.get("ok"))
-                .and_then(|v| v.as_bool());
-            let bulk_any_ok = cur.meta.bulk && cur.meta.bulk_ok > 0;
-            if result_ok == Some(true)
-                || bulk_any_ok
-                || (result_ok.is_none() && code == 0)
-            {
-                cur.meta.status = JobStatus::Succeeded;
-                if bulk_any_ok && result_ok != Some(true) && cur.meta.bulk_fail > 0 {
-                    cur.meta.error = Some(format!(
-                        "partial: {} ok, {} failed",
-                        cur.meta.bulk_ok, cur.meta.bulk_fail
-                    ));
-                }
-            } else {
-                cur.meta.status = JobStatus::Failed;
-                if cur.meta.error.is_none() {
-                    let reason = cur
-                        .meta
-                        .inject_result
-                        .as_ref()
-                        .and_then(|v| v.get("reason"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("exit code {code}"));
-                    cur.meta.error = Some(reason);
-                }
-            }
-        }
-        cur.meta.log_count = cur.events.len();
-        info!(
-            job = %job_id,
-            status = cur.meta.status.as_str(),
-            "inject job finished"
-        );
-    }
-
-    pub async fn cancel_inject(&self, job_id: &str) -> AppResult<Value> {
-        let mut st = self.inject.lock().await;
-        let Some(cur) = st.current.as_mut() else {
-            return Err(AppError::NotFound("no inject job".into()));
-        };
-        if cur.meta.id != job_id {
-            return Err(AppError::NotFound(format!("inject job {job_id} not current")));
-        }
-        if cur.meta.status.is_terminal() {
-            return Err(AppError::BadRequest("job already finished".into()));
-        }
-        if let Some(tx) = cur.kill_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(mut child) = cur.child.take() {
-            let _ = child.kill().await;
-        }
-        cur.meta.status = JobStatus::Cancelled;
-        cur.meta.finished_at = Some(chrono::Utc::now().to_rfc3339());
-        cur.meta.error = Some("cancelled by admin".into());
-        Ok(json!({
-            "ok": true,
-            "job": inject_job_public(&cur.meta, cur.events.len()),
-        }))
-    }
-
-    pub async fn get_inject_job(&self, job_id: &str) -> AppResult<Value> {
-        let st = self.inject.lock().await;
-        if let Some(cur) = &st.current {
-            if cur.meta.id == job_id {
-                return Ok(json!({
-                    "job": inject_job_public(&cur.meta, cur.events.len()),
-                    "events": cur.events.iter().collect::<Vec<_>>(),
-                }));
-            }
-        }
-        let history_job = st.history.iter().find(|j| j.id == job_id).cloned();
-        drop(st);
-
-        let log_path = self.data_dir.join("inject").join(job_id).join("inject.log");
-        let events_from_log = if log_path.is_file() {
-            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-            text.lines()
-                .enumerate()
-                .map(|(i, line)| {
-                    json!({
-                        "seq": i + 1,
-                        "ts": "",
-                        "line": line,
-                        "parsed": parse_farm_line(line),
-                    })
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        if let Some(h) = history_job {
-            let mut job = serde_json::to_value(&h).unwrap_or(json!({}));
-            if let Some(obj) = job.as_object_mut() {
-                obj.insert("log_count".into(), json!(events_from_log.len().max(h.log_count)));
-                obj.insert("status".into(), json!(h.status.as_str()));
-            }
-            return Ok(json!({
-                "job": job,
-                "events": events_from_log,
-            }));
-        }
-
-        if !events_from_log.is_empty() {
-            return Ok(json!({
-                "job": {
-                    "id": job_id,
-                    "kind": "inject",
-                    "status": "unknown",
-                    "log_count": events_from_log.len(),
-                },
-                "events": events_from_log,
-            }));
-        }
-        Err(AppError::NotFound(format!("inject job {job_id}")))
-    }
-
-    pub async fn inject_events_after(&self, job_id: &str, after: u64) -> AppResult<Value> {
-        let st = self.inject.lock().await;
-        if let Some(cur) = &st.current {
-            if cur.meta.id == job_id {
-                let ev: Vec<&FarmEvent> = cur.events.iter().filter(|e| e.seq > after).collect();
-                return Ok(json!({
-                    "job": inject_job_public(&cur.meta, cur.events.len()),
-                    "events": ev,
-                    "after": after,
-                }));
-            }
-        }
-        let history_job = st.history.iter().find(|j| j.id == job_id).cloned();
-        drop(st);
-
-        if let Some(h) = history_job {
-            let mut job = serde_json::to_value(&h).unwrap_or(json!({}));
-            if let Some(obj) = job.as_object_mut() {
-                obj.insert("status".into(), json!(h.status.as_str()));
-            }
-            let events = if after == 0 {
-                let log_path = self.data_dir.join("inject").join(job_id).join("inject.log");
-                if log_path.is_file() {
-                    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
-                    text.lines()
-                        .enumerate()
-                        .map(|(i, line)| {
-                            json!({
-                                "seq": i + 1,
-                                "ts": "",
-                                "line": line,
-                                "parsed": parse_farm_line(line),
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-            return Ok(json!({
-                "job": job,
-                "events": events,
-                "after": after,
-            }));
-        }
-        Err(AppError::NotFound(format!("inject job {job_id}")))
-    }
-
-    pub async fn inject_snapshot(&self) -> Value {
-        let st = self.inject.lock().await;
-        let current = st
-            .current
-            .as_ref()
-            .map(|j| inject_job_public(&j.meta, j.events.len()));
-        let history: Vec<Value> = st
-            .history
-            .iter()
-            .map(|j| serde_json::to_value(j).unwrap_or(json!({})))
-            .collect();
-        json!({
-            "current": current,
-            "history": history,
-            "busy": st
-                .current
-                .as_ref()
-                .map(|j| !j.meta.status.is_terminal())
-                .unwrap_or(false),
-        })
-    }
 
     pub async fn start(&self, req: StartFarmRequest, pool: SqlitePool) -> AppResult<Value> {
         let provider = normalize_farm_provider(req.provider.as_deref());
@@ -1163,8 +486,7 @@ impl FarmManager {
 
         let workers = clamp_concurrency(req.concurrency);
         let account_delay = req.account_delay.unwrap_or(0.0).max(0.0);
-        // grok is a register-only flow; inject/device_auth/settle are qoder-only CLI flags.
-        let inject = if is_grok { false } else { req.inject };
+        // grok is a register-only flow; device_auth/settle are qoder-only CLI flags.
         let device_auth = if is_grok { false } else { req.device_auth };
         let settle_secs = if is_grok { None } else { req.settle_secs };
         let now = chrono::Utc::now().to_rfc3339();
@@ -1178,7 +500,6 @@ impl FarmManager {
             exit_code: None,
             error: None,
             accounts_count: accounts.len(),
-            inject,
             headless: req.headless,
             device_auth,
             concurrency: workers,
@@ -1269,17 +590,6 @@ impl FarmManager {
                 cmd.env("QODER_CAPTCHA_MODE", mode);
             }
         }
-        if !is_grok {
-            if let Ok(k) = std::env::var("QODER_DUDUL_ACCESS_KEY") {
-                if !k.trim().is_empty() {
-                    cmd.env("QODER_DUDUL_ACCESS_KEY", k);
-                }
-            } else if let Ok(k) = std::env::var("MARIONETTE_DUDUL_ACCESS_KEY") {
-                if !k.trim().is_empty() {
-                    cmd.env("QODER_DUDUL_ACCESS_KEY", k);
-                }
-            }
-        }
         cmd.arg("-m")
             .arg(module)
             .arg("-f")
@@ -1297,11 +607,6 @@ impl FarmManager {
                 cmd.arg("--no-headless");
             }
         } else {
-            if inject {
-                cmd.arg("--inject");
-            } else {
-                cmd.arg("--no-inject");
-            }
             if req.headless {
                 cmd.arg("--headless");
             } else {
@@ -1980,7 +1285,6 @@ impl FarmManager {
             accounts,
             default_password: None,
             provider,
-            inject: opts.inject,
             headless: opts.headless,
             device_auth: opts.device_auth,
             skip_exchange: opts.skip_exchange,
@@ -2033,7 +1337,7 @@ pub fn plan_farm_proxy(automation_on: bool, req_proxy_file: Option<&str>) -> Far
     }
 }
 
-/// Single choke point every farm subprocess (farm AND dudul inject) must call.
+/// Single choke point every farm subprocess must call.
 /// Edit here to change proxy behavior for all spawn paths at once. Sets
 /// `--proxy-file` when a file is chosen, or forces `--no-proxy` plus neutralized
 /// proxy env when disabled so a stray `.env` cannot re-enable proxying behind
@@ -2210,14 +1514,6 @@ fn job_public(meta: &FarmJob, log_count: usize) -> Value {
     v
 }
 
-fn inject_job_public(meta: &InjectJob, log_count: usize) -> Value {
-    let mut v = serde_json::to_value(meta).unwrap_or(json!({}));
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("log_count".into(), json!(log_count));
-        obj.insert("status".into(), json!(meta.status.as_str()));
-    }
-    v
-}
 
 fn push_history(history: &mut VecDeque<FarmJob>, mut job: FarmJob) {
     job.log_count = 0;
@@ -2227,13 +1523,6 @@ fn push_history(history: &mut VecDeque<FarmJob>, mut job: FarmJob) {
     }
 }
 
-fn push_inject_history(history: &mut VecDeque<InjectJob>, mut job: InjectJob) {
-    job.log_count = 0;
-    history.push_front(job);
-    while history.len() > MAX_JOB_HISTORY {
-        history.pop_back();
-    }
-}
 
 fn parse_accounts_text(raw: &str, default_password: Option<&str>) -> Vec<(String, String)> {
     let default_password = default_password

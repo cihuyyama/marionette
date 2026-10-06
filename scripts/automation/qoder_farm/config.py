@@ -66,13 +66,6 @@ class Config:
     proxy_shuffle: bool
     no_proxy: bool
     humanize: bool
-    inject_settle_secs: int
-    dudul_inject: bool
-    dudul_url: str
-    dudul_access_key: str
-    inject_max_attempts: int
-    inject_backoff: list[float]
-    inject_total_budget_s: int
     output: Path
     screenshot_dir: Path
     ui: str
@@ -131,14 +124,6 @@ def load_config() -> Config:
         proxy_shuffle=_env_bool("QODER_PROXY_SHUFFLE", True),
         no_proxy=_env_bool("QODER_NO_PROXY", False),
         humanize=_env_bool("QODER_HUMANIZE", True),
-        inject_settle_secs=_env_int("QODER_INJECT_SETTLE_SECS", 5),
-        dudul_inject=_env_bool("QODER_DUDUL_INJECT", True),
-        dudul_url=_env("QODER_DUDUL_URL", "https://dudul.dev/inject")
-        or "https://dudul.dev/inject",
-        dudul_access_key=_env("QODER_DUDUL_ACCESS_KEY"),
-        inject_max_attempts=_env_int("QODER_INJECT_MAX_ATTEMPTS", 8),
-        inject_backoff=_env_float_list("QODER_INJECT_BACKOFF", "2,2,2,2,2,2,2"),
-        inject_total_budget_s=_env_int("QODER_INJECT_TOTAL_BUDGET_S", 300),
         output=out,
         screenshot_dir=shots,
         ui=(_env("QODER_UI", "log") or "log").lower(),

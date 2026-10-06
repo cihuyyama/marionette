@@ -181,7 +181,6 @@ function ComingSoonFarm({
 function QoderGoogleSsoFarm() {
   const [status, setStatus] = useState<FarmStatus | null>(null);
   const [accounts, setAccounts] = useState("");
-  const [inject, setInject] = useState(true);
   const [headless, setHeadless] = useState(false);
   const [deviceAuth, setDeviceAuth] = useState(false);
   const [autoImport, setAutoImport] = useState(true);
@@ -274,7 +273,6 @@ function QoderGoogleSsoFarm() {
       const res = await startFarmJob({
         provider: "qoder",
         accounts,
-        inject,
         headless,
         device_auth: deviceAuth,
         auto_import: autoImport,
@@ -352,7 +350,6 @@ function QoderGoogleSsoFarm() {
       const workers = Math.max(1, Math.floor(concurrency) || 1);
       const res = await retryFailedFarmJob(jobId, {
         provider: "qoder",
-        inject,
         headless,
         device_auth: deviceAuth,
         auto_import: autoImport,
@@ -416,7 +413,7 @@ function QoderGoogleSsoFarm() {
         </p>
         <h1>Qoder · Google SSO</h1>
         <p className="subtitle">
-          GSuite → PAT → inject (Python under{" "}
+          GSuite → PAT (Python under{" "}
           <code className="mono">scripts/automation/qoder_farm</code>)
         </p>
       </header>
@@ -493,18 +490,6 @@ function QoderGoogleSsoFarm() {
               Options
             </h2>
             <div className="farm-check-grid">
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={inject}
-                  onChange={(e) => setInject(e.target.checked)}
-                  disabled={busy || starting}
-                />
-                <span className="check-body">
-                  <span className="check-label">dudul inject</span>
-                  <span className="check-hint">Write tokens into browser session after PAT</span>
-                </span>
-              </label>
               <label className="check">
                 <input
                   type="checkbox"
@@ -641,12 +626,6 @@ function QoderGoogleSsoFarm() {
                 <span className="hint">Between accounts / worker stagger</span>
               </div>
             </div>
-            {concurrency > 1 && inject && !headless && (
-              <p className="farm-warn muted">
-                Workers &gt; 1 opens multiple headed browsers. Inject may flake —
-                try headless or lower workers if inject fails.
-              </p>
-            )}
           </section>
         </div>
 
@@ -1568,7 +1547,6 @@ function QoderRegisterFarm() {
   const [password, setPassword] = useState(preset.password);
   const [headless, setHeadless] = useState(preset.headless);
   const [autoImport, setAutoImport] = useState(preset.autoImport);
-  const [inject, setInject] = useState(preset.inject);
   const [captchaMode, setCaptchaMode] = useState(preset.captchaMode);
   const [concurrency, setConcurrency] = useState(preset.concurrency);
   const [savePasswords, setSavePasswords] = useState(preset.savePasswords);
@@ -1592,7 +1570,6 @@ function QoderRegisterFarm() {
       concurrency,
       headless,
       autoImport,
-      inject,
       captchaMode,
       domain,
       gmailBase,
@@ -1608,7 +1585,6 @@ function QoderRegisterFarm() {
     concurrency,
     headless,
     autoImport,
-    inject,
     captchaMode,
     domain,
     gmailBase,
@@ -1712,7 +1688,6 @@ function QoderRegisterFarm() {
         default_password: password.trim(),
         headless,
         auto_import: autoImport,
-        inject,
         captcha_mode: captchaMode,
         concurrency: workers,
         ...(method === "imap"
@@ -1764,7 +1739,7 @@ function QoderRegisterFarm() {
         </p>
         <h1>Qoder · Register</h1>
         <p className="subtitle">
-          Fresh accounts from scratch — email signup, Aliyun slide captcha, IMAP OTP, PAT, optional inject
+          Fresh accounts from scratch — email signup, Aliyun slide captcha, IMAP OTP, PAT
         </p>
       </header>
 
@@ -1914,10 +1889,6 @@ function QoderRegisterFarm() {
             <label className="checkbox-label">
               <input type="checkbox" checked={autoImport} onChange={(e) => setAutoImport(e.target.checked)} />
               Auto-import to pool
-            </label>
-            <label className="checkbox-label" title="Run dudul inject after PAT (needs QODER_DUDUL_ACCESS_KEY on the server)">
-              <input type="checkbox" checked={inject} onChange={(e) => setInject(e.target.checked)} />
-              dudul inject
             </label>
             <label className="checkbox-label" title="Store the account + IMAP passwords in this browser so you don't retype them">
               <input type="checkbox" checked={savePasswords} onChange={(e) => setSavePasswords(e.target.checked)} />
@@ -2135,7 +2106,6 @@ function GrokReloginFarm() {
         provider: "grok-cli",
         accounts,
         default_password: defaultPw || null,
-        inject: false,
         headless,
         device_auth: false,
         auto_import: autoImport,
@@ -2212,7 +2182,6 @@ function GrokReloginFarm() {
       const workers = Math.max(1, Math.floor(concurrency) || 1);
       const res = await retryFailedFarmJob(jobId, {
         provider: "grok-cli",
-        inject: false,
         headless,
         device_auth: false,
         auto_import: autoImport,
