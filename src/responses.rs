@@ -90,6 +90,11 @@ impl ResponsesRequest {
             }
             Some(ResponsesInput::Items(items)) => {
                 for item in items {
+                    // An absent role means a plain input item; default it to
+                    // user. A role that is present but unrecognized is
+                    // rejected rather than coerced, matching /v1/messages --
+                    // silently turning a typo into a user turn changes request
+                    // semantics without telling the caller.
                     let role = item.role.as_deref().unwrap_or("user");
                     let text = extract_text(item.content.as_ref());
                     match role {
@@ -98,8 +103,13 @@ impl ResponsesRequest {
                                 messages.push(text_message("system", &text));
                             }
                         }
+                        "user" => messages.push(text_message("user", &text)),
                         "assistant" => messages.push(text_message("assistant", &text)),
-                        _ => messages.push(text_message("user", &text)),
+                        other => {
+                            return Err(AppError::BadRequest(format!(
+                                "unsupported role `{other}`"
+                            )));
+                        }
                     }
                 }
             }

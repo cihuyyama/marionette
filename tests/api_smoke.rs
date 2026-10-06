@@ -1349,3 +1349,85 @@ async fn messages_translates_and_reaches_the_pool() {
     assert_ne!(res.status(), StatusCode::BAD_REQUEST, "request must be translated, not rejected");
     assert_ne!(res.status(), StatusCode::NOT_FOUND, "route must exist");
 }
+
+// ── OpenAI Responses surface (/v1/responses) ───────────────────────────
+
+fn responses_body(v: Value) -> Body {
+    Body::from(serde_json::to_vec(&v).unwrap())
+}
+
+#[tokio::test]
+async fn responses_requires_pool_key() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(responses_body(json!({
+                    "model": "qd/lite",
+                    "input": "hi"
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn responses_accepts_string_and_item_input() {
+    // Both accepted input shapes must translate rather than 400: a bare string
+    // and the item list. A parse failure would surface as BAD_REQUEST.
+    let (app, _dir) = test_app().await;
+    for body in [
+        json!({"model": "qd/lite", "input": "hi"}),
+        json!({
+            "model": "qd/lite",
+            "instructions": "be brief",
+            "input": [{"role": "user", "content": "hi"}]
+        }),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(responses_body(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "request {body} must be translated, not rejected"
+        );
+        assert_ne!(res.status(), StatusCode::NOT_FOUND, "route must exist");
+    }
+}
+
+#[tokio::test]
+async fn responses_rejects_unknown_role() {
+    let (app, _dir) = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, "Bearer test-pool-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(responses_body(json!({
+                    "model": "qd/lite",
+                    "input": [{"role": "wizard", "content": "hi"}]
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

@@ -22,6 +22,22 @@ export function SetupPage() {
     () => ({
       curl: `curl ${base}/v1/models \\
   -H "Authorization: Bearer ${poolKey}"`,
+      curlAnthropic: `curl ${base}/v1/messages \\
+  -H "Authorization: Bearer ${poolKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gcli/grok-build",
+    "max_tokens": 256,
+    "messages": [{"role":"user","content":"hi"}]
+  }'`,
+      curlResponses: `curl ${base}/v1/responses \\
+  -H "Authorization: Bearer ${poolKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gcli/grok-build",
+    "input": "hi",
+    "stream": false
+  }'`,
       chat: `curl ${base}/v1/chat/completions \\
   -H "Authorization: Bearer ${poolKey}" \\
   -H "Content-Type: application/json" \\
@@ -32,6 +48,10 @@ export function SetupPage() {
   }'`,
       openaiEnv: `OPENAI_BASE_URL=${base}/v1
 OPENAI_API_KEY=${poolKey}`,
+      // The Anthropic SDK appends /v1/messages itself, so the base URL must
+      // NOT include /v1 or it would call /v1/v1/messages.
+      anthropicEnv: `ANTHROPIC_BASE_URL=${base}
+ANTHROPIC_API_KEY=${poolKey}`,
       opencode: `{
   "provider": {
     "marionette": {
@@ -128,7 +148,23 @@ api_key: ${poolKey}
               <span className="mono">POST /v1/chat/completions</span>
               <span className="muted">Bearer pool key</span>
             </li>
+            <li>
+              <span className="mono">POST /v1/messages</span>
+              <span className="muted">Bearer pool key · Anthropic Messages</span>
+            </li>
+            <li>
+              <span className="mono">POST /v1/responses</span>
+              <span className="muted">Bearer pool key · OpenAI Responses</span>
+            </li>
           </ul>
+          <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+            <span className="mono">/v1/messages</span> and{" "}
+            <span className="mono">/v1/responses</span> are translation layers: they
+            accept their own request shape and run the same pool path as{" "}
+            <span className="mono">/v1/chat/completions</span>, so routing, failover,
+            and quota behave identically. They are wire formats, not upstreams —
+            point them at any model id in <span className="mono">/v1/models</span>.
+          </p>
         </section>
       </div>
 
@@ -161,6 +197,24 @@ api_key: ${poolKey}
         text={snippets.chat}
         copied={copied === "chat"}
         onCopy={() => void copy("chat", snippets.chat)}
+      />
+      <Snippet
+        title="Anthropic env (SDK points here)"
+        text={snippets.anthropicEnv}
+        copied={copied === "anthropic-env"}
+        onCopy={() => void copy("anthropic-env", snippets.anthropicEnv)}
+      />
+      <Snippet
+        title="curl · Anthropic Messages"
+        text={snippets.curlAnthropic}
+        copied={copied === "anthropic"}
+        onCopy={() => void copy("anthropic", snippets.curlAnthropic)}
+      />
+      <Snippet
+        title="curl · OpenAI Responses"
+        text={snippets.curlResponses}
+        copied={copied === "responses"}
+        onCopy={() => void copy("responses", snippets.curlResponses)}
       />
     </div>
   );
