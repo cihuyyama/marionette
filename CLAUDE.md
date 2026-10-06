@@ -8,15 +8,20 @@
 
 ## 1. What this is
 
-Thin **Rust** OpenAI-compatible **proxy pool** with four built-in providers + BYOK:
+Thin **Rust** OpenAI-compatible **proxy pool** with six built-in providers + BYOK:
 
 | Provider ID | Model prefix | Auth |
 |-------------|--------------|------|
 | `grok-cli` | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | `qoder` | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` + userId/machineId |
-| `blackbox` | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh, no expiry) |
-| `freebuff` | `fb/*`, bare `freebuff*` | static `cb_…` account token (no refresh; session protocol upstream) |
+| `commandcode` | `cmc/*` | static `user_…` API key (no refresh) |
+| `cline` | `cln/*` | WorkOS refresh token → `workos:` bearer |
+| `antigravity` | `ag/*` | Google OAuth PKCE (Cloud Code Assist) |
+| `kiro` | `kr/*` | AWS CodeWhisperer, 4 paste-only families |
 | `byok` | `<slug>/*` (user-chosen slug) | user-supplied base URL + static API key (OpenAI-compatible) |
+
+`freebuff` and `blackbox` were retired. All three newer providers onboard by
+paste — no browser in the Rust binary.
 
 Plus a **React + Vite + TypeScript** admin SPA under `web/` (dark-only, LoTM soft).
 
@@ -28,7 +33,7 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
 
 ## 2. Golden rules (operational principles)
 
-1. **Providers grow as needed.** Current: `grok-cli`, `qoder`, `blackbox`, `freebuff`, plus BYOK (user-supplied OpenAI-compatible endpoints). Add new ones when the use case is real — mirror verified upstream behavior, don't invent protocols.
+1. **Providers grow as needed.** Current: `grok-cli`, `qoder`, `commandcode`, `cline`, `antigravity`, `kiro`, plus BYOK (user-supplied OpenAI-compatible endpoints). Add new ones when the use case is real — mirror verified upstream behavior, don't invent protocols.
 2. Browser automation stays in Python (`scripts/automation/`) — not in the Rust binary.
 3. **Secrets never committed:** `.env`, entire `data/` (sqlite, token dumps, proxy lists), `.omo/`.
 4. **Mask tokens** in every admin JSON response (`db::mask_token` / `mask_secrets`).
@@ -37,7 +42,6 @@ Name: *Lord of the Mysteries* marionettes — one controller, many puppet accoun
    - Grok **402 / PaymentRequired** (spending-limit / fleet credit) → **sealed** cooldown + `quota_remaining=0` (not cut). Auto-restores quota when cooldown ends.
    - Grok **403 / AccessDenied** and **AuthInvalid** (`invalid_grant`) → **cut**.
    - Qoder uses **local** `classify_qoder_status`: 402/403 → `RateLimited` (cooldown), **not** cut.
-   - Blackbox uses **local** `classify_blackbox_status`: 401 → cut (dead key), 402 → sealed+quota-0, **403 → fallen (moderation, never cut/seal)**, 429 → sealed w/ parsed retry-after.
    - BYOK uses **local** `classify_byok_status`: 401 → cut (dead key), 429 → sealed w/ parsed retry-after, **402/403 → Upstream → fallen only** (`byok_billing_block` guard in `apply_provider_error` — user's own keys never sealed/cut for billing/permission).
    - **Never change global `classify_http_status` to "fix" Qoder** — keep Qoder classification local.
 6. Dashboard stack: **React + Vite SPA** — not Next, TanStack Start, or SSR.
@@ -59,7 +63,7 @@ marionette/
 │   ├── main.rs             # Axum serve, CORS, optional static web/dist, refresh worker spawn
 │   ├── lib.rs              # module exports
 │   ├── config.rs           # Config::from_env
-│   ├── state.rs            # AppState { pool, config, http, grok, qoder, blackbox, byok }
+│   ├── state.rs            # AppState { pool, config, http, grok, qoder, commandcode, cline, antigravity, kiro, byok }
 │   ├── auth.rs             # PoolAuth, AdminAuth (Bearer extractors)
 │   ├── error.rs            # AppError, ProviderError
 │   ├── openai.rs           # ChatCompletionRequest, default_models(), provider_id()
@@ -77,7 +81,10 @@ marionette/
 │   │   ├── mod.rs          # Provider trait, ChatOutcome, classify_http_status, force_refresh default
 │   │   ├── grok_cli.rs     # OAuth refresh + cli-chat-proxy.grok.com
 │   │   ├── qoder.rs        # COSY crypto, jobToken, stream/non-stream (~2k LOC)
-│   │   ├── blackbox.rs     # static sk- key → api.blackbox.ai (no refresh)
+│   │   ├── cline.rs        # api.cline.bot — OpenAI wire, workos: bearer
+│   │   ├── antigravity.rs  # Cloud Code Assist — Gemini wire + agent envelope
+│   │   ├── kiro.rs         # q.{region}.amazonaws.com — conversationState
+│   │   ├── kiro_event_stream.rs  # AWS binary EventStream codec (2x CRC32)
 │   │   └── qoder-baseprompt.json
 │   └── workers/
 │       ├── mod.rs
@@ -106,7 +113,7 @@ marionette/
 | Prod static | `MARIONETTE_STATIC_DIR` or auto `web/dist` if present |
 
 ```
-Client (OpenCode/curl)  Bearer pool key  →  /v1/*  →  pool  →  grok-cli | qoder
+Client (OpenCode/curl)  Bearer pool key  →  /v1/*  →  pool  →  grok-cli | qoder | commandcode | cline | antigravity | kiro | byok
 Admin UI / curl         Bearer admin key →  /admin/*
 ```
 
@@ -259,8 +266,10 @@ Error JSON shape:
 
 - starts with `gcli/` **or** `grok` **or** contains `grok` → `"grok-cli"`
 - starts with `qd/` **or** `qoder` → `"qoder"`
-- starts with `bb/` **or** `blackbox` → `"blackbox"` (branch **before** grok: upstream ids like `blackboxai/x-ai/grok-4.3` contain "grok")
-- starts with `fb/` **or** `freebuff` → `"freebuff"` (session-protocol upstream on codebuff.com)
+- starts with `cmc/` **or** `commandcode` → `"commandcode"`
+- starts with `cln/` **or** `cline` → `"cline"`
+- starts with `ag/` **or** `antigravity` → `"antigravity"`
+- starts with `kr/` **or** `kiro` → `"kiro"`
 - starts with `combo/` → virtual combo (no direct provider; `provider_id_for_model` returns None)
 - else → unknown model (400)
 
@@ -274,7 +283,6 @@ Error JSON shape:
 
 **Qoder:** `qd/auto`, `qd/ultimate`, `qd/performance`, `qd/efficient`, `qd/lite`, `qd/qmodel_preview` (Qwen3.8-Max-Preview), `qd/qmodel_latest`, `qd/qmodel1`, `qd/kmodel_latest` (Kimi-K3), `qd/kmodel1` (Kimi-K2.7-Code), `qd/gm51model1` (GLM-5.2), `qd/dmodel1`, `qd/dfmodel1`, `qd/mmodel` (MiniMax-M3) — one listed id per live upstream; legacy aliases (`qmodel`, `kmodel`, `gm51model`, …) still route in `model_cfg`
 
-**Blackbox:** `bb/z-ai/glm-5.2`, `bb/blackboxai/moonshotai/kimi-k3`, `bb/blackboxai/x-ai/grok-4.3`, `bb/blackboxai/openai/gpt-5.4`, `bb/blackboxai/anthropic/claude-sonnet-4.5`, `bb/blackboxai/google/gemini-3.5-flash`, `bb/blackboxai/blackbox-pro`, … (~20 curated ids from the live `api.blackbox.ai/v1/models` catalog) — bare `blackboxai/*` and `z-ai/*` upstream ids also route to blackbox
 
 **Freebuff:** `fb/mimo/mimo-v2.5` (default, unlimited fallback), `fb/deepseek/deepseek-v4-flash` (premium), `fb/deepseek/deepseek-v4-pro` (premium), `fb/openai/gpt-5.6-luna` (premium), `fb/z-ai/glm-5.2` (referral), `fb/anthropic/claude-fable-5` (trial), `fb/meta/muse-spark-1.2-contributor`, `fb/crof/kimi-k3-eco`, `fb/stealth/ox-alpha` (unmetered) — catalog refreshed 2026-08-22 from upstream source (minimax-m3 withdrawn); upstream ids keep inner slashes; session protocol on `www.codebuff.com` (sessions cached 30 min per account+model — creation consumes daily quota; default LB = sequential/session-affinity)
 
@@ -300,7 +308,7 @@ OpenAI request also passes through optional `tools` / `tool_choice` / `parallel_
 
 ### Concrete flow (`handle_concrete_chat`)
 
-1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok`, `qoder`, `blackbox`, or `byok`).
+1. Resolve `provider_id` from model; select `Arc<dyn Provider>` (`grok`, `qoder`, `commandcode`, `cline`, `antigravity`, `kiro`, or `byok`).
 2. Loop **up to 8** picks: `db::pick_account(pool, provider_id, &tried)`.
 3. Push account id to `tried`.
 4. `provider.ensure_fresh_auth(&mut account)` — on fail → `apply_provider_error` + next account.
@@ -409,7 +417,6 @@ Tables:
 
 - grok-cli: `accessToken`, `refreshToken`, `expiresAt`, `expiresIn`, `clientId`, `idToken`, …
 - qoder: `personalToken`, `securityOauthToken` / access job token, `userId`, `machineId`, `expireTime`, …
-- blackbox: `apiKey` (`sk-…` static key), `password` (signup password, kept for key re-creation)
 
 Always use `Account::data_json()` / `set_data_json` for new token JSON I/O.
 
@@ -527,7 +534,6 @@ Gate before claim-done: `cargo test` + preferably `just preflight`.
 | Path / host | Role |
 |-------------|------|
 | `…/grok-farm` | Farm Grok OAuth tokens |
-| `refs/novabox` | **Blackbox farm reference** (MIT) — signup→OTP→key-harvest flow; our `blackbox_farm` ports it with our CF temp-mail worker |
 | `…/etteum-pool` | Bun multi-provider; **Qoder reference** `src/proxy/providers/qoder.ts` |
 | VPS 9Router DB | token store to import from — not runtime dependency |
 | VPS `grok-refresh` | hygiene for 9Router grok rows |
@@ -574,9 +580,9 @@ Do not modify those repos unless the user explicitly asks.
 | 5.6 Grok billing endpoint | done (`GET /admin/accounts/{id}/grok-billing` → cli-chat-proxy.grok.com/v1/billing; Credits button in AccountList) |
 | 5.7 Bulk export PATs | done (`POST /admin/accounts/export-pats`; ExportPatModal; Export PAT button in qoder bulk bar; live e2e verified) |
 | 5.8 Combos / fallback | done (virtual `combo/<slug>` chat models; ordered 1–5 concrete targets tried serially, fall through pre-response only; `/admin/combos` CRUD + `{slug}/targets` PUT; ComboManager on Models page; active combos surface in `/v1/models`; `request_logs` combo cols + `attempt_trace`; combo error log `provider="combo"` no usage; 135 lib + 16 smoke pass; live e2e verified) |
-| 6 Blackbox provider + farm | code complete (provider `bb/`, static `sk-` keys, local classifier, `blackbox_farm` novabox-port w/ our CF temp-mail); live farm validation pending |
+| 6 Blackbox provider + farm | **RETIRED** — removed across the stack; `blackbox_farm` deleted |
 | 6.5 BYOK provider | code complete (`byok` static base-URL+API-key passthrough; `<slug>/<model>` routing; `POST /admin/byok` + auto/manual models fetch; slug-scoped picks; local classifier 401 cut / 429 seal / 402-403 fallen; dashboard Custom (BYOK)); 205 lib + 24 smoke pass |
-| 6.7 Freebuff provider | code complete (`fb/` native session-protocol port of `refs/freebuff2api`; static `cb_…` tokens; session cache w/ 30-min TTL + run-chain; Buffy envelope + `{data:…}` SSE unwrap; local classifier banned/country_blocked→cut, marker-drift→fallen, session-gate→fallen+evict, 429→sealed; dashboard Freebuff; NO farm); 237 lib + 31 smoke pass; **live e2e verified 2026-08-22** (device-code token → import → chat 200 first try) |
+| 6.7 Freebuff provider | **RETIRED** — removed across the stack (was `fb/` session-protocol port of `refs/freebuff2api`) |
 | 7 Deploy polish | partial (static serve exists; systemd optional) |
 
 Details: `docs/HANDOFF.md`.

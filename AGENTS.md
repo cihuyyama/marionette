@@ -3,7 +3,9 @@
 ## Mission
 A **Rust OpenAI-compatible proxy pool** with a React + Vite admin dashboard. Built to grow: providers, farms, integrations, and features are added as needed.
 
-Current providers: `grok-cli`, `qoder`, `blackbox`, `freebuff`, plus **BYOK** (user-supplied OpenAI-compatible endpoints).
+Current providers: `grok-cli`, `qoder`, `commandcode`, `cline`, `antigravity`, `kiro`, plus **BYOK** (user-supplied OpenAI-compatible endpoints).
+
+`freebuff` and `blackbox` were retired. All providers onboard by pasting a credential — browser automation stays in Python under `scripts/automation/`.
 
 ## Principles (not gates)
 - **Secrets never committed**: `.env`, `data/*.sqlite`, token dumps. **Mask tokens** in admin API responses.

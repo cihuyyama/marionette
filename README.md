@@ -1,17 +1,23 @@
 ﻿# Marionette
 
-**Thin Rust OpenAI-compatible proxy pool** for three providers — plus a dark admin SPA.
+**Thin Rust OpenAI-compatible proxy pool** — plus a dark admin SPA.
 
 | Provider | Model prefix | Auth |
 |----------|--------------|------|
 | **grok-cli** | `gcli/*`, bare `grok*` | OAuth access + refresh (`auth.x.ai`) |
 | **qoder** | `qd/*`, bare `qoder*` | PAT → jobToken / `securityOauthToken` |
-| **blackbox** | `bb/*`, bare `blackboxai/*` | static `sk-…` API key (no refresh) |
+| **commandcode** | `cmc/*` | static `user_…` API key (no refresh) |
+| **cline** | `cln/*` | WorkOS refresh token → `workos:` bearer |
+| **antigravity** | `ag/*` | Google OAuth PKCE (Cloud Code Assist) |
+| **kiro** | `kr/*` | AWS CodeWhisperer (4 paste-only families) |
+| **byok** | `<slug>/*` | user-supplied OpenAI-compatible endpoint |
+
+`freebuff` and `blackbox` are gone — retired across the stack.
 
 **One controller, many puppet accounts** — a focused pool, not a multi-provider zoo. No browser automation in the Rust binary.
 
 ```
-Client (OpenCode / curl)   Bearer pool key  →  /v1/*     →  pool  →  grok-cli | qoder | blackbox
+Client (OpenCode / curl)   Bearer pool key  →  /v1/*     →  pool  →  grok-cli | qoder | commandcode | cline | antigravity | kiro | byok
 Admin UI / curl            Bearer admin key →  /admin/*
 ```
 
@@ -30,6 +36,22 @@ Admin UI / curl            Bearer admin key →  /admin/*
 - Import from JSON / 9Router SQLite / 9Router backup (Settings UI or CLI)
 - **Automation** (Python, outside Rust): Qoder Camoufox farm + dudul inject, Grok relogin OAuth farm
 - Background Grok token refresh worker
+
+### Provider onboarding
+
+All three newer providers onboard by **pasting a credential** — no browser in
+the Rust binary, consistent with the rest of the project:
+
+| Provider | What you paste |
+|----------|----------------|
+| cline | WorkOS refresh token. `/auth/refresh` is a plain POST, so an RT alone bootstraps the account. |
+| antigravity | Google refresh token. The `cloudaicompanionProject` is provisioned automatically on first refresh. |
+| kiro | One of four families: `imported` (social RT), `idc` (RT + client id/secret), `external_idp` (exported JSON), `api_key`. |
+
+The browser-dependent Kiro flows — AWS device flow, social PKCE, Builder ID —
+are **not** ported. `external_idp` validates its token endpoint against a
+Microsoft allowlist, because the refresh posts the account's refresh token to
+whatever host the JSON names.
 
 ---
 
@@ -197,7 +219,6 @@ Browser work lives under `scripts/automation/` — **not** in the Rust binary.
 |---------|------|
 | [`scripts/automation/qoder_farm`](scripts/automation/qoder_farm/) | GSuite SSO → PAT → optional dudul inject |
 | [`scripts/automation/grok_farm`](scripts/automation/grok_farm/) | Relogin + PKCE OAuth for grok-cli |
-| [`scripts/automation/blackbox_farm`](scripts/automation/blackbox_farm/) | Signup (CF temp-mail OTP) → `sk-` API key harvest for blackbox |
 
 Start jobs from **Automation** in the UI (needs farm env + Python), or run packages from the CLI. Secrets stay in package-local `.env` / `accounts.txt` (gitignored).
 
