@@ -628,6 +628,10 @@ pub fn quota_kind_for_provider(provider: &str) -> &'static str {
     match provider {
         "grok-cli" => "tokens",
         "qoder" => "credits",
+        // The buddy family bills Tencent "credit" packages, not tokens, and the
+        // billing meter reports them per account - so the dashboard shows
+        // `N/M cr` on each row and sums them per provider.
+        "cb" | "cbcn" | "workbuddy" => "credits",
         "byok" => "none",
         "commandcode" => "none",
         "cline" => "none",
@@ -2950,6 +2954,14 @@ mod tests {
         assert_eq!(quota_kind_for_provider("grok-cli"), "tokens");
         assert_eq!(quota_kind_for_provider("byok"), "none");
         assert_eq!(quota_kind_for_provider("other"), "none");
+    }
+
+    #[test]
+    fn quota_kind_buddy_family_is_credits() {
+        // These bill Tencent credit packages reported per account, not tokens.
+        assert_eq!(quota_kind_for_provider("cb"), "credits");
+        assert_eq!(quota_kind_for_provider("cbcn"), "credits");
+        assert_eq!(quota_kind_for_provider("workbuddy"), "credits");
     }
 
     #[test]

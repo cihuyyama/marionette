@@ -1520,12 +1520,43 @@ function PlanLabel({ a, compact = false }: { a: Account; compact?: boolean }) {
   );
 }
 
+/// Provider-agnostic credit wording: qoder and the buddy family both bill
+/// credits, so the label follows the account's own provider rather than
+/// hardcoding one.
+const CREDIT_SOURCE_LABEL: Record<string, string> = {
+  qoder: "Qoder credits",
+  cb: "CodeBuddy credits",
+  cbcn: "CodeBuddy CN credits",
+  workbuddy: "WorkBuddy credits",
+};
+
+function creditSourceLabel(a: Account): string {
+  return CREDIT_SOURCE_LABEL[a.provider] ?? "Credits";
+}
+
+function fmtBuddyWindows(a: Account): string | null {
+  const raw = a.data?.quotaWindows;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const parts: string[] = [];
+  for (const w of raw) {
+    if (!w || typeof w !== "object") continue;
+    const label = typeof w.label === "string" ? w.label : "Pack";
+    const used = Number(w.used ?? 0);
+    const size = Number(w.size ?? 0);
+    const reset = typeof w.resetAt === "string" ? w.resetAt.slice(0, 10) : null;
+    parts.push(`${label} ${Math.round(used)}/${Math.round(size)}${reset ? ` (reset ${reset})` : ""}`);
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
+
 function fmtCreditTitle(a: Account): string {
   if (a.quota_kind === "credits") {
     if (!a.quota_limit) {
-      return "Qoder credits not synced yet — refresh account or run a chat";
+      return `${creditSourceLabel(a)} not synced yet — refresh account or run a chat`;
     }
-    const parts = [`Qoder credits ${fmtAccountCredit(a)} (OpenAPI)`];
+    const parts = [`${creditSourceLabel(a)} ${fmtAccountCredit(a)}`];
+    const windows = fmtBuddyWindows(a);
+    if (windows) parts.push(windows);
     const plan = readPlan(a);
     if (plan) parts.push(fmtPlanTitle(a));
     const free = readFree(a);
