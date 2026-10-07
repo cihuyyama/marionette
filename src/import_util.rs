@@ -22,7 +22,9 @@ use crate::db::{self, Account};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-pub const SUPPORTED_PROVIDERS: &[&str] = &["grok-cli", "qoder", "commandcode", "cline", "antigravity", "kiro"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &[
+    "grok-cli", "qoder", "commandcode", "cline", "antigravity", "kiro", "cb", "cbcn", "workbuddy",
+];
 
 /// Parse a 9Router full-backup JSON value and return accounts
 /// for supported providers only.
@@ -132,6 +134,7 @@ pub fn build_data(item: &Value, provider: &str) -> Result<Value, String> {
         "qoder" => build_qoder_data(item),
         "commandcode" => build_commandcode_data(item),
         "cline" => build_cline_data(item),
+        "cb" | "cbcn" | "workbuddy" => build_buddy_data(item, provider),
         "antigravity" => build_antigravity_data(item),
         "kiro" => build_kiro_data(item),
         _ => Err(format!("unsupported: {provider}")),
@@ -595,4 +598,36 @@ mod tests {
             "must NOT invent expireTime when absent"
         );
     }
+}
+
+/// Buddy-family import data. All three sites take the same credential pair;
+/// a bare refresh token is enough because the access token arrives on first
+/// refresh.
+fn build_buddy_data(item: &Value, provider: &str) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+    if let Some(rt) = item
+        .get("refreshToken")
+        .or_else(|| item.get("refresh_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("refreshToken".into(), json!(rt));
+    }
+    if let Some(at) = item
+        .get("accessToken")
+        .or_else(|| item.get("access_token"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("accessToken".into(), json!(at));
+    }
+    if out.is_empty() {
+        return Err(format!("{provider}: missing refreshToken (or accessToken)"));
+    }
+    // The access token is filled in by the first refresh; the empty placeholder
+    // keeps `needs_refresh` true without pretending we have credentials.
+    out.entry("accessToken").or_insert_with(|| json!(""));
+    Ok(Value::Object(out))
 }

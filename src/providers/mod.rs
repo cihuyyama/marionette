@@ -1,5 +1,6 @@
 pub mod byok;
 pub mod antigravity;
+pub mod buddy;
 pub mod client_version;
 pub mod cline;
 pub mod commandcode;

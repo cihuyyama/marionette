@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::farm::FarmManager;
 use crate::providers::byok::ByokProvider;
 use crate::providers::antigravity::AntigravityProvider;
+use crate::providers::buddy::BuddyProvider;
 use crate::providers::cline::ClineProvider;
 use crate::providers::commandcode::CommandCodeProvider;
 use crate::providers::grok_cli::GrokCliProvider;
@@ -24,6 +25,9 @@ pub struct AppState {
     pub qoder: Arc<QoderProvider>,
     pub byok: Arc<ByokProvider>,
     pub cline: Arc<ClineProvider>,
+    pub cb: Arc<BuddyProvider>,
+    pub cbcn: Arc<BuddyProvider>,
+    pub workbuddy: Arc<BuddyProvider>,
     pub antigravity: Arc<AntigravityProvider>,
     pub kiro: Arc<KiroProvider>,
     pub commandcode: Arc<CommandCodeProvider>,
@@ -54,6 +58,11 @@ impl AppState {
         let qoder = Arc::new(QoderProvider::new());
         let byok = Arc::new(ByokProvider::new());
         let cline = Arc::new(ClineProvider::new());
+        // One wire contract, three sites: the variants differ only in base URL,
+        // identity headers, and prompt policy.
+        let cb = Arc::new(BuddyProvider::codebuddy());
+        let cbcn = Arc::new(BuddyProvider::codebuddy_cn());
+        let workbuddy = Arc::new(BuddyProvider::workbuddy());
         let antigravity = Arc::new(AntigravityProvider::new());
         let kiro = Arc::new(KiroProvider::new());
         let commandcode = Arc::new(CommandCodeProvider::new());
@@ -66,6 +75,9 @@ impl AppState {
             qoder,
             byok,
             cline,
+            cb,
+            cbcn,
+            workbuddy,
             antigravity,
             kiro,
             commandcode,

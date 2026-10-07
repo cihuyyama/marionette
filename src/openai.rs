@@ -78,6 +78,12 @@ pub fn provider_id_for_model(model: &str) -> Option<&'static str> {
         Some("commandcode")
     } else if model.starts_with("cln/") || model.starts_with("cline") {
         Some("cline")
+    } else if model.starts_with("cb/") {
+        Some("cb")
+    } else if model.starts_with("cbcn/") {
+        Some("cbcn")
+    } else if model.starts_with("wb/") || model.starts_with("workbuddy") {
+        Some("workbuddy")
     } else if model.starts_with("ag/") || model.starts_with("antigravity") {
         Some("antigravity")
     } else if model.starts_with("kr/") || model.starts_with("kiro") {
@@ -201,6 +207,12 @@ fn cmc(id: &'static str, display: &'static str) -> ModelObject {
         true,
         false,
     )
+}
+
+/// Buddy-family public ids are `<prefix>/<upstream-id>`; the upstream id keeps
+/// its own slashes (upstream_model strips only the first segment).
+fn buddy(id: &'static str, provider: &'static str, display: &'static str) -> ModelObject {
+    model(id, provider, Some(id), Some(display), None, None, true, true, false)
 }
 
 /// Cline public ids are `cln/<upstream-id>`; upstream ids keep their own
@@ -489,6 +501,95 @@ pub fn default_models() -> ModelsResponse {
             cln("cln/openai/gpt-6.1-sol", "GPT-6.1 Sol (credit)"),
             cln("cln/spacexai/grok-4.7", "Grok 4.7 (credit)"),
             cln("cln/moonshotai/kimi-k3", "Kimi K3 (credit)"),
+            // CodeBuddy International and WorkBuddy share one roster; cbcn
+            // ships a smaller, partly different one (see below).
+            buddy("cb/auto", "cb", "auto"),
+            buddy("wb/auto", "workbuddy", "auto"),
+            buddy("cb/primary-model", "cb", "primary model"),
+            buddy("wb/primary-model", "workbuddy", "primary model"),
+            buddy("cb/claude-opus-4.6", "cb", "Claude OPUS 4.6"),
+            buddy("wb/claude-opus-4.6", "workbuddy", "Claude OPUS 4.6"),
+            buddy("cb/claude-opus-4.7-1m", "cb", "Claude OPUS 4.7 1M"),
+            buddy("wb/claude-opus-4.7-1m", "workbuddy", "Claude OPUS 4.7 1M"),
+            buddy("cb/claude-sonnet-4.6", "cb", "Claude SONNET 4.6"),
+            buddy("wb/claude-sonnet-4.6", "workbuddy", "Claude SONNET 4.6"),
+            buddy("cb/deepseek-v4.1-flash", "cb", "Deepseek v4.1 FLASH"),
+            buddy("wb/deepseek-v4.1-flash", "workbuddy", "Deepseek v4.1 FLASH"),
+            buddy("cb/deepseek-v4.1-flash-sg", "cb", "Deepseek v4.1 FLASH SG"),
+            buddy("wb/deepseek-v4.1-flash-sg", "workbuddy", "Deepseek v4.1 FLASH SG"),
+            buddy("cb/deepseek-v4.1-pro", "cb", "Deepseek v4.1 PRO"),
+            buddy("wb/deepseek-v4.1-pro", "workbuddy", "Deepseek v4.1 PRO"),
+            buddy("cb/gemini-2.5-flash-image", "cb", "Gemini 2.5 FLASH IMAGE"),
+            buddy("wb/gemini-2.5-flash-image", "workbuddy", "Gemini 2.5 FLASH IMAGE"),
+            buddy("cb/gemini-3.0-pro-image", "cb", "Gemini 3.0 PRO IMAGE"),
+            buddy("wb/gemini-3.0-pro-image", "workbuddy", "Gemini 3.0 PRO IMAGE"),
+            buddy("cb/gemini-3.1-flash-image", "cb", "Gemini 3.1 FLASH IMAGE"),
+            buddy("wb/gemini-3.1-flash-image", "workbuddy", "Gemini 3.1 FLASH IMAGE"),
+            buddy("cb/gemini-3.1-pro", "cb", "Gemini 3.1 PRO"),
+            buddy("wb/gemini-3.1-pro", "workbuddy", "Gemini 3.1 PRO"),
+            buddy("cb/gemini-3.5-flash", "cb", "Gemini 3.5 FLASH"),
+            buddy("wb/gemini-3.5-flash", "workbuddy", "Gemini 3.5 FLASH"),
+            buddy("cb/glm-5.3", "cb", "Glm 5.3"),
+            buddy("wb/glm-5.3", "workbuddy", "Glm 5.3"),
+            buddy("cb/glm-5.3-flash", "cb", "Glm 5.3 FLASH"),
+            buddy("wb/glm-5.3-flash", "workbuddy", "Glm 5.3 FLASH"),
+            buddy("cb/glm-5v-turbo", "cb", "Glm 5v TURBO"),
+            buddy("wb/glm-5v-turbo", "workbuddy", "Glm 5v TURBO"),
+            buddy("cb/gpt-5.3-codex", "cb", "Gpt 5.3 CODEX"),
+            buddy("wb/gpt-5.3-codex", "workbuddy", "Gpt 5.3 CODEX"),
+            buddy("cb/gpt-5.4", "cb", "Gpt 5.4"),
+            buddy("wb/gpt-5.4", "workbuddy", "Gpt 5.4"),
+            buddy("cb/gpt-5.5", "cb", "Gpt 5.5"),
+            buddy("wb/gpt-5.5", "workbuddy", "Gpt 5.5"),
+            buddy("cb/gpt-5.6-luna", "cb", "Gpt 5.6 LUNA"),
+            buddy("wb/gpt-5.6-luna", "workbuddy", "Gpt 5.6 LUNA"),
+            buddy("cb/gpt-5.6-sol", "cb", "Gpt 5.6 SOL"),
+            buddy("wb/gpt-5.6-sol", "workbuddy", "Gpt 5.6 SOL"),
+            buddy("cb/gpt-5.6-terra", "cb", "Gpt 5.6 TERRA"),
+            buddy("wb/gpt-5.6-terra", "workbuddy", "Gpt 5.6 TERRA"),
+            buddy("cb/gpt-6-astra", "cb", "Gpt 6 ASTRA"),
+            buddy("wb/gpt-6-astra", "workbuddy", "Gpt 6 ASTRA"),
+            buddy("cb/gpt-6.1-sol", "cb", "Gpt 6.1 SOL"),
+            buddy("wb/gpt-6.1-sol", "workbuddy", "Gpt 6.1 SOL"),
+            buddy("cb/gpt-image-2", "cb", "Gpt IMAGE 2"),
+            buddy("wb/gpt-image-2", "workbuddy", "Gpt IMAGE 2"),
+            buddy("cb/grok-4.6", "cb", "Grok 4.6"),
+            buddy("wb/grok-4.6", "workbuddy", "Grok 4.6"),
+            buddy("cb/grok-4.7", "cb", "Grok 4.7"),
+            buddy("wb/grok-4.7", "workbuddy", "Grok 4.7"),
+            buddy("cb/hy3", "cb", "hy3"),
+            buddy("wb/hy3", "workbuddy", "hy3"),
+            buddy("cb/hy4-preview", "cb", "hy4 PREVIEW"),
+            buddy("wb/hy4-preview", "workbuddy", "hy4 PREVIEW"),
+            buddy("cb/hy4-preview-f", "cb", "hy4 PREVIEW f"),
+            buddy("wb/hy4-preview-f", "workbuddy", "hy4 PREVIEW f"),
+            buddy("cb/kimi-k2.5", "cb", "Kimi k2.5"),
+            buddy("wb/kimi-k2.5", "workbuddy", "Kimi k2.5"),
+            buddy("cb/kimi-k2.6", "cb", "Kimi k2.6"),
+            buddy("wb/kimi-k2.6", "workbuddy", "Kimi k2.6"),
+            buddy("cb/kimi-k2.7", "cb", "Kimi k2.7"),
+            buddy("wb/kimi-k2.7", "workbuddy", "Kimi k2.7"),
+            buddy("cb/kimi-k2.8-preview", "cb", "Kimi k2.8 PREVIEW"),
+            buddy("wb/kimi-k2.8-preview", "workbuddy", "Kimi k2.8 PREVIEW"),
+            buddy("cb/kimi-k3", "cb", "Kimi k3"),
+            buddy("wb/kimi-k3", "workbuddy", "Kimi k3"),
+            buddy("cb/kimi-k3.1", "cb", "Kimi k3.1"),
+            buddy("wb/kimi-k3.1", "workbuddy", "Kimi k3.1"),
+            buddy("cb/minimax-m3", "cb", "Minimax m3"),
+            buddy("wb/minimax-m3", "workbuddy", "Minimax m3"),
+            // CodeBuddy CN roster.
+            buddy("cbcn/glm-5.3", "cbcn", "Glm 5.3"),
+            buddy("cbcn/glm-5.3-flash", "cbcn", "Glm 5.3 FLASH"),
+            buddy("cbcn/glm-5v-turbo", "cbcn", "Glm 5v TURBO"),
+            buddy("cbcn/minimax-m3", "cbcn", "Minimax m3"),
+            buddy("cbcn/kimi-k2.8-preview", "cbcn", "Kimi k2.8 PREVIEW"),
+            buddy("cbcn/kimi-k2.7", "cbcn", "Kimi k2.7"),
+            buddy("cbcn/kimi-k2.6", "cbcn", "Kimi k2.6"),
+            buddy("cbcn/kimi-k2.5", "cbcn", "Kimi k2.5"),
+            buddy("cbcn/kimi-k3-1", "cbcn", "Kimi k3 1"),
+            buddy("cbcn/hy3", "cbcn", "hy3"),
+            buddy("cbcn/hy4-preview", "cbcn", "hy4 PREVIEW"),
+            buddy("cbcn/deepseek-v4.1-flash", "cbcn", "Deepseek v4.1 FLASH"),
             ag("ag/claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ag("ag/claude-opus-4-6", "Claude Opus 4.6"),
             ag("ag/gemini-3-flash", "Gemini 3 Flash"),
