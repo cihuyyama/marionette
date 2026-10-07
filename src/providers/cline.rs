@@ -40,7 +40,6 @@ const REFRESH_URL: &str = "https://api.cline.bot/api/v1/auth/refresh";
 const ME_URL: &str = "https://api.cline.bot/api/v1/users/me";
 const PLAN_URL: &str = "https://api.cline.bot/api/v1/users/me/plan";
 const USAGE_LIMITS_URL: &str = "https://api.cline.bot/api/v1/users/me/plan/usage-limits";
-const RECOMMENDED_MODELS_PATH: &str = "/ai/cline/recommended-models";
 /// Version floors. Cartethyia resolves these live with these as fallback; we
 /// pin them rather than scraping two URLs at startup.
 const CLINE_CLIENT_VERSION: &str = "4.1.22";
@@ -50,48 +49,6 @@ pub const CLINE_PROVIDER: &str = "cline";
 
 /// Refresh window: refresh this long before the stated expiry.
 const REFRESH_LEAD_SECS: i64 = 300;
-
-/// Static catalog (mirrors Cartethyia `CLINE_MODELS`). The served catalog
-/// normally comes from two unauthenticated GETs; this is the offline floor.
-pub const CLINE_MODELS: &[(&str, i64, i64)] = &[
-    // Live roster as of 2026-10-06. `cline-free/*` is daily-reset and free;
-    // everything else bills the one-off signup credit.
-    ("cline-free/solar-mini4", 1_048_576, 131_072),
-    ("cline-free/mimo-v2.6-flash", 1_048_576, 131_072),
-    ("cline-free/muse-spark-1.3-contributor", 1_048_576, 943_718),
-    ("anthropic/claude-sonnet-5.5", 200_000, 64_000),
-    ("anthropic/claude-opus-5.5", 200_000, 64_000),
-    ("openai/gpt-6-astra", 400_000, 128_000),
-    ("openai/gpt-6.1-sol", 400_000, 128_000),
-    ("spacexai/grok-4.7", 500_000, 64_000),
-    ("moonshotai/kimi-k3", 256_000, 64_000),
-];
-
-/// One row of the live roster (`GET /ai/cline/recommended-models`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClineRecommendedModel {
-    pub id: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClineRecommendedPayload {
-    #[serde(default)]
-    pub recommended: Vec<ClineRecommendedModel>,
-    #[serde(default)]
-    pub free: Vec<ClineRecommendedModel>,
-    #[serde(default)]
-    #[serde(rename = "clinePass")]
-    pub cline_pass: Vec<ClineRecommendedModel>,
-    #[serde(default)]
-    #[serde(rename = "clineCloud")]
-    pub cline_cloud: Vec<ClineRecommendedModel>,
-}
 
 /// One billing window from `/users/me/plan/usage-limits`.
 ///
@@ -234,10 +191,6 @@ impl ClineProvider {
         format!("{BASE_URL}{CHAT_PATH}")
     }
 
-    fn recommended_models_url() -> String {
-        format!("{BASE_URL}{RECOMMENDED_MODELS_PATH}")
-    }
-
     /// Build the upstream body.
     ///
     /// Cline speaks stock Chat Completions, so the body is the request's own
@@ -340,27 +293,6 @@ impl ClineProvider {
         }
         serde_json::from_str::<Value>(&text)
             .map_err(|e| ProviderError::Upstream { status, body: format!("bad refresh json: {e}") })
-    }
-
-    /// Live model roster. Unauthenticated; failure yields `None` so the static
-    /// catalog keeps serving.
-    pub async fn fetch_recommended_models(&self) -> Option<Vec<ClineRecommendedModel>> {
-        let resp = self
-            .client
-            .get(Self::recommended_models_url())
-            .header("accept", "application/json")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let payload: ClineRecommendedPayload = resp.json().await.ok()?;
-        // Only the free + recommended buckets: persisting pass rows for an
-        // operator with no subscription yields entries that can only 401.
-        let mut out = payload.recommended;
-        out.extend(payload.free);
-        Some(out)
     }
 }
 
