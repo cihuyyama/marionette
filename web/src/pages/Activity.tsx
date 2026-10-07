@@ -266,6 +266,9 @@ export function ActivityPage() {
             <option value="cline">cline</option>
             <option value="antigravity">antigravity</option>
             <option value="kiro">kiro</option>
+            <option value="cb">cb</option>
+            <option value="cbcn">cbcn</option>
+            <option value="workbuddy">workbuddy</option>
           </select>
         </div>
       </div>

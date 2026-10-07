@@ -38,6 +38,10 @@ export function AddAccountModal({
     if (provider === "cline") return ["single", "tokens", "bulk"];
     if (provider === "antigravity") return ["single", "tokens", "bulk"];
     if (provider === "kiro") return ["single", "keys", "bulk"];
+    // The buddy family imports by refresh token; the access token arrives on
+    // the first refresh, so no access-token field is required.
+    if (provider === "cb" || provider === "cbcn" || provider === "workbuddy")
+      return ["single", "tokens", "bulk"];
     if (provider === "byok") return ["single"];
     return ["single", "bulk"];
   }, [provider]);
