@@ -83,11 +83,22 @@ pub fn classify_http_status(status: u16, body: &str) -> ProviderError {
         429 => ProviderError::RateLimited {
             retry_after_secs: None,
         },
-        _ => {
+        // Body-text heuristics apply to client errors only.
+        //
+        // They used to run for every other status, which meant a 5xx was
+        // classified from a substring match on its body: "Failed to generate
+        // response" contains "rate", so a transient upstream failure became
+        // RateLimited and sealed the account for cooldown_hours. A 5xx is
+        // never the account's fault, so it must stay `Upstream` and fall
+        // rather than seal.
+        400 | 404 => {
             let lower = body.to_lowercase();
             if lower.contains("invalid_grant") || lower.contains("invalid_request") {
                 ProviderError::AuthInvalid(body.chars().take(200).collect())
-            } else if lower.contains("rate") || lower.contains("quota") || lower.contains("limit") {
+            } else if lower.contains("rate")
+                || lower.contains("quota")
+                || lower.contains("limit")
+            {
                 ProviderError::RateLimited {
                     retry_after_secs: None,
                 }
@@ -98,5 +109,81 @@ pub fn classify_http_status(status: u16, body: &str) -> ProviderError {
                 }
             }
         }
+        _ => ProviderError::Upstream {
+            status,
+            body: body.chars().take(2000).collect(),
+        },
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(e: &ProviderError) -> Option<u16> {
+        match e {
+            ProviderError::Upstream { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn server_errors_are_never_classified_from_the_body() {
+        // A 5xx is not the account's fault. The body heuristic used to run for
+        // every status, so "Failed to generate response" matched "rate" and a
+        // transient upstream failure sealed the account for cooldown_hours.
+        for body in [
+            "Failed to generate response",
+            "moderate load, retry later",
+            "requested tokens exceed unlimited quota",
+            "upstream rate limit exceeded",
+        ] {
+            let e = classify_http_status(500, body);
+            assert_eq!(
+                status_of(&e),
+                Some(500),
+                "{body:?} on a 500 must stay Upstream, got {e:?}"
+            );
+        }
+        assert_eq!(status_of(&classify_http_status(502, "rate limited")), Some(502));
+        assert_eq!(status_of(&classify_http_status(503, "quota exceeded")), Some(503));
+    }
+
+    #[test]
+    fn client_errors_still_use_the_body() {
+        // The heuristic is still useful where the status alone is ambiguous.
+        assert!(matches!(
+            classify_http_status(400, "invalid_grant"),
+            ProviderError::AuthInvalid(_)
+        ));
+        assert!(matches!(
+            classify_http_status(400, "quota exceeded"),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            classify_http_status(400, "bad request"),
+            ProviderError::Upstream { status: 400, .. }
+        ));
+        assert!(matches!(
+            classify_http_status(404, "model not found"),
+            ProviderError::Upstream { status: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn status_codes_win_over_the_body() {
+        // These must keep matching on status even when the body says otherwise.
+        assert!(matches!(classify_http_status(401, "rate limit"), ProviderError::AuthExpired));
+        assert!(matches!(
+            classify_http_status(402, "limit"),
+            ProviderError::PaymentRequired
+        ));
+        assert!(matches!(
+            classify_http_status(403, "quota"),
+            ProviderError::AccessDenied
+        ));
+        assert!(matches!(
+            classify_http_status(429, "whatever"),
+            ProviderError::RateLimited { .. }
+        ));
     }
 }
