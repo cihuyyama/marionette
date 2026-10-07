@@ -101,6 +101,14 @@ impl Variant {
     fn refresh_url(&self) -> String {
         format!("{}/v2/plugin/auth/token/refresh", self.base.trim_end_matches("/v2"))
     }
+
+    /// Tencent billing meter. All three sites expose the same path shape; the
+    /// CodeBuddy bases already carry the version segment, so only WorkBuddy
+    /// needs one joined on.
+    fn usage_url(&self) -> String {
+        let root = self.base.trim_end_matches("/v2");
+        format!("{root}/v2/billing/meter/get-user-resource")
+    }
 }
 
 /// The intl roster shared by CodeBuddy International and WorkBuddy.
@@ -332,6 +340,36 @@ impl BuddyProvider {
         }
         normalize_tool_names(&mut body);
         body
+    }
+
+
+    /// Billing-meter headers. The account UID travels in `x-user-id`.
+    fn quota_headers(&self, token: &str, uid: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut h = vec![
+            ("content-type", "application/json".to_string()),
+            ("accept", "application/json".to_string()),
+            ("authorization", format!("Bearer {token}")),
+            ("user-agent", self.variant.user_agent.to_string()),
+            ("x-product", self.variant.product.to_string()),
+            ("x-ide-type", self.variant.ide.to_string()),
+            ("x-ide-name", self.variant.ide.to_string()),
+            ("x-domain", self.variant.domain.to_string()),
+            ("x-requested-with", "XMLHttpRequest".to_string()),
+            ("x-codebuddy-request", "1".to_string()),
+        ];
+        if let Some(u) = uid {
+            h.push(("x-user-id", u.to_string()));
+        }
+        h
+    }
+
+    /// Account UID: the access token's `sub` claim, matching the reference
+    /// implementation rather than a second accounts call.
+    fn uid_of(token: &str) -> Option<String> {
+        let claims = token.split('.').nth(1)?;
+        let decoded = base64_decode_url(claims)?;
+        let v: Value = serde_json::from_slice(&decoded).ok()?;
+        v.get("sub").and_then(|s| s.as_str()).map(|s| s.to_string())
     }
 
     /// Refresh: `POST .../token/refresh` with the token in a header and `{}` as
@@ -586,6 +624,56 @@ impl Provider for BuddyProvider {
         obj.insert("expiresAt".into(), json!(Utc::now().timestamp() + expires_in));
         account.set_data_json(&next);
         account.last_error = None;
+        Ok(())
+    }
+
+    async fn sync_quota(&self, account: &mut Account) -> Result<(), ProviderError> {
+        let data = account.data_json();
+        let Some(token) = Self::access_token_of(&data).filter(|t| !t.is_empty()) else {
+            // No access token yet: the first refresh has not happened, so there
+            // is nothing to bill against and a call would only 401.
+            return Ok(());
+        };
+        let uid = Self::uid_of(&token);
+        let body = json!({
+            "ProductCode": "p_tcaca",
+            "Status": [0, 3],
+            "PackageStartTime": "1970-01-01 00:00:00",
+            "PackageEndTime": "2071-01-01 00:00:00",
+        });
+        let mut r = Client::new().post(self.variant.usage_url()).json(&body);
+        for (k, v) in self.quota_headers(&token, uid.as_deref()) {
+            r = r.header(k, v);
+        }
+        let resp = r.send().await.map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            // A rejected credential is not a hard failure of the sync.
+            return Ok(());
+        }
+        let payload: Value = resp.json().await.unwrap_or(json!({}));
+        if payload.get("code").and_then(|c| c.as_i64()) != Some(0) {
+            return Ok(());
+        }
+        let accounts = payload
+            .get("data")
+            .and_then(|d| d.get("Response"))
+            .and_then(|r| r.get("Data"))
+            .and_then(|d| d.get("Accounts"))
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if accounts.is_empty() {
+            return Ok(());
+        }
+        let (limit, remaining, windows) = reduce_billing(&accounts);
+        account.quota_limit = limit;
+        account.quota_remaining = remaining;
+        let mut next = data.clone();
+        if let Some(obj) = next.as_object_mut() {
+            obj.insert("quotaWindows".into(), Value::Array(windows));
+        }
+        account.set_data_json(&next);
         Ok(())
     }
 
@@ -1026,5 +1114,289 @@ mod sse_tests {
     fn empty_stream_yields_an_empty_choice_not_an_error() {
         let v = reaggregate_sse("", "auto");
         assert_eq!(v["choices"][0]["message"]["content"], "");
+    }
+}
+
+/// Read a billing timestamp.
+///
+/// The upstream mixes units within one payload: `CycleEndTime` arrives as a
+/// `"2026-10-14 14:10:32"` string while `DeductionEndTime` arrives as epoch
+/// milliseconds. Values under 1e12 are read as seconds.
+fn parse_billing_time(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Number(n) => {
+            let n = n.as_f64()?;
+            if !n.is_finite() {
+                return None;
+            }
+            let ms = if n < 1e12 { n * 1000.0 } else { n };
+            chrono::DateTime::from_timestamp((ms / 1000.0) as i64, 0).map(|d| d.to_rfc3339())
+        }
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return None;
+            }
+            if let Ok(n) = t.parse::<f64>() {
+                let ms = if n < 1e12 { n * 1000.0 } else { n };
+                return chrono::DateTime::from_timestamp((ms / 1000.0) as i64, 0).map(|d| d.to_rfc3339());
+            }
+            // "YYYY-MM-DD HH:MM:SS" - the space form the upstream uses, which
+            // chrono does not accept as RFC3339.
+            //
+            // These strings are Beijing wall-clock, not UTC: for every pack in
+            // a live payload the string sits exactly 8h ahead of the same
+            // package's `DeductionEndTime` epoch-ms field. Reading them as UTC
+            // shifts each reset time by 8h and, because the refill/bonus split
+            // is a subtraction of the two, misclassifies packs near the 2-day
+            // boundary.
+            let normalized = t.replace(' ', "T");
+            match chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S") {
+                Ok(dt) => {
+                    let utc = dt - chrono::Duration::hours(8);
+                    Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(utc, chrono::Utc).to_rfc3339())
+                }
+                Err(_) => chrono::DateTime::parse_from_rfc3339(t).ok().map(|d| d.to_rfc3339()),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Prefer the exact `*Precise` field, fall back to the lossy numeric one.
+fn billing_num(obj: &Value, precise: &str, plain: &str) -> f64 {
+    let v = obj.get(precise).filter(|v| !v.is_null()).or_else(|| obj.get(plain));
+    v.and_then(|v| match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+    .filter(|n| n.is_finite())
+    .unwrap_or(0.0)
+}
+
+/// Seconds between two billing timestamps, 0 when either is unparseable.
+fn gap_secs(a: &Value, b: &Value) -> i64 {
+    match (parse_billing_time(a), parse_billing_time(b)) {
+        (Some(x), Some(y)) => {
+            let xa = chrono::DateTime::parse_from_rfc3339(&x).ok();
+            let yb = chrono::DateTime::parse_from_rfc3339(&y).ok();
+            match (xa, yb) {
+                (Some(x), Some(y)) => (y - x).num_seconds(),
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// A package whose deduction end trails the cycle end by more than this is a
+/// bonus rather than a refill window.
+const REFILL_GAP_SECS: i64 = 2 * 24 * 60 * 60;
+
+/// One summed credit window, shaped for the dashboard's quota columns.
+fn window_json(label: &str, used: f64, size: f64, reset: Option<String>) -> Value {
+    let remaining = (size - used).max(0.0);
+    let mut w = json!({
+        "label": label,
+        "used": used,
+        "size": size,
+        "remaining": remaining,
+        "percent": if size > 0.0 { (remaining / size * 100.0).round() } else { 0.0 },
+    });
+    if let Some(r) = reset {
+        w["resetAt"] = json!(r);
+    }
+    w
+}
+
+/// Split the Tencent billing `Accounts[]` into refill and bonus windows and
+/// reduce them to the two numbers the dashboard shows.
+///
+/// A package is a refill window when its deduction end trails its cycle end by
+/// more than two days; everything else is a finite bonus pack. Refills are
+/// summed by cadence label, bonuses by name, because the upstream emits one row
+/// per granted pack and there can be many with the same label.
+fn reduce_billing(accounts: &[Value]) -> (i64, i64, Vec<Value>) {
+    let mut refill: std::collections::BTreeMap<String, (f64, f64, Option<String>)> =
+        std::collections::BTreeMap::new();
+    let mut bonus: std::collections::BTreeMap<String, (f64, f64)> = std::collections::BTreeMap::new();
+
+    for acc in accounts {
+        let name = acc
+            .get("PackageName")
+            .or_else(|| acc.get("SubProductName"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("Package")
+            .to_string();
+        let used = billing_num(acc, "CycleCapacityUsedPrecise", "CycleCapacityUsed");
+        let size = billing_num(acc, "CycleCapacitySizePrecise", "CycleCapacitySize");
+        let life_used = billing_num(acc, "CapacityUsedPrecise", "CapacityUsed");
+        let life_size = billing_num(acc, "CapacitySizePrecise", "CapacitySize");
+        let reset = parse_billing_time(acc.get("CycleEndTime").unwrap_or(&Value::Null));
+
+        if gap_secs(
+            acc.get("CycleEndTime").unwrap_or(&Value::Null),
+            acc.get("DeductionEndTime").unwrap_or(&Value::Null),
+        ) > REFILL_GAP_SECS
+        {
+            let cadence = refill_cadence(acc).unwrap_or_else(|| name.clone());
+            let entry = refill.entry(cadence).or_insert((0.0, 0.0, None));
+            entry.0 += used;
+            entry.1 += size;
+            if entry.2.is_none() {
+                entry.2 = reset.clone();
+            }
+        } else {
+            let entry = bonus.entry(name).or_insert((0.0, 0.0));
+            entry.0 += if life_used > 0.0 { life_used } else { used };
+            entry.1 += if life_size > 0.0 { life_size } else { size };
+        }
+    }
+
+    let mut windows: Vec<Value> = Vec::new();
+    for (label, (used, size, reset)) in refill {
+        windows.push(window_json(&label, used, size, reset));
+    }
+    for (i, (label, (used, size))) in bonus.iter().enumerate() {
+        let mut w = window_json(&format!("Bonus Pack {}", i + 1), *used, *size, None);
+        w["label"] = json!(format!("{label} (bonus)"));
+        windows.push(w);
+    }
+
+    // The headline number is everything still spendable, refill plus bonus.
+    let total_size: f64 = windows.iter().filter_map(|w| w["size"].as_f64()).sum();
+    let total_used: f64 = windows.iter().filter_map(|w| w["used"].as_f64()).sum();
+    let remaining = (total_size - total_used).max(0.0);
+    (total_size.round() as i64, remaining.round() as i64, windows)
+}
+
+/// Cadence label from a refill cycle's own span.
+fn refill_cadence(acc: &Value) -> Option<String> {
+    let start = parse_billing_time(acc.get("CycleStartTime").unwrap_or(&Value::Null))?;
+    let end = parse_billing_time(acc.get("CycleEndTime").unwrap_or(&Value::Null))?;
+    let s = chrono::DateTime::parse_from_rfc3339(&start).ok()?;
+    let e = chrono::DateTime::parse_from_rfc3339(&end).ok()?;
+    let days = (e - s).num_days();
+    Some(if days <= 1 {
+        "Daily".into()
+    } else if days <= 7 {
+        "Weekly".into()
+    } else {
+        "Monthly".into()
+    })
+}
+
+/// URL-safe base64 decode without padding requirements.
+fn base64_decode_url(input: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let mut s = input.to_string();
+    while !s.len().is_multiple_of(4) {
+        s.push('=');
+    }
+    let padded = s;
+    base64::engine::general_purpose::URL_SAFE.decode(padded).ok()
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    /// The real payload shape, including the unit mismatch: `CycleEndTime` is a
+    /// `"YYYY-MM-DD HH:MM:SS"` string while `DeductionEndTime` is epoch ms.
+    fn sample_accounts() -> Vec<Value> {
+        json!([
+          {
+            "PackageName": "Bonus Pack",
+            "CycleCapacityUsedPrecise": "1.13", "CycleCapacitySizePrecise": "250",
+            "CapacityUsedPrecise": "1.13", "CapacitySizePrecise": "250",
+            "CycleStartTime": "2026-09-30 14:10:33", "CycleEndTime": "2026-10-14 14:10:32",
+            "DeductionEndTime": 1791958232000i64
+          },
+          {
+            "PackageName": "Free Plan Subscription",
+            "CycleCapacityUsedPrecise": "0", "CycleCapacitySizePrecise": "100",
+            "CapacityUsedPrecise": "0", "CapacitySizePrecise": "100",
+            "CycleStartTime": "2026-10-01 00:00:00", "CycleEndTime": "2026-10-31 23:59:59",
+            "DeductionEndTime": 2051158233000i64
+          }
+        ])
+        .as_array()
+        .expect("array")
+        .clone()
+    }
+
+    #[test]
+    fn billing_time_parses_both_units() {
+        // Beijing wall-clock: 14:10:32 +08 == 06:10:32Z, matching the same
+        // package's DeductionEndTime of 1791958232000.
+        assert_eq!(
+            parse_billing_time(&json!("2026-10-14 14:10:32")),
+            Some("2026-10-14T06:10:32+00:00".to_string())
+        );
+        // 1791958232000 ms really is 06:10:32Z - `DeductionEndTime` is not the
+        // same instant as the `CycleEndTime` string above, so this asserts the
+        // epoch branch rather than equality with the string branch.
+        assert_eq!(
+            parse_billing_time(&json!(1791958232000i64)),
+            Some("2026-10-14T06:10:32+00:00".to_string())
+        );
+        // Sub-1e12 values are seconds, not milliseconds.
+        assert_eq!(
+            parse_billing_time(&json!(1791958232i64)),
+            Some("2026-10-14T06:10:32+00:00".to_string())
+        );
+        assert_eq!(parse_billing_time(&json!(null)), None);
+    }
+
+    #[test]
+    fn precise_field_wins_over_the_lossy_one() {
+        let acc = json!({"CycleCapacityUsedPrecise": "1.13", "CycleCapacityUsed": 1});
+        assert_eq!(billing_num(&acc, "CycleCapacityUsedPrecise", "CycleCapacityUsed"), 1.13);
+    }
+
+    #[test]
+    fn refill_and_bonus_are_split_by_the_two_day_gap() {
+        // "Free Plan" expires 2051-ish while its cycle ends 2026-10-31, so it is
+        // a bonus; the first pack's deduction ends within the cycle, so it is a
+        // refill window.
+        let (limit, remaining, windows) = reduce_billing(&sample_accounts());
+        assert_eq!(limit, 350, "250 refill + 100 bonus");
+        assert_eq!(remaining, 349, "1.13 used rounds to 1");
+        assert!(windows.iter().any(|w| w["label"].as_str().unwrap_or("").contains("bonus")));
+    }
+
+    #[test]
+    fn cadence_is_derived_from_the_cycle_span() {
+        let monthly = json!({"CycleStartTime":"2026-10-01 00:00:00","CycleEndTime":"2026-10-31 00:00:00"});
+        assert_eq!(refill_cadence(&monthly), Some("Monthly".into()));
+        let daily = json!({"CycleStartTime":"2026-10-01 00:00:00","CycleEndTime":"2026-10-02 00:00:00"});
+        assert_eq!(refill_cadence(&daily), Some("Daily".into()));
+    }
+
+    #[test]
+    fn usage_url_is_versioned_once() {
+        assert_eq!(
+            BuddyProvider::codebuddy().variant.usage_url(),
+            "https://www.codebuddy.ai/v2/billing/meter/get-user-resource"
+        );
+        assert_eq!(
+            BuddyProvider::workbuddy().variant.usage_url(),
+            "https://www.workbuddy.ai/v2/billing/meter/get-user-resource"
+        );
+    }
+
+    #[test]
+    fn uid_comes_from_the_access_token_sub_claim() {
+        // A JWT whose payload claims sub = "abc-123".
+        let payload = base64_encode_url(br#"{"sub":"abc-123"}"#);
+        let token = format!("header.{payload}.sig");
+        assert_eq!(BuddyProvider::uid_of(&token), Some("abc-123".to_string()));
+    }
+
+    fn base64_encode_url(input: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
     }
 }

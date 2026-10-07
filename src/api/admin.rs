@@ -133,6 +133,9 @@ pub async fn patch_provider_settings(
         && provider != "cline"
         && provider != "antigravity"
         && provider != "kiro"
+        && provider != "cb"
+        && provider != "cbcn"
+        && provider != "workbuddy"
     {
         return Err(AppError::BadRequest(format!("unknown provider: {provider}")));
     }
@@ -490,6 +493,32 @@ pub async fn refresh_account(
             state
                 .kiro
                 .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+        }
+        // The buddy family refreshes the same way and then reads the billing
+        // meter, so one click updates both the credential and the credit shown.
+        "cb" => {
+            state.cb.ensure_fresh_auth(&mut acc).await.map_err(AppError::from)?;
+            state.cb.sync_quota(&mut acc).await.map_err(AppError::from)?;
+        }
+        "cbcn" => {
+            state
+                .cbcn
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+            state.cbcn.sync_quota(&mut acc).await.map_err(AppError::from)?;
+        }
+        "workbuddy" => {
+            state
+                .workbuddy
+                .ensure_fresh_auth(&mut acc)
+                .await
+                .map_err(AppError::from)?;
+            state
+                .workbuddy
+                .sync_quota(&mut acc)
                 .await
                 .map_err(AppError::from)?;
         }
